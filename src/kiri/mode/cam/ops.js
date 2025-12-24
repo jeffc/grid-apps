@@ -10,6 +10,7 @@ import { OpIndex } from './op-index.js';
 import { OpLaserOff } from './op-laser-off.js';
 import { OpLaserOn } from './op-laser-on.js';
 import { OpLathe } from './op-lathe.js';
+import { OpFourAxis } from './op-four-axis.js';
 import { OpLevel } from './op-level.js';
 import { OpOutline } from './op-outline.js';
 import { OpPocket } from './op-pocket.js';
@@ -24,6 +25,7 @@ export const ops = {
     "contour":   OpContour,
     "drill":     OpDrill,
     "flip":      CamOp,
+    "four axis": OpFourAxis,
     "gcode":     OpGCode,
     "helical":   OpHelical,
     "index":     OpIndex,

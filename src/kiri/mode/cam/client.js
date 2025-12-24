@@ -124,6 +124,7 @@ function updateAxisMode(refresh) {
     const showNonIndexed = env.isIndexed ? 'none' : '';
     $('cam-index').style.display = showIndexed;
     $('cam-lathe').style.display = showIndexed;
+    $('cam-four-axis').style.display = showIndexed;
     $('cam-flip').style.display = showNonIndexed;
     $('cam-reg').style.display = showNonIndexed;
     if (!changed) {
@@ -206,6 +207,12 @@ const opAddContour = (axis) => {
 
 const opAddLathe = (axis) => {
     let rec = env.popOp.lathe.new();
+    rec.axis = axis.toUpperCase();
+    opAdd(rec);
+};
+
+const opAddFourAxis = (axis) => {
+    let rec = env.popOp["four axis"].new();
     rec.axis = axis.toUpperCase();
     opAdd(rec);
 };
@@ -330,10 +337,10 @@ export function opRender() {
             indexing = false;
         }
         let el = $(id);
-        if (!env.isIndexed && type === 'lathe') {
+        if (!env.isIndexed && (type === 'lathe' || type === 'four axis')) {
             rec.disabled = true;
         }
-        if (!hasSharedArrays && (type === 'contour' || type === 'lathe')) {
+        if (!hasSharedArrays && (type === 'contour' || type === 'lathe' || type === 'four axis')) {
             rec.disabled = true;
         }
         if (rec.disabled) {
@@ -757,22 +764,21 @@ export function init() {
             case "level": return opAddLevel();
             case "rough": return opAddRough();
             case "outline": return opAddOutline();
-            case "contour":
-                let caxis = "X";
-                for (let op of env.current.process.ops) {
-                    if (op.type === "contour" && op.axis === "X") {
-                        caxis = "Y";
-                    }
-                }
-                return opAddContour(caxis);
-            case "lathe":
-                let laxis = "X";
-                for (let op of env.current.process.ops) {
-                    if (op.type === "lathe" && op.axis === "X") {
-                        laxis = "Y";
-                    }
-                }
-                return opAddLathe(laxis);
+            case "contour": {
+                let last = env.current.process.ops.filter(op => op.type === 'contour').pop();
+                let axis = last ? (last.axis === 'X' ? 'Y' : 'X') : 'X';
+                return opAddContour(axis);
+            }
+            case "lathe": {
+                let last = env.current.process.ops.filter(op => op.type === 'lathe').pop();
+                let axis = last ? (last.axis === 'X' ? 'Y' : 'X') : 'X';
+                return opAddLathe(axis);
+            }
+            case "four axis": {
+                let last = env.current.process.ops.filter(op => op.type === 'four axis').pop();
+                let axis = last ? (last.axis === 'X' ? 'Y' : 'X') : 'X';
+                return opAddFourAxis(axis);
+            }
             case "register": return opAddRegister('X', 2);
             case "drill": return opAddDrill();
             case "trace": return opAddTrace();
