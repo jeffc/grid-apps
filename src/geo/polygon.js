@@ -1068,11 +1068,11 @@ export class Polygon {
         return this;
     }
 
-    rotate(degrees) {
+    rotate(degrees, cx = 0, cy = 0) {
         let rad = degrees * DEG2RAD;
         if (rad)
         this.points = this.points.map(p => {
-            let [ x, y ] = base.util.rotate(p.x, p.y, rad);
+            let [ x, y ] = base.util.rotate(p.x, p.y, rad, cx, cy);
             p.x = x;
             p.y = y;
             return p;

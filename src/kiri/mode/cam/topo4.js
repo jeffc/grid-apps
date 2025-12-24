@@ -20,7 +20,7 @@ function scale(fn, factor = 1, base = 0) {
 export class Topo {
     constructor() { }
 
-    async generate(opt = {}) {
+    async generate(opt = {}, computeFourAxis = false) {
         let { state, op, onupdate, ondone } = opt;
         let { widget, settings, tabs, color } = state;
         let { controller, process } = settings;
@@ -81,10 +81,16 @@ export class Topo {
             range.max = Math.max(range.max, slice.z);
         }
 
-        const lathe = await this.lathe(scale(onupdate, parts[1], parts[0]));
-
         onupdate(1, "lathe");
-        ondone(lathe);
+        if (computeFourAxis) {
+          console.log("should four axis");
+          const fourAxis = await this.fourAxis(scale(onupdate, parts[1], parts[0]));
+          ondone(fourAxis);
+        } else {
+          console.log("should lathe");
+          const lathe = await this.lathe(scale(onupdate, parts[1], parts[0]));
+          ondone(lathe);
+        }
         // ondone([...slices, ...lathe]);
 
         return this;
@@ -142,14 +148,14 @@ export class Topo {
             });
         }
 
-        // console.log({
-        //     shards,
-        //     step: stepWidth,
-        //     range,
-        //     resolution,
-        //     slices: slices.slice(),
-        //     minions
-        // });
+        console.log({
+            shards,
+            step: stepWidth,
+            range,
+            resolution,
+            slices: slices.slice(),
+            minions
+        });
 
         if (minions?.running > 1) {
             return await this.sliceMinions(onupdate);
@@ -322,6 +328,11 @@ export class Topo {
         }
     }
 
+    async fourAxis(onupdate) {
+      return await this.fourAxisWorker(onupdate);
+    }
+
+
     async latheGPU(onupdate) {
         return this.gpu_slices;
     }
@@ -482,6 +493,136 @@ export class Topo {
         return paths;
     }
 
+    async fourAxisWorker(onupdate) {
+      const { sliced, tool, zoff, leave, linear } = this;
+
+      console.log(`Four axis slicing: ${sliced.length} slices`);
+
+      /* TODO - re-home this function */
+			/**
+			 * Resample a closed contour so points are evenly spaced.
+			 *
+			 * @param {Polygon} poly - input contour (must be closed)
+			 * @param {number} spacing - desired spacing between samples (units of pts)
+			 * @param {boolean} includeOriginals - whether to also include the
+       *     original points in the output.
+			 * @returns {Polygon} contour with resampled points (new points, does not mutate input)
+			 */
+      let resampleClosedContour = (poly, spacing, includeOriginals = true) => {
+        if (!poly || !poly.points) return newPolygon();
+        const pts = poly.points;
+        if (!Array.isArray(pts) || pts.length === 0) return [];
+
+        if (spacing <= 0) throw new Error("spacing must be > 0");
+
+        // helper: distance between two points
+        const dist3 = (a, b) => Math.sqrt(Math.pow(b.x - a.x, 2) +  Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2));
+
+        // Build segment list
+        const segs = [];
+        const n = pts.length;
+        if (n === 1) return [ { x: pts[0].x, y: pts[0].y, z: pts[0].z } ];
+
+        for (let i = 0; i < n - 1; i++) {
+          segs.push({ a: pts[i], b: pts[i + 1], len: dist3(pts[i], pts[i + 1]) });
+        }
+        segs.push({ a: pts[n - 1], b: pts[0], len: dist3(pts[n - 1], pts[0]) });
+
+        const total = segs.reduce((s, x) => s + x.len, 0);
+        if (total === 0) return [ { x: pts[0].x, y: pts[0].y, z: pts[0].z } ];
+
+        // If spacing larger than length:
+        if (spacing >= total) {
+          // Return one representative point or optionally return original first point
+          return [ { x: pts[0].x, y: pts[0].y, z: pts[0].z } ];
+        }
+
+        // Determine sample positions along length (distances from start)
+        let sampleCount = Math.floor(total / spacing) + 1; // includes the 0 position
+
+        let positions = new Array();;
+        for (let i = 0; i < sampleCount; i++) {
+          positions.push(i * spacing);
+        }
+
+        // if we're including original points, add them in too.
+        if (includeOriginals) {
+          let accum = 0;
+          for (let seg of segs) {
+            accum += seg.len;
+            positions.push(accum);
+          }
+          positions = positions.sort((a,b) => a-b).filter((x, i, a) => a.indexOf(x) === i);
+        }
+
+        // Interpolate samples
+        const result = [];
+        let segIndex = 0;
+        let segAccum = 0; // length before current segment
+        for (let pos of positions) {
+          // clamp for numeric round-off
+          if (pos > total) pos = total;
+
+          // Advance segIndex until pos is on current segment
+          while (segIndex < segs.length && segAccum + segs[segIndex].len < pos - 1e-12) {
+            segAccum += segs[segIndex].len;
+            segIndex++;
+          }
+          // If we've gone beyond last seg (can happen due to rounding), clamp to last
+          if (segIndex >= segs.length) segIndex = segs.length - 1;
+
+          const seg = segs[segIndex];
+          const segLen = seg.len || 1e-12;
+          const t = Math.max(0, Math.min(1, (pos - segAccum) / segLen));
+          // linear interpolation of x,y,z
+          const x = seg.a.x + (seg.b.x - seg.a.x) * t;
+          const y = seg.a.y + (seg.b.y - seg.a.y) * t;
+          const z = seg.a.z + (seg.b.z - seg.a.z) * t;
+
+          result.push({ x, y, z });
+        }
+
+        let outPoly = newPolygon();
+        outPoly.addPoints(result.map((p) => newPoint(p.x, p.y, p.z)));
+        outPoly.setClosed();
+        return outPoly;
+      };
+
+      let sidx = 0;
+			for (const slice of sliced) {
+				// The 'slice.tops' property contains an array of Polygon objects
+				const contours = slice.tops;
+
+        sidx++;
+
+        // if this slice doesn't have any, keep going
+				if (!contours || contours.length === 0) {
+					continue;
+				}
+
+        // resample contours with a uniform spacing
+        const resampledContours = contours.map((con) => {
+          const c = con.poly;
+          // TODO - change 1 to configurable resample distance
+          return resampleClosedContour(c, 5);
+        });
+
+				for (const contour of resampledContours) {
+          // skip degenerate/empty contours
+          if (!contour.points) {
+            continue;
+          }
+          if (sidx == 200) {
+            slice.output().setLayer("4th axis resampled", {line: 0xff00ff}).addPoly(contour);
+          }
+					for (const point of contour.points) {
+						// process each point of the contour
+					}
+				}
+			}
+			return sliced;
+    }
+
     async latheMinions(onupdate) {
         const { sliced, tool, zoff, leave, maxo, zBottom, step, resolution, linear } = this;
         const { putCache, clearCache, queue } = this;
@@ -595,6 +736,6 @@ export function rotatePoints(lines, rot) {
     new THREE.BufferAttribute(lines, 3).applyMatrix4(rot);
 }
 
-export async function generate(opt) {
-    return new Topo().generate(opt);
+export async function generate(opt, computeFourAxis) {
+    return new Topo().generate(opt, computeFourAxis);
 };

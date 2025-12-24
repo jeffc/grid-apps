@@ -171,16 +171,18 @@ function sqr(v) {
 }
 
 /**
- * Rotate a 2D point around the origin by radians
+ * Rotate a 2D point around the origin or another point by radians
  * @param {number} x - X coordinate
  * @param {number} y - Y coordinate
  * @param {number} radians - Rotation angle in radians
+ * @param {number} cx - The optional center of rotation x coordinate
+ * @param {number} cy - The optional center of rotation y coordinate
  * @returns {number[]} Rotated [x, y] coordinates
  */
-function rotate(x,y,radians) {
+function rotate(x,y,radians,cx=0, cy=0) {
     return [
-        x * Math.cos(radians) - y * Math.sin(radians),
-        y * Math.cos(radians) + x * Math.sin(radians)
+        (x - cx) * Math.cos(radians) - (y - cy) * Math.sin(radians) + cx,
+        (y - cy) * Math.cos(radians) + (x - cx) * Math.sin(radians) + cy
     ];
 }
 

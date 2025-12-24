@@ -49,7 +49,7 @@ class OpFourAxis extends CamOp {
                 this.slices = slices;
                 addSlices(slices, false);
             }
-        });
+        }, true);
     }
 
     prepare(ops, progress) {
