@@ -1,6 +1,7 @@
 /** Copyright Stewart Allen <sa@grid.space> -- All Rights Reserved */
 
 import { codec } from '../../core/codec.js';
+import { base } from '../../../geo/base.js';
 import { newPoint } from '../../../geo/point.js';
 import { newPolygon } from '../../../geo/polygon.js';
 import { sliceConnect } from '../../../geo/slicer.js';
@@ -639,12 +640,19 @@ export class Topo {
           // find the location for the tip of the cutting tool
           // TODO - take into account the actual geometry of the tool
           let toolTip = p.clone().add(vnorm.clone().normalize().scale(0.1, 0.1, 0.1));
-          toolTip.rotateYZ(angle);
+          toolTip.rotateYZ(angle * DEG2RAD);
+          toolTip.swapXZ();
+          let rayDirection = newPoint(0, 0, 1).swapXZ();
 
-          let intersectPoly = newPolygon([toolTip, toolTip.clone().add(newPoint(0, 0, 10000))]);
           for (let c of contoursRotatedCache[angle]) {
-            if (c.intersects(intersectPoly)) {
-              return false;
+            for (let pidx = 0; pidx < c.points.length; pidx++) {
+              let swappedp1 = c.points[pidx].clone().swapXZ();
+              let swappedp2 = c.points[(pidx+1) % c.points.length].clone().swapXZ();
+              let intersects = base.util.intersectRayLine(
+                toolTip, { dx: rayDirection.x, dy: rayDirection.y }, swappedp1, swappedp2);
+              if (intersects && intersects.dist > 1e-6) {
+                return false;
+              }
             }
           }
           return true;
@@ -696,12 +704,8 @@ export class Topo {
             for (let angle = prevCheckAngle; angle != nextCheckAngle; angle = (angle + 1) % 360) {
               // check if the given angle is a machinable direction
               let vec = newPoint(0, Math.cos(angle*DEG2RAD), Math.sin(angle*DEG2RAD));
-                if(sidx % 200 == 0) {
-                  slice.output().setLayer("machinability-probe", {line: 0xFF0000}).
-                    addPoly(newPolygon([point, point.add(vec)]));
-                }
-              if (isMachinable(point, vertexNormal, angle)) {
-                if(sidx % 200 == 0) {
+              if (isMachinable(point, vertexNormal, (360 - angle + 90) % 360)) {
+                if(sidx % 200 == 0 && i % 100 == 0) {
                   slice.output().setLayer("machinability", {line: this.lineColor}).
                     addPoly(newPolygon([point, point.add(vec)]));
                 }
