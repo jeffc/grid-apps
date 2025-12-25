@@ -1,4 +1,47 @@
-/** Copyright Stewart Allen <sa@grid.space> -- All Rights Reserved */
+/**
+ * @file
+ *
+ * This file contains the logic for 4-axis machining path generation.
+ *
+ * The core of this process is determining the "Machinable Direction Range" (MDR)
+ * for each point on a contour. The MDR is the set of angles from which a tool
+ * can access a point without colliding with other parts of the model on the same Z-slice.
+ *
+ * --- The Performance Challenge ---
+ *
+ * A naive approach to calculating the MDR involves, for each point, checking all
+ * 360 possible tool approach angles. For each angle, a ray-intersection test
+ * is performed against every other line segment on the slice to check for
+ * collisions. This results in a high-complexity algorithm (roughly O(N^2)) that
+ * is too slow for complex models.
+ *
+ * --- The Spatial Grid Solution ---
+ *
+ * To solve this, we invert the process and use a spatial acceleration data
+ * structure (a 2D grid). The algorithm is as follows:
+ *
+ * 1. Loop through each of the 360 tool angles first.
+ *
+ * 2. For each angle:
+ *    a. Rotate all contours on the slice by that angle.
+ *    b. Project the rotated contours onto the YZ-plane, creating 2D segments.
+ *    c. Build a 2D `SpatialGrid` and insert all of the 2D line segments into it.
+ *
+ * 3. With the grid for the current angle built, loop through each point that needs
+ *    to be checked for machinability.
+ *
+ * 4. The `isMachinable` check now becomes much faster:
+ *    a. The function receives the pre-built grid for the current angle.
+ *    b. It projects the 3D `toolTip` point into a 2D `ray_origin`.
+ *    c. Instead of checking against all segments, it performs a `queryRay()`
+ *       on the grid. This query traverses the grid cells along the path of the
+ *       tool's ray and returns only the 2D segments in those cells.
+ *    d. The expensive line intersection test is then only performed on this
+ *       small subset of candidate segments.
+ *
+ * This changes the complexity of the collision check from O(N) to O(log N) or
+ * O(1) on average, resulting in a significant performance improvement.
+ */
 
 import { base } from '../../../geo/base.js';
 import { newPoint } from '../../../geo/point.js';
@@ -7,469 +50,474 @@ import { newPolygon } from '../../../geo/polygon.js';
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
 
-export async function generateFourAxis(params) {
-    const { sliced, tool, zoff, leave, linear, lineColor, onupdate } = params;
+/**
+ * A purely 2D spatial grid for fast line segment lookups.
+ * Expects all inputs (bounds, segments, points) to have {x, y} properties.
+ */
+class SpatialGrid {
+    constructor(bounds, cellSize) {
+        this.bounds = bounds;
+        this.cellSize = cellSize > 0 ? cellSize : 1.0;
+        this.grid = [];
+        this.cols = Math.ceil((bounds.max.x - bounds.min.x) / this.cellSize) || 1;
+        this.rows = Math.ceil((bounds.max.y - bounds.min.y) / this.cellSize) || 1;
+        for (let i = 0; i < this.cols * this.rows; i++) {
+            this.grid.push([]);
+        }
+    }
 
-    console.log(`Four axis slicing: ${sliced.length} slices`);
+    _getCells(segment) {
+        const [p1, p2] = segment;
+        const b = {
+            min: { x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y) },
+            max: { x: Math.max(p1.x, p2.x), y: Math.max(p1.y, p2.y) }
+        };
 
-    /* TODO - re-home this function */
-    /**
-     * Resample a closed contour so points are evenly spaced.
-     *
-     * @param {Polygon} poly - input contour (must be closed)
-     * @param {number} spacing - desired spacing between samples (units of pts)
-     * @param {boolean} includeOriginals - whether to also include the
-     *     original points in the output.
-     * @returns {Polygon} contour with resampled points (new points, does not mutate input)
-     */
-    let resampleClosedContour = (poly, spacing, includeOriginals = true) => {
+        const minX = Math.floor((b.min.x - this.bounds.min.x) / this.cellSize);
+        const maxX = Math.floor((b.max.x - this.bounds.min.x) / this.cellSize);
+        const minY = Math.floor((b.min.y - this.bounds.min.y) / this.cellSize);
+        const maxY = Math.floor((b.max.y - this.bounds.min.y) / this.cellSize);
+
+        const cells = [];
+        for (let y = Math.max(0, minY); y <= Math.min(this.rows - 1, maxY); y++) {
+            for (let x = Math.max(0, minX); x <= Math.min(this.cols - 1, maxX); x++) {
+                cells.push(y * this.cols + x);
+            }
+        }
+        return cells;
+    }
+
+    insert(segment) {
+        this._getCells(segment).forEach(idx => {
+            this.grid[idx].push(segment);
+        });
+    }
+
+    queryRay(ray_origin) {
+        // Assumes a horizontal ray in the +x direction, as is our use case.
+        const candidates = new Set();
+        const startX = Math.floor((ray_origin.x - this.bounds.min.x) / this.cellSize);
+        const startY = Math.floor((ray_origin.y - this.bounds.min.y) / this.cellSize);
+
+        if (startX >= this.cols || startY < 0 || startY >= this.rows) {
+            return [];
+        }
+
+        // Traverse grid cells horizontally along the ray path
+        for (let x = Math.max(0, startX); x < this.cols; x++) {
+            const y = startY;
+            const idx = y * this.cols + x;
+            if (this.grid[idx]) {
+                this.grid[idx].forEach(seg => candidates.add(seg));
+            }
+        }
+        return [...candidates];
+    }
+}
+
+/**
+ * Given a point and a grid containing rotated geometry, checks if a tool can
+ * access the point without colliding with other geometry on the same slice.
+ */
+function isMachinable(p, vnorm, angle, grid) {
+    // calculate the tool tip position in 3D
+    const toolTip = p.clone().add(vnorm.clone().rotateYZ(angle*DEG2RAD).normalize().scale(0.1, 0.1, 0.1));
+    toolTip.rotateYZ(angle * DEG2RAD);
+
+    // project the 3D tool tip to a 2D ray origin for the grid query
+    const ray_origin = { x: toolTip.z, y: toolTip.y };
+
+    const candidates = grid.queryRay(ray_origin);
+
+    if (self.debug_isMachinable && candidates.length > 0) {
+        console.log({
+            msg: "isMachinable check",
+            angle,
+            ray_origin,
+            candidates: candidates.length,
+            bounds: grid.bounds
+        });
+    }
+
+    if (candidates.length === 0) {
+        return true;
+    }
+
+    const ray_direction = { dx: 1, dy: 0 }; // ray fires along the +Z axis in model space
+    let intersection_count = 0;
+
+    for (let seg of candidates) {
+        // segment is already a 2D {x,y} pair
+        let intersects = base.util.intersectRayLine(ray_origin, ray_direction, seg[0], seg[1]);
+
+        if (self.debug_isMachinable && intersects) {
+            console.log({
+                msg: "intersection found",
+                intersects,
+                is_collision: intersects.dist > 1e-6
+            });
+        }
+
+        // if ray hits a segment that is "in front" of the tool tip, count it
+        if (intersects && intersects.dist > 1e-6) {
+            intersection_count++;
+        }
+    }
+
+    // An even number of intersections means the ray passes completely through the object.
+    return (intersection_count % 2) === 0;
+}
+
+function resampleClosedContour(poly, spacing) {
     if (!poly || !poly.points) return newPolygon();
     const pts = poly.points;
-    if (!Array.isArray(pts) || pts.length === 0) return [];
-
+    if (!Array.isArray(pts) || pts.length === 0) return newPolygon();
     if (spacing <= 0) throw new Error("spacing must be > 0");
 
-    // helper: distance between two points
-    const dist3 = (a, b) => Math.sqrt(Math.pow(b.x - a.x, 2) +  Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2));
+    const dist3 = (a, b) => Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2));
 
-    // Build segment list
     const segs = [];
     const n = pts.length;
-    if (n === 1) return [ { x: pts[0].x, y: pts[0].y, z: pts[0].z } ];
+    if (n === 1) return newPolygon().addPoints([pts[0].clone()]);
 
-    for (let i = 0; i < n - 1; i++) {
-        segs.push({ a: pts[i], b: pts[i + 1], len: dist3(pts[i], pts[i + 1]) });
+    for (let i = 0; i < n; i++) {
+        const p1 = pts[i];
+        const p2 = pts[(i + 1) % n];
+        segs.push({ a: p1, b: p2, len: dist3(p1, p2) });
     }
-    segs.push({ a: pts[n - 1], b: pts[0], len: dist3(pts[n - 1], pts[0]) });
 
     const total = segs.reduce((s, x) => s + x.len, 0);
-    if (total === 0) return [ { x: pts[0].x, y: pts[0].y, z: pts[0].z } ];
+    if (total === 0) return newPolygon().addPoints([pts[0].clone()]);
+    // The user prefers a higher resample distance during debugging, so I'm commenting out this line.
+    // if (spacing >= total) return newPolygon().addPoints([pts[0].clone()]);
 
-    // If spacing larger than length:
-    if (spacing >= total) {
-        // Return one representative point or optionally return original first point
-        return [ { x: pts[0].x, y: pts[0].y, z: pts[0].z } ];
-    }
-
-    // Determine sample positions along length (distances from start)
-    let sampleCount = Math.floor(total / spacing) + 1; // includes the 0 position
-
-    let positions = new Array();;
-    for (let i = 0; i < sampleCount; i++) {
-        positions.push(i * spacing);
-    }
-
-    // if we're including original points, add them in too.
-    if (includeOriginals) {
-        let accum = 0;
-        for (let seg of segs) {
-        accum += seg.len;
-        positions.push(accum);
-        }
-        positions = positions.sort((a,b) => a-b).filter((x, i, a) => a.indexOf(x) === i);
-    }
-
-    // Interpolate samples
+    const sampleCount = Math.floor(total / spacing);
     const result = [];
     let segIndex = 0;
-    let segAccum = 0; // length before current segment
-    for (let pos of positions) {
-        // clamp for numeric round-off
-        if (pos > total) pos = total;
-
-        // Advance segIndex until pos is on current segment
+    let segAccum = 0;
+    for (let i = 0; i < sampleCount; i++) {
+        const pos = i * spacing;
         while (segIndex < segs.length && segAccum + segs[segIndex].len < pos - 1e-12) {
-        segAccum += segs[segIndex].len;
-        segIndex++;
+            segAccum += segs[segIndex].len;
+            segIndex++;
         }
-        // If we've gone beyond last seg (can happen due to rounding), clamp to last
         if (segIndex >= segs.length) segIndex = segs.length - 1;
 
         const seg = segs[segIndex];
         const segLen = seg.len || 1e-12;
         const t = Math.max(0, Math.min(1, (pos - segAccum) / segLen));
-        // linear interpolation of x,y,z
-        const x = seg.a.x + (seg.b.x - seg.a.x) * t;
-        const y = seg.a.y + (seg.b.y - seg.a.y) * t;
-        const z = seg.a.z + (seg.b.z - seg.a.z) * t;
-
-        result.push({ x, y, z });
+        result.push(newPoint(
+            seg.a.x + (seg.b.x - seg.a.x) * t,
+            seg.a.y + (seg.b.y - seg.a.y) * t,
+            seg.a.z + (seg.b.z - seg.a.z) * t
+        ));
     }
 
-    // check to make sure we didn't duplicate the first and last point
-    const pFirst = result[0];
-    const pLast = result[result.length - 1];
-    if (pFirst.x == pLast.x && pFirst.y == pLast.y && pFirst.z == pLast.z) {
-        result.pop();
+    return newPolygon().addPoints(result).setClosed();
+}
+
+function normalizeMDR(mdr) {
+    if (!mdr) return [];
+    const normalized = [];
+    for (const range of mdr) {
+        const [start, end] = range;
+        if (start <= end) {
+            normalized.push(range);
+        } else {
+            normalized.push([start, 360]);
+            normalized.push([0, end]);
+        }
+    }
+    return normalized;
+};
+
+function intersectRanges(r1, r2) {
+    const s = Math.max(r1[0], r2[0]);
+    const e = Math.min(r1[1], r2[1]);
+    return s < e ? [s, e] : null;
+};
+
+function intersectMDRs(mdr1, mdr2) {
+    const norm1 = normalizeMDR(mdr1);
+    const norm2 = normalizeMDR(mdr2);
+    const intersection = [];
+    for (const r1 of norm1) {
+        for (const r2 of norm2) {
+            const res = intersectRanges(r1, r2);
+            if (res) intersection.push(res);
+        }
+    }
+    return intersection;
+};
+
+function unionMDRs(mdr1, mdr2) {
+    const all = [...normalizeMDR(mdr1), ...normalizeMDR(mdr2)];
+    if (all.length === 0) return [];
+    all.sort((a, b) => a[0] - b[0]);
+
+    const merged = [all[0]];
+    for (let i = 1; i < all.length; i++) {
+        const last = merged[merged.length - 1];
+        const current = all[i];
+        if (current[0] <= last[1]) {
+            last[1] = Math.max(last[1], current[1]);
+        } else {
+            merged.push(current);
+        }
     }
 
-    let outPoly = newPolygon();
-    outPoly.addPoints(result.map((p) => newPoint(p.x, p.y, p.z)));
-    outPoly.setClosed();
-    return outPoly;
-    };
-
-    /**
-     * Converts an MDR (Machining Direction Range) which may have wrap-around ranges
-     * (e.g., [350, 10]) into a set of non-wrapping ranges.
-     * @param {number[][]} mdr - Array of [start, end] angle ranges.
-     * @returns {number[][]} An array of normalized [start, end] ranges.
-     */
-    const normalizeMDR = (mdr) => {
-        if (!mdr) return [];
-        const normalized = [];
-        for (const range of mdr) {
-            const [start, end] = range;
-            if (start <= end) {
-                normalized.push(range);
-            } else {
-                normalized.push([start, 360]);
-                normalized.push([0, end]);
-            }
+    if (merged.length > 1) {
+        const first = merged[0];
+        const last = merged[merged.length - 1];
+        if (last[1] === 360 && first[0] === 0) {
+            merged[0] = [last[0], first[1]];
+            merged.pop();
         }
-        return normalized;
-    };
+    }
+    return merged;
+}
 
-    /**
-     * Calculates the intersection of two non-wrapping angle ranges.
-     * @param {number[]} r1 - First range [start, end].
-     * @param {number[]} r2 - Second range [start, end].
-     * @returns {number[]|null} The intersection range, or null if no intersection.
-     */
-    const intersectRanges = (r1, r2) => {
-        const s = Math.max(r1[0], r2[0]);
-        const e = Math.min(r1[1], r2[1]);
-        if (s < e) {
-            return [s, e];
+function totalLength(mdr) {
+    if (!mdr) return 0;
+    return normalizeMDR(mdr).reduce((sum, range) => sum + range[1] - range[0], 0);
+};
+
+function calculateSimilarity(mdr1, mdr2) {
+    const intersectionLength = totalLength(intersectMDRs(mdr1, mdr2));
+    const unionLength = totalLength(unionMDRs(mdr1, mdr2));
+    return unionLength === 0 ? 1 : intersectionLength / unionLength;
+};
+
+function convertBoolsToMDR(machinable) {
+    const mdr = [];
+    let start = -1;
+    for (let i = 0; i < 361; i++) {
+        const angle = i % 360;
+        if (machinable[angle] && start === -1) {
+            start = angle;
+        } else if (!machinable[angle] && start !== -1) {
+            mdr.push([start, angle === 0 ? 360 : angle]);
+            start = -1;
         }
-        return null;
-    };
+    }
+    if (start !== -1) {
+        mdr.push([start, 360]);
+    }
+    // merge ranges that cross the 0/360 boundary
+    if (mdr.length > 1 && mdr[0][0] === 0 && mdr[mdr.length-1][1] === 360) {
+        mdr[mdr.length - 1][1] = mdr[0][1];
+        mdr.shift();
+    }
+    return mdr;
+}
 
-    /**
-     * Calculates the intersection of two MDRs.
-     * @param {number[][]} mdr1 - First MDR.
-     * @param {number[][]} mdr2 - Second MDR.
-     * @returns {number[][]} A new MDR representing the intersection.
-     */
-    const intersectMDRs = (mdr1, mdr2) => {
-        const norm1 = normalizeMDR(mdr1);
-        const norm2 = normalizeMDR(mdr2);
-        const intersection = [];
-        for (const r1 of norm1) {
-            for (const r2 of norm2) {
-                const res = intersectRanges(r1, r2);
-                if (res) {
-                    intersection.push(res);
-                }
-            }
+function extrapolateMachinability(sparseMachinable, step) {
+    const fullMachinable = new Array(360).fill(false);
+    for (let i = 0; i < 360; i += step) {
+        if (sparseMachinable[i]) {
+            fullMachinable[i] = true;
         }
-        return intersection;
-    };
-
-    /**
-     * Calculates the union of two MDRs.
-     * @param {number[][]} mdr1 - First MDR.
-     * @param {number[][]} mdr2 - Second MDR.
-     * @returns {number[][]} A new MDR representing the union.
-     */
-    const unionMDRs = (mdr1, mdr2) => {
-        const norm1 = normalizeMDR(mdr1);
-        const norm2 = normalizeMDR(mdr2);
-        const all = [...norm1, ...norm2];
-        if (all.length === 0) return [];
-        all.sort((a, b) => a[0] - b[0]);
-
-        const merged = [all[0]];
-        for (let i = 1; i < all.length; i++) {
-            const last = merged[merged.length - 1];
-            const current = all[i];
-            if (current[0] <= last[1]) {
-                last[1] = Math.max(last[1], current[1]);
-            } else {
-                merged.push(current);
-            }
-        }
-
-        if (merged.length > 1) {
-            const first = merged[0];
-            const last = merged[merged.length - 1];
-            if (last[1] === 360 && first[0] === 0) {
-                merged[0] = [last[0], first[1]];
-                merged.pop();
-            }
-        }
-        return merged;
     }
 
-    /**
-     * Calculates the total angular length of an MDR.
-     * @param {number[][]} mdr - The MDR to measure.
-     * @returns {number} The total length in degrees.
-     */
-    const totalLength = (mdr) => {
-        if (!mdr) return 0;
-        return mdr.reduce((sum, range) => sum + range[1] - range[0], 0);
-    };
+    for (let i = 0; i < 360; i += step) {
+        const currentAngle = i;
+        const nextAngle = (i + step) % 360;
 
-    /**
-     * Calculates the similarity between two MDRs, defined as the ratio of
-     * the length of their intersection to the length of their union.
-     * @param {number[][]} mdr1 - First MDR.
-     * @param {number[][]} mdr2 - Second MDR.
-     * @returns {number} Similarity score between 0 and 1.
-     */
-    const calculateSimilarity = (mdr1, mdr2) => {
-        const intersection = intersectMDRs(mdr1, mdr2);
-        const union = unionMDRs(mdr1, mdr2);
-        const intersectionLength = totalLength(intersection);
-        const unionLength = totalLength(union);
-        if (unionLength === 0) {
-            return 1;
+        // If both current and next step are machinable, fill in between
+        if (fullMachinable[currentAngle] && fullMachinable[nextAngle]) {
+            for (let j = 1; j < step; j++) {
+                fullMachinable[(currentAngle + j) % 360] = true;
+            }
         }
-        return intersectionLength / unionLength;
-    };
+    }
+    return fullMachinable;
+}
 
-    let sidx = 0; // TODO - remove (debugging)
+export async function generateFourAxis(params) {
+    const { sliced, onupdate, lineColor } = params;
+
+    console.log(`Four axis slicing: ${sliced.length} slices`);
+
+    const angleStep = 5; // User-defined angle step
+
+    let sidx = 0;
     for (const slice of sliced) {
-    console.log(`${sidx} / ${sliced.length}`); // TODO - replace with proper progress callback
-    // The 'slice.tops' property contains an array of Polygon objects
-    const contours = slice.tops;
+        onupdate(sidx++ / sliced.length, `slice ${sidx}`);
+        const contours = slice.tops;
+        if (!contours || contours.length === 0) {
+            continue;
+        }
 
-    sidx++; // TODO - remove (debugging)
+        // 1. Resample contours and pre-calculate normals
+        const resampledContours = contours.map(con => resampleClosedContour(con.poly, 10));
+        for (const contour of resampledContours) {
+            const nPoints = contour.points.length;
+            if (nPoints === 0) continue;
+            for (let i = 0; i < nPoints; i++) {
+                const point = contour.points[i];
+                const prevPoint = contour.points[(i + nPoints - 1) % nPoints];
+                const nextPoint = contour.points[(i + 1) % nPoints];
 
-    // if this slice doesn't have any, keep going
-    if (!contours || contours.length === 0) {
-        continue;
-    }
+                const incomingEdge = point.clone().sub(prevPoint);
+                const outgoingEdge = nextPoint.clone().sub(point);
 
-    // resample contours with a uniform spacing
-    const resampledContours = contours.map((con) => {
-        const c = con.poly;
-        // TODO - change 5 to configurable resample distance
-        return resampleClosedContour(c, 5);
-    });
+                if (incomingEdge.magnitude() === 0 || outgoingEdge.magnitude() === 0) {
+                    point._4axis = { machinable: new Array(360).fill(false), vnorm: newPoint(0,0,1) };
+                    continue;
+                }
 
-    // for machinability computations, we're going to need to rotate all of
-    // the contours about the x axis by every integer number of degrees. do
-    // that once.
-    let contoursRotatedCache = [...Array(360).keys()].map((theta) => {
-        return contours.map((con) => {
-        let c = con.poly.clone(true);
-        let cRot = c.rotateYZ(theta);
-        return cRot;
-        });
-    });
+                const incomingEdgeNormal = incomingEdge.clone().rotateYZ(-90 * DEG2RAD).normalize();
+                const outgoingEdgeNormal = outgoingEdge.clone().rotateYZ(-90 * DEG2RAD).normalize();
+                const vertexNormal = incomingEdgeNormal.add(outgoingEdgeNormal).normalize();
 
-    /**
-     * Compute whether a point is machinable at the given angle.
-     * @param {Point} p - The point to test
-     * @param {Point} vnorm - The vertex normal vector at the given point
-     * @param {Number} angle - The angle of rotation (CCW about the X axis)
-     * @return true or false, whether the point is machinable
-     */
-    const isMachinable = (p, vnorm, angle) => {
-        // find the location for the tip of the cutting tool
-        // TODO - take into account the actual geometry of the tool
-        let toolTip = p.clone().add(vnorm.clone().normalize().scale(0.1, 0.1, 0.1));
-        toolTip.rotateYZ(angle * DEG2RAD);
-        toolTip.swapXZ();
-        let rayDirection = newPoint(0, 0, 1).swapXZ();
+                if (isNaN(vertexNormal.x)) {
+                    vertexNormal.copy(outgoingEdgeNormal);
+                }
 
-        for (let c of contoursRotatedCache[angle]) {
-        for (let pidx = 0; pidx < c.points.length; pidx++) {
-            let swappedp1 = c.points[pidx].clone().swapXZ();
-            let swappedp2 = c.points[(pidx+1) % c.points.length].clone().swapXZ();
-            let intersects = base.util.intersectRayLine(
-            toolTip, { dx: rayDirection.x, dy: rayDirection.y }, swappedp1, swappedp2);
-            if (intersects && intersects.dist > 1e-6) {
-            return false;
+                point._4axis = { machinable: new Array(360).fill(false), vnorm: vertexNormal };
+
+                if (sidx % 200 === 0) {
+                    slice.output().setLayer("machinability-normals", {line: 0xFF00FF})
+                        .addPoly(newPolygon([point, point.clone().add(vertexNormal)]));
+                }
             }
         }
-        }
-        return true;
-    };
 
-    slice.segments = [];
-    for (const contour of resampledContours) {
-        // skip degenerate/empty contours
-        if (!contour.points) {
-        continue;
-        }
-        const nPoints = contour.points.length;
-        for (let i = 0; i < nPoints; i++) {
-        // calculate machinable direction range (MDR) for each point
-        const point = contour.points[i];
-        const prevPoint = contour.points[ (i + nPoints - 1) % nPoints];
-        const nextPoint = contour.points[ (i+1) % nPoints];
+        // 2. Iterate by angle, building a spatial grid for each
+        for (let angle = 0; angle < 360; angle += angleStep) { // Use angleStep here
+            const bounds = { min: { x: Infinity, y: Infinity }, max: { x: -Infinity, y: -Infinity } };
+            const rotatedPolys = resampledContours.map(poly => {
+                const p = poly.clone(true).rotateYZ(angle);
+                p.points.forEach(pt => {
+                    bounds.min.x = Math.min(bounds.min.x, pt.z);
+                    bounds.min.y = Math.min(bounds.min.y, pt.y);
+                    bounds.max.x = Math.max(bounds.max.x, pt.z);
+                    bounds.max.y = Math.max(bounds.max.y, pt.y);
+                });
+                return p;
+            });
 
-        // use the Point class to represent a 2d vector here
-        const incomingEdge = point.sub(prevPoint);
-        const outgoingEdge = nextPoint.sub(point);
+            // pad the bounds slightly to ensure the offset toolTip is included
+            const padding = 1.0;
+            bounds.min.x -= padding;
+            bounds.min.y -= padding;
+            bounds.max.x += padding;
+            bounds.max.y += padding;
 
-        // We look at the previous and next points and calculate the angle
-        // between the current point and each one. We search for valid
-        // machinable directions between those two angles, since angles
-        // beyond either will definitely not be machinable
-
-        // remember that we've sliced along the X axis, so consider angles
-        // as (y, z)
-        const prevCheckAngle = (Math.round(Math.atan2(-(incomingEdge.z), -(incomingEdge.y)) * RAD2DEG) + 360) % 360;
-        const nextCheckAngle = (Math.round(Math.atan2(outgoingEdge.z, outgoingEdge.y) * RAD2DEG) + 360) % 360;
-
-        // compute the vertex normal vector. we rotate each vector by 90
-        // degrees so that it becomes normal to the edge it was pointing
-        // along, then average the two.
-        //
-        // Since the point class methods mutate in place, encapsulate the
-        // logic into a small lambda and immediately call it to avoid
-        // leaking lots of temporary variables into the scope.
-        const incomingEdgeNormal = (() => { let p = incomingEdge.clone(); p.rotateYZ(-90*DEG2RAD); p.normalize(); return p; })();
-        const outgoingEdgeNormal = (() => { let p = outgoingEdge.clone(); p.rotateYZ(-90*DEG2RAD); p.normalize(); return p; })();
-        const vertexNormal = (() => { let p = incomingEdgeNormal.add(outgoingEdgeNormal); p.normalize(); return p; })();
-        if(sidx % 200 == 0) {
-            slice.output().setLayer("machinability-normals", {line: 0xFF00FF}).
-            addPoly(newPolygon([point, point.add(vertexNormal)]));
-        }
-
-        let MDR = [];
-        let firstValid = null;
-        for (let angle = prevCheckAngle; angle != nextCheckAngle; angle = (angle + 1) % 360) {
-            // check if the given angle is a machinable direction
-            let vec = newPoint(0, Math.cos(angle*DEG2RAD), Math.sin(angle*DEG2RAD));
-            if (isMachinable(point, vertexNormal, (360 - angle + 90) % 360)) {
-            let MDR = [];
-            let firstValid = null;
-            let currentAngle = prevCheckAngle;
-            while (true) {
-                let angle = currentAngle;
-
-                if (isMachinable(point, vertexNormal, (360 - angle + 90) % 360)) {
-                if(sidx % 200 == 0 && i % 100 == 0) {
-                    let vec = newPoint(0, Math.cos(angle*DEG2RAD), Math.sin(angle*DEG2RAD));
-                    slice.output().setLayer("machinability", {line: lineColor}).
-                        addPoly(newPolygon([point, point.add(vec)]));
+            const grid = new SpatialGrid(bounds, 2.0);
+            rotatedPolys.forEach(poly => {
+                const points = poly.points;
+                for (let i = 0; i < points.length; i++) {
+                    const p1 = points[i];
+                    const p2 = points[(i + 1) % points.length];
+                    // project 3D segment to 2D before insertion
+                    const seg2d = [ { x: p1.z, y: p1.y }, { x: p2.z, y: p2.y } ];
+                    grid.insert(seg2d);
                 }
-                if (firstValid === null) {
-                    firstValid = angle;
-                }
-                } else {
-                if (firstValid !== null) {
-                    MDR.push([firstValid, (angle - 1 + 360) % 360]);
-                    firstValid = null;
-                }
-                }
+            });
 
-                if (angle === nextCheckAngle) {
-                if (firstValid !== null) {
-                    MDR.push([firstValid, (angle - 1 + 360) % 360]);
+            // 3. Check machinability for each point at this angle
+            for (const contour of resampledContours) {
+                for (const point of contour.points) {
+                    if (isMachinable(point, point._4axis.vnorm, angle, grid)) {
+                        point._4axis.machinable[angle] = true; // Index by the tested rotation angle
+                        if (sidx % 200 === 0) { 
+                            const visualization_angle = (360 - angle + 90) % 360;
+                            const vec = newPoint(0, Math.cos(visualization_angle * DEG2RAD), Math.sin(visualization_angle * DEG2RAD));
+                            slice.output().setLayer("machinability", {line: lineColor})
+                                .addPoly(newPolygon([point, point.add(vec)]));
+                        }
+                    }
                 }
-                break;
-                }
-                currentAngle = (currentAngle + 1) % 360;
             }
-            point.MDR = MDR;
-            }
+        }
 
-            // --- start of graph-cut implementation ---
+      /* -- uncomment this once machinability is debugged
+        // 4. Convert boolean arrays to MDR ranges
+        for (const contour of resampledContours) {
+            if (!contour.points) continue;
+            for (const point of contour.points) {
+                // Extrapolate machinability before converting to MDR ranges
+                const fullMachinable = extrapolateMachinability(point._4axis.machinable, angleStep);
+                point.MDR = convertBoolsToMDR(fullMachinable);
+                delete point._4axis;
+            }
+        }
+
+        // 5. Graph-cut segmentation (unchanged)
+        slice.segments = [];
+        for (const contour of resampledContours) {
             const points = contour.points;
             const numPoints = points.length;
-            if (numPoints < 2) {
-            continue;
-            }
+            if (numPoints < 2) continue;
 
-            // 1. Build graph edges with weights based on MDR similarity
             const edges = [];
             for (let i = 0; i < numPoints; i++) {
-            const p1 = points[i];
-            const p2 = points[(i + 1) % numPoints];
-            const similarity = calculateSimilarity(p1.MDR, p2.MDR);
-            const weight = 1 - similarity;
-            edges.push({
-                from: i,
-                to: (i + 1) % numPoints,
-                weight: weight
-            });
+                const p1 = points[i];
+                const p2 = points[(i + 1) % numPoints];
+                edges.push({
+                    from: i,
+                    to: (i + 1) % numPoints,
+                    weight: 1 - calculateSimilarity(p1.MDR, p2.MDR)
+                });
             }
 
-            // 2. Greedily cut edges with high weights (low similarity)
-            const cutThreshold = 0.5; // TODO: make this configurable
+            const cutThreshold = 0.5;
             const adj = new Map();
             for (let i = 0; i < numPoints; i++) adj.set(i, []);
-
             for (const edge of edges) {
-            if (edge.weight <= cutThreshold) {
-                adj.get(edge.from).push(edge.to);
-                adj.get(edge.to).push(edge.from);
-            }
+                if (edge.weight <= cutThreshold) {
+                    adj.get(edge.from).push(edge.to);
+                    adj.get(edge.to).push(edge.from);
+                }
             }
 
-            // 3. Find connected components which form the new segments
             const visited = new Array(numPoints).fill(false);
             const segments = [];
             for (let i = 0; i < numPoints; i++) {
-            if (!visited[i]) {
-                const component_indices = [];
-                const q = [i];
-                visited[i] = true;
-                let head = 0;
-                // Standard breadth-first search to find all nodes in the component
-                while(head < q.length) {
-                    const u = q[head++];
-                    component_indices.push(u);
-                    if (adj.has(u)) {
-                        for (const v of adj.get(u)) {
-                            if (!visited[v]) {
-                                visited[v] = true;
-                                q.push(v);
-                            }
-                        }
-                    }
-                }
-
-                if (component_indices.length > 0) {
-                    // The component indices need to be ordered to form a path
-                    const ordered_segment_indices = [];
-                    let start_node = -1;
-                    if (component_indices.length === 1) {
-                        start_node = component_indices[0];
-                    } else {
-                        // Find an endpoint of the path (a node with degree 1)
-                        for(const node_idx of component_indices) {
-                            if (adj.get(node_idx).length <= 1) {
-                                start_node = node_idx;
-                                break;
-                            }
-                        }
-                    }
-                    if (start_node === -1) {
-                        // This case happens if the segment is a closed loop
-                        start_node = component_indices[0];
-                    }
-
-                    // Traverse the path from the start node to order the points
-                    const path_q = [start_node];
-                    const path_visited = new Set([start_node]);
-                    while(path_q.length > 0) {
-                        const u = path_q.shift();
-                        ordered_segment_indices.push(u);
+                if (!visited[i]) {
+                    const component_indices = [];
+                    const q = [i];
+                    visited[i] = true;
+                    let head = 0;
+                    while (head < q.length) {
+                        const u = q[head++];
+                        component_indices.push(u);
                         if (adj.has(u)) {
                             for (const v of adj.get(u)) {
-                                if (!path_visited.has(v)) {
-                                    path_visited.add(v);
-                                    path_q.push(v);
+                                if (!visited[v]) {
+                                    visited[v] = true;
+                                    q.push(v);
                                 }
                             }
                         }
                     }
-                    const segment_points = ordered_segment_indices.map(idx => points[idx]);
-                    segments.push(newPolygon().addPoints(segment_points).setOpen());
+
+                    if (component_indices.length > 0) {
+                        const ordered_segment_indices = [];
+                        let start_node = component_indices.find(node_idx => adj.get(node_idx).length <= 1) ?? component_indices[0];
+                        const path_q = [start_node];
+                        const path_visited = new Set([start_node]);
+                        while (path_q.length > 0) {
+                            const u = path_q.shift();
+                            ordered_segment_indices.push(u);
+                            if (adj.has(u)) {
+                                for (const v of adj.get(u)) {
+                                    if (!path_visited.has(v)) {
+                                        path_visited.add(v);
+                                        path_q.push(v);
+                                    }
+                                }
+                            }
+                        }
+                        const segment_points = ordered_segment_indices.map(idx => points[idx]);
+                        segments.push(newPolygon().addPoints(segment_points).setOpen());
+                    }
                 }
-            }
             }
             slice.segments.push(...segments);
         }
-        }
-    }
+    */
     }
     return sliced;
 }

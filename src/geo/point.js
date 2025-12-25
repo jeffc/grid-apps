@@ -877,6 +877,7 @@ class Point {
         const { x, y } = this;
         this.x = x * Math.cos(angle) - y * Math.sin(angle);
         this.y = y * Math.cos(angle) + x * Math.sin(angle);
+        return this;
     }
 
     /**
@@ -887,17 +888,25 @@ class Point {
         const { y, z } = this;
         this.y = y * Math.cos(angle) - z * Math.sin(angle);
         this.z = z * Math.cos(angle) + y * Math.sin(angle);
+        return this;
+    }
+
+    /**
+     * Calculate the magnitude (length) of this point as a vector
+     */
+    magnitude() {
+        const { x, y, z } = this;
+        return Math.sqrt(Math.pow(x, 2) + Math.pow(y, 2) + Math.pow(z, 2));
     }
 
     /**
      * Normalize the point to a unit vector (mutates in place)
      */
     normalize() {
-        const { x, y, z } = this;
-        const len = Math.sqrt(Math.pow(x, 2) + Math.pow(y, 2) + Math.pow(z, 2));
-        this.x = x / len;
-        this.y = y / len;
-        this.z = z / len;
+        const len = this.magnitude();
+        this.x /= len;
+        this.y /= len;
+        this.z /= len;
         return this;
     }
 }
