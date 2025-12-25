@@ -595,6 +595,8 @@ export class Topo {
         return outPoly;
       };
 
+      console.log(sliced[800]);
+
       let sidx = 0; // TODO - remove (debugging)
 			for (const slice of sliced) {
         console.log(`${sidx} / ${sliced.length}`); // TODO - replace with proper progress callback
@@ -611,7 +613,7 @@ export class Topo {
         // resample contours with a uniform spacing
         const resampledContours = contours.map((con) => {
           const c = con.poly;
-          // TODO - change 1 to configurable resample distance
+          // TODO - change 5 to configurable resample distance
           return resampleClosedContour(c, 5);
         });
 
@@ -684,7 +686,7 @@ export class Topo {
             const incomingEdgeNormal = (() => { let p = incomingEdge.clone(); p.rotateYZ(-90*DEG2RAD); p.normalize(); return p; })();
             const outgoingEdgeNormal = (() => { let p = outgoingEdge.clone(); p.rotateYZ(-90*DEG2RAD); p.normalize(); return p; })();
             const vertexNormal = (() => { let p = incomingEdgeNormal.add(outgoingEdgeNormal); p.normalize(); return p; })();
-            if(sidx == 200) {
+            if(sidx % 200 == 0) {
               slice.output().setLayer("machinability-normals", {line: 0xFF00FF}).
                 addPoly(newPolygon([point, point.add(vertexNormal)]));
             }
@@ -694,12 +696,12 @@ export class Topo {
             for (let angle = prevCheckAngle; angle != nextCheckAngle; angle = (angle + 1) % 360) {
               // check if the given angle is a machinable direction
               let vec = newPoint(0, Math.cos(angle*DEG2RAD), Math.sin(angle*DEG2RAD));
-                if(sidx == 200) {
+                if(sidx % 200 == 0) {
                   slice.output().setLayer("machinability-probe", {line: 0xFF0000}).
                     addPoly(newPolygon([point, point.add(vec)]));
                 }
               if (isMachinable(point, vertexNormal, angle)) {
-                if(sidx == 200) {
+                if(sidx % 200 == 0) {
                   slice.output().setLayer("machinability", {line: this.lineColor}).
                     addPoly(newPolygon([point, point.add(vec)]));
                 }
