@@ -898,6 +898,7 @@ class Point {
         this.x = x / len;
         this.y = y / len;
         this.z = z / len;
+        return this;
     }
 }
 

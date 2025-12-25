@@ -1068,6 +1068,8 @@ export class Polygon {
         return this;
     }
 
+    // rotate about the Z axis (or optionally the +Z vector through the given
+    // centerpoint)
     rotate(degrees, cx = 0, cy = 0) {
         let rad = degrees * DEG2RAD;
         if (rad)
@@ -1075,6 +1077,20 @@ export class Polygon {
             let [ x, y ] = base.util.rotate(p.x, p.y, rad, cx, cy);
             p.x = x;
             p.y = y;
+            return p;
+        });
+        return this;
+    }
+
+    // rotate about the X axis (or optionally the +X vector through the given
+    // centerpoint)
+    rotateYZ(degrees, cy = 0, cz = 0) {
+        let rad = degrees * DEG2RAD;
+        if (rad)
+        this.points = this.points.map(p => {
+            let [ y, z ] = base.util.rotate(p.y, p.z, rad, cy, cz);
+            p.y = y;
+            p.z = z;
             return p;
         });
         return this;

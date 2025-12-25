@@ -597,6 +597,7 @@ export class Topo {
 
       let sidx = 0; // TODO - remove (debugging)
 			for (const slice of sliced) {
+        console.log(`${sidx} / ${sliced.length}`); // TODO - replace with proper progress callback
 				// The 'slice.tops' property contains an array of Polygon objects
 				const contours = slice.tops;
 
@@ -617,24 +618,28 @@ export class Topo {
         // for machinability computations, we're going to need to rotate all of
         // the contours about the x axis by every integer number of degrees. do
         // that once.
-        //
-        // For the sake of computation later, we transpose (_, y, z) to (y, z).
         let contoursRotatedCache = [...Array(360).keys()].map((theta) => {
           return contours.map((con) => {
-            // remap contour points from (y, z) to (x, y)
-            let c2d = newPolygon(con.poly.points.map((p) => newPoint(p.y, p.z)));
-            let cRot = c2d.rotate(theta);
+            let c = con.poly.clone(true);
+            let cRot = c.rotateYZ(theta);
             return cRot;
           });
         });
 
-        const isMachinable = (py, pz, angle) => {
-          let newPt = newPoint(py, pz);
-          newPt.rotate(angle*DEG2RAD);
-          let y = newPt.x;
-          let z = newPt.y;
+        /**
+         * Compute whether a point is machinable at the given angle.
+         * @param {Point} p - The point to test
+         * @param {Point} vnorm - The vertex normal vector at the given point
+         * @param {Number} angle - The angle of rotation (CCW about the X axis)
+         * @return true or false, whether the point is machinable
+         */
+        const isMachinable = (p, vnorm, angle) => {
+          // find the location for the tip of the cutting tool
+          // TODO - take into account the actual geometry of the tool
+          let toolTip = p.clone().add(vnorm.clone().normalize().scale(0.1, 0.1, 0.1));
+          toolTip.rotateYZ(angle);
 
-          let intersectPoly = newPolygon([newPoint(y, z+1e-5), newPoint(y, z+100000)]);
+          let intersectPoly = newPolygon([toolTip, toolTip.clone().add(newPoint(0, 0, 10000))]);
           for (let c of contoursRotatedCache[angle]) {
             if (c.intersects(intersectPoly)) {
               return false;
@@ -693,7 +698,7 @@ export class Topo {
                   slice.output().setLayer("machinability-probe", {line: 0xFF0000}).
                     addPoly(newPolygon([point, point.add(vec)]));
                 }
-              if ( isMachinable(point.y, point.z, angle)) {
+              if (isMachinable(point, vertexNormal, angle)) {
                 if(sidx == 200) {
                   slice.output().setLayer("machinability", {line: this.lineColor}).
                     addPoly(newPolygon([point, point.add(vec)]));
