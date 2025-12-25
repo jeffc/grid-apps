@@ -582,18 +582,25 @@ export class Topo {
           result.push({ x, y, z });
         }
 
+        // check to make sure we didn't duplicate the first and last point
+        const pFirst = result[0];
+        const pLast = result[result.length - 1];
+        if (pFirst.x == pLast.x && pFirst.y == pLast.y && pFirst.z == pLast.z) {
+          result.pop();
+        }
+
         let outPoly = newPolygon();
         outPoly.addPoints(result.map((p) => newPoint(p.x, p.y, p.z)));
         outPoly.setClosed();
         return outPoly;
       };
 
-      let sidx = 0;
+      let sidx = 0; // TODO - remove (debugging)
 			for (const slice of sliced) {
 				// The 'slice.tops' property contains an array of Polygon objects
 				const contours = slice.tops;
 
-        sidx++;
+        sidx++; // TODO - remove (debugging)
 
         // if this slice doesn't have any, keep going
 				if (!contours || contours.length === 0) {
@@ -607,16 +614,105 @@ export class Topo {
           return resampleClosedContour(c, 5);
         });
 
+        // for machinability computations, we're going to need to rotate all of
+        // the contours about the x axis by every integer number of degrees. do
+        // that once.
+        //
+        // For the sake of computation later, we transpose (_, y, z) to (y, z).
+        let contoursRotatedCache = [...Array(360).keys()].map((theta) => {
+          return contours.map((con) => {
+            // remap contour points from (y, z) to (x, y)
+            let c2d = newPolygon(con.poly.points.map((p) => newPoint(p.y, p.z)));
+            let cRot = c2d.rotate(theta);
+            return cRot;
+          });
+        });
+
+        const isMachinable = (py, pz, angle) => {
+          let newPt = newPoint(py, pz);
+          newPt.rotate(angle*DEG2RAD);
+          let y = newPt.x;
+          let z = newPt.y;
+
+          let intersectPoly = newPolygon([newPoint(y, z+1e-5), newPoint(y, z+100000)]);
+          for (let c of contoursRotatedCache[angle]) {
+            if (c.intersects(intersectPoly)) {
+              return false;
+            }
+          }
+          return true;
+        };
+
 				for (const contour of resampledContours) {
           // skip degenerate/empty contours
           if (!contour.points) {
             continue;
           }
-          if (sidx == 200) {
-            slice.output().setLayer("4th axis resampled", {line: 0xff00ff}).addPoly(contour);
-          }
-					for (const point of contour.points) {
-						// process each point of the contour
+          const nPoints = contour.points.length;
+					for (let i = 0; i < nPoints; i++) {
+            // calculate machinable direction range (MDR) for each point
+            const point = contour.points[i];
+            const prevPoint = contour.points[ (i + nPoints - 1) % nPoints];
+            const nextPoint = contour.points[ (i+1) % nPoints];
+
+            // use the Point class to represent a 2d vector here
+            const incomingEdge = point.sub(prevPoint);
+            const outgoingEdge = nextPoint.sub(point);
+
+            // We look at the previous and next points and calculate the angle
+            // between the current point and each one. We search for valid
+            // machinable directions between those two angles, since angles
+            // beyond either will definitely not be machinable
+
+            // remember that we've sliced along the X axis, so consider angles
+            // as (y, z)
+            const prevCheckAngle = (Math.round(Math.atan2(-(incomingEdge.z), -(incomingEdge.y)) * RAD2DEG) + 360) % 360;
+            const nextCheckAngle = (Math.round(Math.atan2(outgoingEdge.z, outgoingEdge.y) * RAD2DEG) + 360) % 360;
+
+            // compute the vertex normal vector. we rotate each vector by 90
+            // degrees so that it becomes normal to the edge it was pointing
+            // along, then average the two.
+            //
+            // Since the point class methods mutate in place, encapsulate the
+            // logic into a small lambda and immediately call it to avoid
+            // leaking lots of temporary variables into the scope.
+            const incomingEdgeNormal = (() => { let p = incomingEdge.clone(); p.rotateYZ(-90*DEG2RAD); p.normalize(); return p; })();
+            const outgoingEdgeNormal = (() => { let p = outgoingEdge.clone(); p.rotateYZ(-90*DEG2RAD); p.normalize(); return p; })();
+            const vertexNormal = (() => { let p = incomingEdgeNormal.add(outgoingEdgeNormal); p.normalize(); return p; })();
+            if(sidx == 200) {
+              slice.output().setLayer("machinability-normals", {line: 0xFF00FF}).
+                addPoly(newPolygon([point, point.add(vertexNormal)]));
+            }
+
+            let MDR = [];
+            let firstValid = null;
+            for (let angle = prevCheckAngle; angle != nextCheckAngle; angle = (angle + 1) % 360) {
+              // check if the given angle is a machinable direction
+              let vec = newPoint(0, Math.cos(angle*DEG2RAD), Math.sin(angle*DEG2RAD));
+                if(sidx == 200) {
+                  slice.output().setLayer("machinability-probe", {line: 0xFF0000}).
+                    addPoly(newPolygon([point, point.add(vec)]));
+                }
+              if ( isMachinable(point.y, point.z, angle)) {
+                if(sidx == 200) {
+                  slice.output().setLayer("machinability", {line: this.lineColor}).
+                    addPoly(newPolygon([point, point.add(vec)]));
+                }
+                if (firstValid === null) {
+                  firstValid = angle;
+                }
+              } else {
+                if (firstValid !== null) {
+                  MDR.push([firstValid, angle-1]);
+                  firstValid = null;
+                }
+              }
+
+              if (firstValid !== null) {
+                MDR.push([firstValid, angle]);
+              }
+            }
+            point.MDR = MDR;
 					}
 				}
 			}
