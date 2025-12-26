@@ -120,8 +120,8 @@ class SpatialGrid {
  * access the point without colliding with other geometry on the same slice.
  */
 function isMachinable(p, vnorm, angle, grid) {
-    // calculate the tool tip position in 3D
-    const toolTip = p.clone().add(vnorm.clone().rotateYZ(angle*DEG2RAD).normalize().scale(0.1, 0.1, 0.1));
+    // TODO - consider actual tool geometry here
+    let toolTip = p.clone().add(vnorm.clone().normalize().scale(0.1, 0.1, 0.1));
     toolTip.rotateYZ(angle * DEG2RAD);
 
     // project the 3D tool tip to a 2D ray origin for the grid query
@@ -129,22 +129,11 @@ function isMachinable(p, vnorm, angle, grid) {
 
     const candidates = grid.queryRay(ray_origin);
 
-    if (self.debug_isMachinable && candidates.length > 0) {
-        console.log({
-            msg: "isMachinable check",
-            angle,
-            ray_origin,
-            candidates: candidates.length,
-            bounds: grid.bounds
-        });
-    }
-
     if (candidates.length === 0) {
         return true;
     }
 
     const ray_direction = { dx: 1, dy: 0 }; // ray fires along the +Z axis in model space
-    let intersection_count = 0;
 
     for (let seg of candidates) {
         // segment is already a 2D {x,y} pair
@@ -160,12 +149,11 @@ function isMachinable(p, vnorm, angle, grid) {
 
         // if ray hits a segment that is "in front" of the tool tip, count it
         if (intersects && intersects.dist > 1e-6) {
-            intersection_count++;
+          return false;
         }
     }
 
-    // An even number of intersections means the ray passes completely through the object.
-    return (intersection_count % 2) === 0;
+  return true;
 }
 
 function resampleClosedContour(poly, spacing) {
@@ -398,7 +386,7 @@ export async function generateFourAxis(params) {
             });
 
             // pad the bounds slightly to ensure the offset toolTip is included
-            const padding = 1.0;
+            const padding = 5.0;
             bounds.min.x -= padding;
             bounds.min.y -= padding;
             bounds.max.x += padding;
@@ -419,13 +407,18 @@ export async function generateFourAxis(params) {
             // 3. Check machinability for each point at this angle
             for (const contour of resampledContours) {
                 for (const point of contour.points) {
-                    if (isMachinable(point, point._4axis.vnorm, angle, grid)) {
-                        point._4axis.machinable[angle] = true; // Index by the tested rotation angle
-                        if (sidx % 200 === 0) { 
-                            const visualization_angle = (360 - angle + 90) % 360;
-                            const vec = newPoint(0, Math.cos(visualization_angle * DEG2RAD), Math.sin(visualization_angle * DEG2RAD));
-                            slice.output().setLayer("machinability", {line: lineColor})
-                                .addPoly(newPolygon([point, point.add(vec)]));
+                    const vnorm_rot = point._4axis.vnorm.clone().rotateYZ(angle * DEG2RAD);
+
+                    // only check for collisions if the surface normal is generally facing the tool
+                    if (/*vnorm_rot.z >= 0*/true) {
+                        if (isMachinable(point, point._4axis.vnorm, angle, grid)) {
+                            point._4axis.machinable[angle] = true; // Index by the tested rotation angle
+                            if (sidx % 200 === 0) { // Removed point_idx filter based on user preference
+                                const visualization_angle = (360 - angle + 90) % 360;
+                                const vec = newPoint(0, Math.cos(visualization_angle * DEG2RAD), Math.sin(visualization_angle * DEG2RAD));
+                                slice.output().setLayer("machinability", {line: lineColor})
+                                    .addPoly(newPolygon([point, point.add(vec)]));
+                            }
                         }
                     }
                 }
