@@ -379,109 +379,129 @@ export async function generateFourAxis(params) {
       }
     }
 
-    // 5. Assemble points into continuously-machinable paths. We do this using
-    // the greedy method described in the paper.
+    // 5. Assemble points into continuously-machinable paths.
+    // This implements a two-stage approach based on the "FourAxis" paper.
+    // First, an "over-segmentation" step generates all possible maximal paths.
+    // Second, a greedy selection process picks the best paths from that set.
 
-    // helper functions for MDR combination
-    let sectorsIntersect = (s1, s2) => (s1[0] <= s2[1] && s2[0] <= s1[1]);
-    let largestSector = (sectors) => {
-      if (sectors.length == 0) {
+    const largestSector = (sectors) => {
+      if (!sectors || sectors.length === 0) {
         return null;
       }
       let out = sectors[0];
-      for (let s of sectors) {
+      for (let i = 1; i < sectors.length; i++) {
+        const s = sectors[i];
         if ((s[1] - s[0]) > (out[1] - out[0])) {
           out = s;
         }
       }
       return out;
     };
-    let nextSector = (currentSector, MDR) => {
-      return largestSector(MDR.filter((s) => sectorsIntersect(currentSector, s)));
+
+    const nextSector = (currentSector, mdr) => {
+      if (!mdr || mdr.length === 0) {
+        return null;
+      }
+      const intersecting = mdr.filter(s => (currentSector[0] <= s[1] && s[0] <= currentSector[1]));
+      return largestSector(intersecting);
     };
 
     let paths = [];
     for (const contour of resampledContours) {
-      if (!contour.points) continue;
-
-      let reachablePoints = 0;
-      contour.points.forEach((p) => {
-        if (p._4axis === undefined) {
-          p._4axis = {};
-        }
-        p._4axis.pathLabel = null;
-        p._4axis.reachable = (p.MDR.length > 0);
-        if (p._4axis.reachable) reachablePoints++;
-      });
-      let includedPoints = 0;
-      while(includedPoints < reachablePoints) {
-        // pick a random reachable and unassigned point 
-        let ptIndex = Math.floor(Math.random() * contour.points.length);
-        while(!contour.points[ptIndex]._4axis.reachable || contour.points[ptIndex]._4axis.pathLabel != null) {
-          ptIndex++;
-          ptIndex %= contour.points.length;
-        };
-
-        let pt = contour.points[ptIndex];
-        // In order to get from point n to point n+1, they need to have at least
-        // some overlap in their MDR. This corresponds to the reality of "there
-        // has to be a machining angle that we can use to move between n and
-        // n+1."
-        //
-        // Once we move on to the next point and consider the one after that,
-        // we're limited to the MDS(s) that overlapped with the first point. In
-        // other words, once we're at point n+1, we can move to any machinable
-        // angle allowed for that point as long as we don't cross out of the
-        // machinable direction sector that we're in.
-        //
-        // The fully correct way to do this would be to recursively branch over
-        // all possible sector overlaps and pick the longest path, but per the
-        // paper we're just going to pick the biggest sector of our starting
-        // point and use that.
-
-        // pick the largest sector
-        let sector = largestSector(pt.MDR);
-        let forwardPath = [{point: pt, sector: sector}];
-        let backwardPath = [];
-
-        // do the forward pathing
-        let i = ptIndex;
-        pt = contour.points[(i + 1) % contour.points.length];
-        while (pt._4axis.reachable &&
-               pt._4axis.pathLabel == null && 
-               nextSector(sector, pt.MDR) != null) {
-
-          sector = nextSector(sector, pt.MDR);
-          forwardPath.push({point: pt, sector: sector});
-          pt._4axis.reachable = true;
-          pt._4axis.pathLabel = paths.length;
-          i++;
-          pt = contour.points[(i + 1) % contour.points.length];
+        if (!contour.points || contour.points.length === 0) {
+            continue;
         }
 
-        // do backward pathing
-        i = ptIndex;
-        pt = contour.points[(i - 1 + contour.points.length) % contour.points.length];
-        sector = largestSector(pt.MDR);
-        while (pt._4axis.reachable &&
-               pt._4axis.pathLabel == null && 
-               nextSector(sector, pt.MDR) != null) {
+        // --- Stage 1: Over-segmentation ---
+        // Generate all possible maximal paths from every reachable starting point.
 
-          backwardPath.push({point: pt, sector: sector});
-          pt._4axis.reachable = true;
-          pt._4axis.pathLabel = paths.length;
-          sector = nextSector(sector, pt.MDR);
-          i--;
-          pt = contour.points[(i - 1 + contour.points.length) % contour.points.length];
+        const potential_paths = [];
+        contour.points.forEach((startPoint, startIndex) => {
+            if (!startPoint.MDR || startPoint.MDR.length === 0) {
+                return;
+            }
+
+            const startSector = largestSector(startPoint.MDR);
+            if (!startSector) {
+                return;
+            }
+
+            // extend forward
+            const forwardPath = [{ point: startPoint, sector: startSector }];
+            let lastSectorFwd = startSector;
+            let currentIndex = startIndex;
+            while (true) {
+                currentIndex = (currentIndex + 1) % contour.points.length;
+                const nextPoint = contour.points[currentIndex];
+                if (nextPoint === startPoint) break; // completed a full loop
+
+                const extendingSector = nextSector(lastSectorFwd, nextPoint.MDR);
+                if (extendingSector) {
+                    lastSectorFwd = extendingSector;
+                    forwardPath.push({ point: nextPoint, sector: lastSectorFwd });
+                } else {
+                    break;
+                }
+            }
+
+            // extend backward
+            const backwardPath = [];
+            let lastSectorBwd = startSector;
+            currentIndex = startIndex;
+            while (true) {
+                currentIndex = (currentIndex - 1 + contour.points.length) % contour.points.length;
+                const nextPoint = contour.points[currentIndex];
+                if (nextPoint === startPoint || nextPoint === forwardPath.peek()?.point) break;
+
+                const extendingSector = nextSector(lastSectorBwd, nextPoint.MDR);
+                if (extendingSector) {
+                    lastSectorBwd = extendingSector;
+                    backwardPath.push({ point: nextPoint, sector: lastSectorBwd });
+                } else {
+                    break;
+                }
+            }
+
+            potential_paths.push([...backwardPath.reverse(), ...forwardPath]);
+        });
+
+        // --- Stage 2: Improved Greedy Selection ---
+        // Iteratively select the best path from the potential paths.
+
+        // Add a temporary 'used' flag to each point for this stage
+        contour.points.forEach(p => { p._used = false });
+
+        const final_paths = [];
+        while (true) {
+            // Sort potential paths by the number of unused points they contain
+            potential_paths.sort((a, b) => {
+                const a_unused = a.filter(node => !node.point._used).length;
+                const b_unused = b.filter(node => !node.point._used).length;
+                return b_unused - a_unused;
+            });
+
+            const best_path = potential_paths[0];
+
+            // If no more usable paths can be found, we're done
+            if (!best_path || best_path.filter(node => !node.point._used).length === 0) {
+                break;
+            }
+
+            // Add the best path to our final list
+            const path_to_add = best_path.filter(node => !node.point._used);
+            final_paths.push(path_to_add);
+
+            // Mark points in the chosen path as used
+            for (const node of path_to_add) {
+                node.point._used = true;
+            }
         }
+        paths.appendAll(final_paths);
 
-        backwardPath.reverse();
-        let fullPath = [...backwardPath, ...forwardPath];
-        includedPoints += fullPath.length;
-        paths.push(fullPath);
-
-      }
+        // Clean up temporary flags
+        contour.points.forEach(p => { delete p._used });
     }
+
     if (sidx == 200) {
       paths.map((path) => {
         console.log("Path: " + (path.map((pp) => {
@@ -489,15 +509,22 @@ export async function generateFourAxis(params) {
           return `(${p.y}, ${p.z}, ${(pp.sector[0]+pp.sector[1])/2})`;
         })).reduce((a,b) => (a + " " + b), ""));
       });
-    slice.camLines = paths.map((path) => {
-      let pts = path.map((p) => { 
-        let angle = (p.sector[0] + p.sector[1])/2;
-        return p.point.clone().rotateYZ(angle*DEG2RAD).setA(angle);
-      });
-      return newPolygon().addPoints(pts).setOpen();
-    });
-    }
-    if (sidx == 200) {
+          slice.camLines = paths.map((path) => {
+            let pts = path.map((p) => {
+              let angle = (p.sector[0] + p.sector[1])/2;
+              let tool_direction_point = p.point.clone().rotateYZ(angle*DEG2RAD).setA(angle);
+    
+              // Add tool direction visualization
+              const visualization_angle = (360 - angle + 90) % 360;
+              const vec = newPoint(0, Math.cos(visualization_angle * DEG2RAD), Math.sin(visualization_angle * DEG2RAD));
+              slice.output().setLayer("tool-direction", {line: 0xFFFF00}) // Yellow for tool direction
+                .addPoly(newPolygon([tool_direction_point, tool_direction_point.clone().add(vec.scale(5))])); // Scale vector for visibility
+    
+              return tool_direction_point;
+            });
+            return newPolygon().addPoints(pts).setOpen();
+          });
+        }    if (sidx == 200) {
       slice.output().setLayer("machinability-paths", {line: [0xFF0000, 0x00FF00, 0x0000FF][Math.floor(Math.random()*3)]})
         .addPoly(newPolygon().addPoints(slice.camLines).setOpen());
     }
