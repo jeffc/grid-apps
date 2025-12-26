@@ -212,15 +212,19 @@ function convertBoolsToMDR(machinable) {
     if (isMachinable && start === -1) {
       // start of a new machinable sector
       start = i;
-    } else if (!isMachinable && start !== -1) {
+    } else if (!isMachinable && start !== -1 ) {
       // end of a sector
-      mdr.push([start, i]);
+      const sectorEnd = (i + 360 - 1) % 360;
+      // differentiate zero-length and 360-length sectors
+      if (start != sectorEnd || i == 360) {
+        mdr.push([start, sectorEnd]);
+      }
       start = -1;
     }
   }
 
   // if the loop finishes while in a sector, it's either a full 360 range or wraps around
-  if (start !== -1 && mdr.length === 0) {
+  if (start !== -1) {
     mdr.push([start, 360]);
   }
 
@@ -280,7 +284,7 @@ export async function generateFourAxis(params) {
     }
 
     // 1. Resample contours and pre-calculate normals
-    const resampledContours = contours.map(con => resampleClosedContour(con.poly, 10));
+    const resampledContours = contours.map(con => resampleClosedContour(con.poly, 5));
     for (const contour of resampledContours) {
       const nPoints = contour.points.length;
       if (nPoints === 0) continue;
@@ -375,7 +379,7 @@ export async function generateFourAxis(params) {
         // Extrapolate machinability before converting to MDR ranges
         const fullMachinable = extrapolateMachinability(point._4axis.machinable, angleStep);
         point.MDR = convertBoolsToMDR(fullMachinable);
-        delete point._4axis;
+        delete point._4axis.machinable;
       }
     }
 
@@ -398,11 +402,26 @@ export async function generateFourAxis(params) {
       return out;
     };
 
+    // compute if two sectors overlap by rotating both so that sector1 starts at
+    // zero
+    const sectorsOverlap = (s1, s2) => {
+      let [a,b] = s1;
+      let [c,d] = s2;
+      
+      let bb = (b-a+360) % 360;
+      let cc = (c-a+360) % 360;
+      let dd = (d-a+360) % 360;
+
+      // return true if s2 starts before s1 ends, OR if s2 wraps past the zero
+      // mark (where s1 starts)
+      return (cc <= bb || cc > dd);
+    };
+
     const nextSector = (currentSector, mdr) => {
       if (!mdr || mdr.length === 0) {
         return null;
       }
-      const intersecting = mdr.filter(s => (currentSector[0] <= s[1] && s[0] <= currentSector[1]));
+      const intersecting = mdr.filter(s => sectorsOverlap(currentSector, s));
       return largestSector(intersecting);
     };
 
@@ -502,29 +521,123 @@ export async function generateFourAxis(params) {
         contour.points.forEach(p => { delete p._used });
     }
 
+    paths = [[
+      {point: newPoint(0, -10, -10), sector: [90, 270]},
+      {point: newPoint(0, 0, -10), sector: [90, 270]},
+      {point: newPoint(0, 10, -10), sector: [90, 270]},
+
+      {point: newPoint(0, 10, 0), sector: [0, 180]},
+      {point: newPoint(0, 10, 10), sector: [0, 180]},
+    ]
+    ];
+
+    // do a pass through the paths and assign angles. prefer only changing
+    // angles when necessary, and prefer machining normal to the path
+
+    // compute the path normal at each point. since paths are wound
+    // counterclockwise, the normal is the average of the incoming and outgoing
+    // edge angles relative to the Y axis, each rotated by 90 degrees.
+    paths.forEach((path) => {
+      for (let i = 0; i < path.length; i++) {
+        let pt = path[i].point;
+        if (!pt._path) {
+          pt._path = {};
+        }
+
+        if (path.length == 1) {
+          pt._path.normAngle = (Math.atan2(pt._4axis.vnorm.z, pt._4axis.vnorm.y)*RAD2DEG + 360) % 360;
+        } else if (i == 0) {
+          const nextpt = path[i+1].point;
+          pt._path.normAngle = (Math.atan2(nextpt.z - pt.z, nextpt.y - pt.y)*RAD2DEG + 360 - 90) % 360;
+        } else if (i == path.length - 1) {
+          const prevpt = path[i-1].point;
+          pt._path.normAngle = (Math.atan2(pt.z - prevpt.z, pt.y - prevpt.y)*RAD2DEG + 360 - 90) % 360;
+        } else {
+          const nextpt = path[i+1].point;
+          const prevpt = path[i-1].point;
+          pt._path.normAngle = (((Math.atan2(nextpt.z - pt.z, nextpt.y - pt.y)*RAD2DEG + 360 - 90) % 360) +
+                            ((Math.atan2(pt.z - prevpt.z, pt.y - prevpt.y)*RAD2DEG + 360 - 90) % 360)) / 2;
+        }
+        if (sidx % 200 === 0) {
+          let normVec = newPoint(0, 1, 0).rotateYZ(pt._path.normAngle * DEG2RAD);
+          slice.output().setLayer("path-normals", {line: 0xFFFFFF})
+            .addPoly(newPolygon([pt, pt.clone().add(normVec)]));
+        }
+      }
+    });
+
     if (sidx == 200) {
       paths.map((path) => {
         console.log("Path: " + (path.map((pp) => {
           let p = pp.point;
-          return `(${p.y}, ${p.z}, ${(pp.sector[0]+pp.sector[1])/2})`;
+          let a = (p._path === undefined) ? "undef" : p._path.normAngle;
+          return `(${p.y}, ${p.z}, ${a}})`;
         })).reduce((a,b) => (a + " " + b), ""));
       });
-          slice.camLines = paths.map((path) => {
-            let pts = path.map((p) => {
-              let angle = (p.sector[0] + p.sector[1])/2;
-              let tool_direction_point = p.point.clone().rotateYZ(angle*DEG2RAD).setA(angle);
-    
-              // Add tool direction visualization
-              const visualization_angle = (360 - angle + 90) % 360;
-              const vec = newPoint(0, Math.cos(visualization_angle * DEG2RAD), Math.sin(visualization_angle * DEG2RAD));
-              slice.output().setLayer("tool-direction", {line: 0xFFFF00}) // Yellow for tool direction
-                .addPoly(newPolygon([tool_direction_point, tool_direction_point.clone().add(vec.scale(5))])); // Scale vector for visibility
-    
-              return tool_direction_point;
-            });
-            return newPolygon().addPoints(pts).setOpen();
-          });
-        }    if (sidx == 200) {
+
+      // helper function. given a point on the contour and the global rotation,
+      // computes where the point ends up after that rotation.
+      let rotatedPoint = (pt, angle_deg) => {
+        return pt.clone().rotateYZ(angle_deg*DEG2RAD);
+      };
+
+      let chooseAngle = (p) => {
+        let na = (p.point._path.normAngle - 90 + 360) % 360;
+        let s = p.sector;
+
+        // if the path normal at this point is within the machinable sector, use
+        // that angle
+        if (na >= s[0] && na <= s[1]) {
+          return na;
+        }
+
+        // otherwise use whichever end of the machinable range is closer to the
+        // normal
+        const diffStart = (s[0] - na + 360) % 360;
+        const diffEnd = (s[1] - na + 360) % 360;
+        if (diffStart <= diffEnd) {
+          return s[0];
+        } else {
+          return s[1];
+        }
+      };
+
+      // add extra points to handle angle changes
+      let camPaths = paths.map((path) => {
+        let outPath = [];
+        let prevAngle = chooseAngle(path[0]);
+        let prevPoint = path[0].point;
+        for (let i = 0; i < path.length; i++) {
+          let p = path[i];
+          let angle = (chooseAngle(p));
+          if (angle != prevAngle) {
+            console.log(`inserting point to move between ${prevAngle} and ${angle} at ${[prevPoint.y, prevPoint.z]}`);
+            // TODO - does this violate machinability constraints?
+            outPath.push(rotatedPoint(p.point, prevAngle).setA(-prevAngle));
+          }
+          prevAngle = angle;
+          prevPoint = p.point;
+          console.log(`including point at ${angle} at ${[p.point.y, p.point.z]}`);
+          outPath.push(rotatedPoint(p.point, angle).setA(-angle));
+        }
+        console.log(outPath);
+        debugger;
+        return outPath;
+      });
+
+      if (sidx == 200) {
+        camPaths.map((path) => {
+          console.log("Augmented path: " + (path.map((p) => {
+            return `(${Math.round(p.y, 2)}, ${Math.round(p.z, 2)}, ${p.a}})`;
+          })).reduce((a,b) => (a + " " + b), ""));
+        });
+        slice.camLines = camPaths.map((path) => {
+          return newPolygon().addPoints(path).setOpen();
+        });
+      }
+       //   console.log(`${[p.point.y, p.point.z, angle]} -> ${[path_point.y, path_point.z]}`);
+    } 
+    if (sidx == 200) {
       slice.output().setLayer("machinability-paths", {line: [0xFF0000, 0x00FF00, 0x0000FF][Math.floor(Math.random()*3)]})
         .addPoly(newPolygon().addPoints(slice.camLines).setOpen());
     }
