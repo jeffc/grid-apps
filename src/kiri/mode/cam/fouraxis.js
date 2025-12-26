@@ -483,6 +483,12 @@ export async function generateFourAxis(params) {
       }
     }
     if (sidx == 200) {
+      paths.map((path) => {
+        console.log("Path: " + (path.map((pp) => {
+          let p = pp.point;
+          return `(${p.y}, ${p.z}, ${(pp.sector[0]+pp.sector[1])/2})`;
+        })).reduce((a,b) => (a + " " + b), ""));
+      });
     slice.camLines = paths.map((path) => {
       let pts = path.map((p) => { 
         let angle = (p.sector[0] + p.sector[1])/2;
