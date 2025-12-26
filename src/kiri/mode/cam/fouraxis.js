@@ -156,52 +156,48 @@ function isMachinable(p, vnorm, angle, grid) {
   return true;
 }
 
-// resample a closed contour with the given spacing. also includes the original
-// points to prevent loss of resolution
 function resampleClosedContour(poly, spacing) {
-  if (!poly || !poly.points) return newPolygon();
-  const pts = poly.points;
-  if (!Array.isArray(pts) || pts.length === 0) return newPolygon();
-  if (spacing <= 0) throw new Error("spacing must be > 0");
+    if (!poly || !poly.points) return newPolygon();
+    const pts = poly.points;
+    if (!Array.isArray(pts) || pts.length === 0) return newPolygon();
+    if (spacing <= 0) throw new Error("spacing must be > 0");
 
-  const dist3 = (a, b) => Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2));
+    const dist3 = (a, b) => Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2));
 
-  const segs = [];
-  const n = pts.length;
-  if (n === 1) return newPolygon().addPoints([pts[0].clone()]);
+    const result = [];
+    let accumulatedLength = 0;
+    const epsilon = 1e-9;
 
-  for (let i = 0; i < n; i++) {
-    const p1 = pts[i];
-    const p2 = pts[(i + 1) % n];
-    segs.push({ a: p1, b: p2, len: dist3(p1, p2) });
-  }
+    for (let i = 0; i < pts.length; i++) {
+        const p1 = pts[i];
+        const p2 = pts[(i + 1) % pts.length];
+        const segmentLength = dist3(p1, p2);
 
-  const total = segs.reduce((s, x) => s + x.len, 0);
-  if (total === 0) return newPolygon().addPoints([pts[0].clone()]);
+        // Add the start point of the segment, avoiding duplicates
+        if (result.length === 0 || dist3(result[result.length - 1], p1) > epsilon) {
+            result.push(p1);
+        }
 
-  const sampleCount = Math.floor(total / spacing);
-  const result = [];
-  let segIndex = 0;
-  let segAccum = 0;
-  for (let i = 0; i < sampleCount; i++) {
-    const pos = i * spacing;
-    while (segIndex < segs.length && segAccum + segs[segIndex].len < pos - 1e-12) {
-      segAccum += segs[segIndex].len;
-      segIndex++;
+        if (segmentLength > epsilon) {
+            const numSamples = Math.floor(segmentLength / spacing);
+            
+            for (let j = 1; j <= numSamples; j++) {
+                const sampleDist = j * spacing;
+                if (sampleDist < segmentLength - epsilon) {
+                    const t = sampleDist / segmentLength;
+                    const newPt = newPoint(
+                        p1.x + (p2.x - p1.x) * t,
+                        p1.y + (p2.y - p1.y) * t,
+                        p1.z + (p2.z - p1.z) * t
+                    );
+                    result.push(newPt);
+                }
+            }
+        }
+        accumulatedLength += segmentLength;
     }
-    if (segIndex >= segs.length) segIndex = segs.length - 1;
 
-    const seg = segs[segIndex];
-    const segLen = seg.len || 1e-12;
-    const t = Math.max(0, Math.min(1, (pos - segAccum) / segLen));
-    result.push(newPoint(
-      seg.a.x + (seg.b.x - seg.a.x) * t,
-      seg.a.y + (seg.b.y - seg.a.y) * t,
-      seg.a.z + (seg.b.z - seg.a.z) * t
-    ));
-  }
-
-  return newPolygon().addPoints(result).setClosed();
+    return newPolygon().addPoints(result).setClosed();
 }
 
 function convertBoolsToMDR(machinable) {
@@ -283,8 +279,6 @@ export async function generateFourAxis(params) {
       continue;
     }
 
-    console.log(`${contours.length} contours`);
-
     // 1. Resample contours and pre-calculate normals
     const resampledContours = contours.map(con => resampleClosedContour(con.poly, 10));
     for (const contour of resampledContours) {
@@ -320,10 +314,6 @@ export async function generateFourAxis(params) {
       }
     }
 
-    if(contours.length > 1) {
-      console.log("finished resample");
-    }
-
     // 2. Iterate by angle, building a spatial grid for each
     for (let angle = 0; angle < 360; angle += angleStep) { // Use angleStep here
       const bounds = { min: { x: Infinity, y: Infinity }, max: { x: -Infinity, y: -Infinity } };
@@ -345,11 +335,6 @@ export async function generateFourAxis(params) {
       bounds.max.x += padding;
       bounds.max.y += padding;
 
-    if(contours.length > 1 && angle == 0) {
-      console.log("checkpoint1");
-      console.log(resampledContours.length);
-      console.log(bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y);
-    }
       const grid = new SpatialGrid(bounds, 2.0);
       rotatedPolys.forEach(poly => {
         const points = poly.points;
@@ -361,13 +346,6 @@ export async function generateFourAxis(params) {
           grid.insert(seg2d);
         }
       });
-    if(contours.length > 1 && angle == 0) {
-      console.log("checkpoint2");
-    }
-
-    if(contours.length > 1 && angle == 0) {
-      console.log("finished grid building");
-    }
 
       // 3. Check machinability for each point at this angle
       for (const contour of resampledContours) {
@@ -388,15 +366,7 @@ export async function generateFourAxis(params) {
           }
         }
       }
-
-      if(contours.length > 1 && angle == 0) {
-        console.log("finished grid building");
-      }
     }
-
-      if(contours.length > 1) {
-        console.log("finished computation");
-      }
 
     // 4. Convert boolean arrays to MDR ranges
     for (const contour of resampledContours) {
@@ -413,7 +383,6 @@ export async function generateFourAxis(params) {
     // the greedy method described in the paper.
 
     // helper functions for MDR combination
-    /*
     let sectorsIntersect = (s1, s2) => (s1[0] <= s2[1] && s2[0] <= s1[1]);
     let largestSector = (sectors) => {
       if (sectors.length == 0) {
@@ -498,7 +467,7 @@ export async function generateFourAxis(params) {
                pt._4axis.pathLabel == null && 
                nextSector(sector, pt.MDR) != null) {
 
-          backwardPath.push(pt);
+          backwardPath.push({point: pt, sector: sector});
           pt._4axis.reachable = true;
           pt._4axis.pathLabel = paths.length;
           sector = nextSector(sector, pt.MDR);
@@ -510,10 +479,22 @@ export async function generateFourAxis(params) {
         let fullPath = [...backwardPath, ...forwardPath];
         includedPoints += fullPath.length;
         paths.push(fullPath);
+
       }
-      console.log(`Found ${paths.length} unique paths`);
     }
-      */
+    if (sidx == 200) {
+    slice.camLines = paths.map((path) => {
+      let pts = path.map((p) => { 
+        let angle = (p.sector[0] + p.sector[1])/2;
+        return p.point.clone().rotateYZ(angle*DEG2RAD).setA(angle);
+      });
+      return newPolygon().addPoints(pts).setOpen();
+    });
+    }
+    if (sidx == 200) {
+      slice.output().setLayer("machinability-paths", {line: [0xFF0000, 0x00FF00, 0x0000FF][Math.floor(Math.random()*3)]})
+        .addPoly(newPolygon().addPoints(slice.camLines).setOpen());
+    }
   }
   return sliced;
 }
