@@ -762,52 +762,13 @@ export function sliceConnect(input, z, opt = {}) {
     if (debug) console.log({ emitted, output });
     if (debug && emitted < points.length) console.log({ leftovers:points.length - emitted });
 
-    // force winding on polygons so that nesting works reliably
-    // consider each closed polygon in isolation. for each edge, project a ray
-    // from the midpoint along the normal vector out to infinity. If it crosses
-    // an odd number of other edges, the normal vector is properly pointing
-    // outwards. If it crosses an even number of edges, the edge in question
-    // needs to be reversed. Reversing the winding of the whole polygon will
-    // be sufficient to accomplish this.
-    let rayCrossesSegment = (ro, rv, p1, p2) => {
-        const v1 = { x: ro.x - p1.x, y: ro.y - p1.y };
-        const v2 = { x: p2.x - p1.x, y: p2.y - p1.y }; // edge vector
-        const v3 = { x: -rv.y, y: rv.x }; // perpendicular to ray vector
-        const dot = (v2.x * v3.x) + (v2.y * v3.y);
-        // parallel or collinear
-        if (Math.abs(dot) < 1e-6) {
-            return 0;
-        }
-        const t1 = ((v2.x * v1.y) - (v2.y * v1.x)) / dot; // ray t-value
-        const t2 = ((v1.x * v3.x) + (v1.y * v3.y)) / dot; // segment t-value
-        // intersection must be forward on ray and within segment
-        return t1 >= 0 && t2 >= 0 && t2 <= 1 ? 1 : 0;
-    };
-
+    // force consistent CCW winding on all polygons using signed area
+    // so that nesting works reliably
     for (const poly of output) {
         if (poly.length < 3 || poly.isOpen()) {
             continue;
         }
-
-        const p1 = poly.points[0];
-        const p2 = poly.points[1];
-        const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
-        const edge_vec = { x: p2.x - p1.x, y: p2.y - p1.y };
-        const norm_vec = { x: -edge_vec.y, y: edge_vec.x };
-
-        let intersections = 0;
-        for (let i = 0; i < poly.length; i++) {
-            const seg_p1 = poly.points[i];
-            const seg_p2 = poly.points[(i + 1) % poly.length];
-            // do not test ray against its own segment
-            if (seg_p1 === p1 && seg_p2 === p2) {
-                continue;
-            }
-            intersections += rayCrossesSegment(mid, norm_vec, seg_p1, seg_p2);
-        }
-
-        // if even crossings, normal points inward, so reverse winding
-        if (intersections % 2 === 0) {
+        if (poly.isClockwise()) {
             poly.reverse();
         }
     }

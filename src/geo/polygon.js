@@ -1796,10 +1796,21 @@ export class Polygon {
         }
         if (this.area2 === undefined) {
             this.area2 = 0.0;
+            const alignment = this.alignment();
             for (let p = this.points, pl = p.length, pi = 0, p1, p2; pi < pl; pi++) {
                 p1 = p[pi];
                 p2 = p[(pi + 1) % pl];
-                this.area2 += (p2.x - p1.x) * (p2.y + p1.y);
+                switch (alignment) {
+                    case 'xy':
+                        this.area2 += (p2.x - p1.x) * (p2.y + p1.y);
+                        break;
+                    case 'xz':
+                        this.area2 += (p2.x - p1.x) * (p2.z + p1.z);
+                        break;
+                    case 'yz':
+                        this.area2 += (p2.y - p1.y) * (p2.z + p1.z);
+                        break;
+                }
             }
         }
         return raw ? this.area2 : Math.abs(this.area2 / 2);
