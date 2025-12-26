@@ -170,6 +170,12 @@ function resampleClosedContour(poly, spacing) {
   const n = pts.length;
   if (n === 1) return newPolygon().addPoints([pts[0].clone()]);
 
+  for (let i = 0; i < n; i++) {
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % n];
+    segs.push({ a: p1, b: p2, len: dist3(p1, p2) });
+  }
+
   const total = segs.reduce((s, x) => s + x.len, 0);
   if (total === 0) return newPolygon().addPoints([pts[0].clone()]);
 
@@ -278,7 +284,6 @@ export async function generateFourAxis(params) {
     }
 
     console.log(`${contours.length} contours`);
-    contours.forEach((c) => console.log(c.poly.points.map((p) => `${[p.x, p.y, p.z]}`)));
 
     // 1. Resample contours and pre-calculate normals
     const resampledContours = contours.map(con => resampleClosedContour(con.poly, 10));
