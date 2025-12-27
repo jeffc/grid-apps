@@ -230,6 +230,7 @@ export function createPopOps() {
         flats: 'camRoughFlat',
         inside: 'camRoughIn',
         omitthru: 'camRoughOmitThru',
+        adaptive: 'camRoughAdaptive',
         ov_topz: 0,
         ov_botz: 0,
     }).inputs = {
@@ -249,6 +250,7 @@ export function createPopOps() {
         flats: UC.newBoolean(LANG.cr_clrf_s, undefined, { title: LANG.cr_clrf_l }),
         inside: UC.newBoolean(LANG.cr_olin_s, undefined, { title: LANG.cr_olin_l, show: () => !env.poppedRec.all || env.poppedRec.inside }),
         omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l }),
+        adaptive: UC.newBoolean(LANG.cr_adap_s, undefined, { title: LANG.cr_adap_l }),
         sep: UC.newBlank({ class: "pop-sep" }),
         exp: UC.newExpand("overrides"),
         ov_topz: UC.newInput(LANG.ou_ztop_s, { title: LANG.ou_ztop_l, convert: toFloat, units }),

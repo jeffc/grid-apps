@@ -19,11 +19,25 @@ const ptyp = clib.PolyType;
 const cfil = clib.PolyFillType;
 const ts_eps = 0.01;
 
+/**
+ * OpArea is a CAM operation that handles different area-based toolpath generations
+ * like clearing, tracing, and surface milling. It takes a set of selected
+ * areas (polygons), and depending on the mode, generates toolpaths.
+ *
+ * It's a versatile operation that forms the basis for several user-facing CAM
+ * operations like "pocketing", "roughing", and "contouring".
+ */
 class OpArea extends CamOp {
     constructor(state, op) {
         super(state, op);
     }
 
+    /**
+     * The slice method is the core of the OpArea operation. It takes the user's
+     * selections and settings and generates the toolpaths as a series of "slices".
+     *
+     * @param {function} progress - Function to report progress
+     */
     async slice(progress) {
         let { op, state } = this;
         let { direction, down, expand, flats, flatOff, follow } = op;
@@ -44,6 +58,7 @@ class OpArea extends CamOp {
         // also updates tab offsets
         setToolDiam(toolDiam);
 
+        // --- Area and Surface Polygon Selection ---
         // selected area polygons: surfaces and edges
         let { devel, edgeangle } = settings.controller;
         let polys = [];
@@ -64,7 +79,7 @@ class OpArea extends CamOp {
             return stack.peek();
         }
 
-        // gather area selections
+        // gather area selections (from user clicks)
         for (let arr of (op.areas[widget.id] ?? [])) {
             let poly = newPolygon().fromArray(arr);
             aminz = Math.min(aminz, poly.minZ());
@@ -75,7 +90,7 @@ class OpArea extends CamOp {
         // surface and edge selections produce open polygons by default
         polys = POLY.nest(POLY.reconnect(polys, false));
 
-        // gather surface selections
+        // gather surface selections (from face selections)
         let vert = widget.getGeoVertices({ unroll: true, translate: true }).map(v => v.round(4));
         let faces = CAM.surface_find(widget, (op.surfaces[widget.id] ?? []), (follow ?? edgeangle ?? 5) * DEG2RAD);
         let fpoly = [];
@@ -93,6 +108,7 @@ class OpArea extends CamOp {
         // add in unioned surface areas
         polys.push(...POLY.setZ(POLY.union(fpoly, 0.00001, true), aminz));
 
+        // --- Polygon Manipulation ---
         // smoothing for jaggies usually caused by vertical walls
         if (smoothVal) {
             polys = polys.map(poly => POLY.offset(POLY.offset([ poly ], smoothVal), -smoothVal)).flat();
@@ -114,11 +130,13 @@ class OpArea extends CamOp {
             polys = POLY.union(nupolys, 0.00001, true);
         }
 
+        // --- Toolpath Generation ---
         // process each area separately
         let proc = 0;
         let pinc = 1 / polys.length;
         for (let area of polys) {
             let bounds = area.getBounds3D();
+            // tool shadow offset, used for travel boundaries
             let ts_off = toolDiam / 2 - ts_eps + (op.leave_xy ?? 0);
             let offopt = {
                 arc: 250,
@@ -134,12 +152,14 @@ class OpArea extends CamOp {
                 area.inner = undefined;
             }
 
+            // for debugging, output the selected area
             newLayer().output()
                 .setLayer("area", { line: 0xff8800 }, false)
                 .addPolys([ area ]);
 
             newArea();
 
+            // 'clear' mode: Pocketing operation
             if (mode === 'clear') {
                 let zMov = flatOff ?? 0;
                 let zs = flats ?
@@ -154,6 +174,7 @@ class OpArea extends CamOp {
                     let slice = newLayer(z);
                     let layers = slice.output();
                     let shadow = await shadowAt(z);
+                    // tool_shadow is used to create travel boundaries
                     let tool_shadow = [
                         ...POLY.offset(shadow, [  ts_off ], { count: 1, z, ...offopt }),
                         ...POLY.offset(shadow, [ -ts_off ], { count: 1, z, ...offopt }),
@@ -207,6 +228,7 @@ class OpArea extends CamOp {
                     zroc += zinc;
                     lzo = z;
                     progress(proc + (pinc * zroc), 'clear');
+                    // for debugging, output shadow polygons
                     if (devel) layers
                         .setLayer("base", { line: 0xff0000 }, false)
                         .addPolys(shadowBase)
@@ -224,8 +246,37 @@ class OpArea extends CamOp {
                 }
                 proc += pinc;
                 progress(proc, 'clear');
-            } else
-            if (mode === 'trace') {
+            } else if (mode === 'adaptive') {
+              console.log("Doing adaptive roughing");
+
+              // 1. Slice the model by a small step and store the resulting
+              //    shadows at each height. Also store the area to be machined
+              //    (area minus shadow) for each layer
+
+              // 2. Starting at the top and working down, set each layer's
+              //    machinable area to the intersection of the computed
+              //    machinable area and the machinable area for the slice above.
+              //    This represents eliminating any area covered by an
+              //    overhang.
+              
+              // 3. Compute Z steps based on the step down distance. Then,
+              //    consider the height range from the step down to the top.
+              //
+              //      a) Starting at the bottom of the range, generate a
+              //         toolpath that clears the machinable area.
+
+              //      b) Look at the machinable area of the next z-slice up, and
+              //         subtract the machinable area from the slice we just
+              //         cleared. If there's any area left, generate a toolpath
+              //         to clear it. If not, move on to the next step up until
+              //         we hit the top of the range.
+              //
+              //      c) step down to the next major step (based on the step
+              //         down distance) and repeat (a) and (b) upwards until we
+              //         hit the layer we already machined.
+
+            } else if (mode === 'trace') {
+                // 'trace' mode: Follows a line or path
                 let { tr_over, tr_type  } = op;
                 let zs = down ? base_util.lerp(zTop, op.thru ? zBottom : Math.max(zBottom, area.minZ()), down) : [ bounds.min.z ];
                 let zroc = 0;
@@ -236,10 +287,12 @@ class OpArea extends CamOp {
                     let shadow = await shadowAt(z);
                     let outs = [];
                     if (tr_type === 'none') {
+                        // 'none' trace type just uses the selected area as the toolpath
                         // todo: move this out of the zs loop and only setZ when needed
                         area = area.clone(true);
                         outs = [ zs.length > 1 || op.thru ? area.setZ(z) : clampZ(area, zTop, zBottom) ];
                     } else {
+                        // 'inside' or 'outside' trace type offsets from the selected area
                         // drape is legacy outline
                         let offit = op.drape ? shadow : [ area ];
                         if (op.omitthru && op.drape) {
@@ -302,6 +355,7 @@ class OpArea extends CamOp {
                 progress(proc, 'trace');
             } else
             if (mode === 'surface') {
+                // 'surface' mode: Generates toolpaths that follow the 3D surface of the model.
                 let { sr_type, sr_angle, tolerance } = op;
 
                 let resolution = tolerance || 0.05;
@@ -309,8 +363,9 @@ class OpArea extends CamOp {
                 let surface = [];
                 let paths = [];
 
-                // prepare paths
+                // prepare paths based on surface type
                 if (sr_type === 'linear') {
+                    // 'linear' surface type generates parallel scan lines across the area
                     // scan the area bounding box with rays at defined angle
                     let scan = scanBoxAtAngle(bounds, sr_angle * DEG2RAD, toolOver);
                     let lines = scan.map(line => {
@@ -331,6 +386,7 @@ class OpArea extends CamOp {
                     paths = paths.map(poly => poly.points.map(p => [ p.x, p.y ]).flat().toFloat32());
                 } else
                 if (sr_type === 'offset') {
+                    // 'offset' surface type generates paths by progressively offsetting from the perimeter
                     // progressive inset from perimeter
                     POLY.offset([ area ], [ -toolDiam / 2, -toolOver ], {
                         count: 999, outs: paths, flat: true, z: 0, minArea: 0
@@ -339,7 +395,7 @@ class OpArea extends CamOp {
                     paths = paths.map(poly => poly.points.map(p => [ p.x, p.y ]).flat().toFloat32());
                 }
 
-                // prepare tool mesh points
+                // prepare tool mesh points for GPU rastering
                 let toolBounds = new THREE.Box3()
                     .expandByPoint({ x: -toolDiam/2, y: -toolDiam/2, z: 0 })
                     .expandByPoint({ x: toolDiam/2, y: toolDiam/2, z: 0 });
@@ -349,7 +405,7 @@ class OpArea extends CamOp {
                 }
                 let toolData = { positions: toolPos, bounds: toolBounds };
 
-                // prepare terrain and raster paths over terrain
+                // prepare terrain and raster paths over terrain using WebGPU
                 let vertices = widget.getGeoVertices({ unroll: true, translate: true });
                 let wbounds = bounds.clone().expandByVector({ x: toolDiam/2, y: toolDiam/2, z: 0 });
                 wbounds.min.z = zBottom;
@@ -398,13 +454,20 @@ class OpArea extends CamOp {
         addSlices(areas.flat().filter(s => s.camLines && s.camLines.length));
     }
 
+    /**
+     * The prepare method is responsible for converting the generated slices into
+     * a sequence of tool movements (G-code like instructions).
+     *
+     * @param {object} ops - A collection of output functions (e.g., pocket, polyEmit)
+     * @param {function} progress - Function to report progress
+     */
     prepare(ops, progress) {
         let { op, state, areas, surfaces } = this;
         let { newLayer, pocket, polyEmit, printPoint, tip2tipEmit } = ops;
         let { setContouring, setNextIsMove } = ops;
         let { process } = state.settings;
 
-        // process surface paths
+        // process surface paths first if they exist
         if (surfaces.length) {
             setContouring(true);
             for (let surface of surfaces) {
@@ -413,6 +476,7 @@ class OpArea extends CamOp {
                     first: poly.first(),
                     last: poly.last()
                 } });
+                // emit toolpaths from tip-to-tip for efficiency
                 tip2tipEmit(array, printPoint, (next, point) => {
                     setNextIsMove();
                     if (next.last === point) next.el.reverse();
@@ -421,11 +485,11 @@ class OpArea extends CamOp {
                 });
             }
             setContouring(false);
-            // skip areas when processing surfaces
+            // skip area processing when surface processing is done
             return;
         }
 
-        // process areas as pockets
+        // process areas as pockets, finding the closest one to the current tool position
         while (areas?.length) {
             let min = {
                 dist: Infinity,
@@ -436,7 +500,7 @@ class OpArea extends CamOp {
                 // skip devel / debug only areas
                 let topPolys = area[0].camLines;
                 if (!topPolys) continue;
-                // select poly with largest area
+                // select poly with largest area as representative for the area
                 let poly = topPolys.slice().sort((a,b) => b.area() - a.area())[0];
                 if (!poly) continue;
                 // compute move distance to top poly for efficient routing
@@ -447,23 +511,29 @@ class OpArea extends CamOp {
                 }
             }
 
-            // if we have a next-closest top poly, pocket that
+            // if we have a next-closest top poly, pocket that area
             if (min.area) {
                 min.area.used = true;
                 pocket({
-                    cutdir: op.ov_conv,
-                    depthFirst: process.camDepthFirst && !op.drape,
-                    easeDown: op.down && process.easeDown ? op.down : 0,
+                    cutdir: op.ov_conv, // conventional or climb milling
+                    depthFirst: process.camDepthFirst && !op.drape, // depth-first cutting
+                    easeDown: op.down && process.easeDown ? op.down : 0, // ease down into cuts
                     progress: (n,m) => progress(n/m, "area"),
-                    slices: min.area.filter(slice => slice.camLines)
+                    slices: min.area.filter(slice => slice.camLines) // slices to process
                 });
             } else {
+                // no more areas to process
                 break;
             }
         }
     }
 }
 
+/**
+ * Omits outer polygons, returning only inner polygons.
+ * @param {Polygon[]} polys
+ * @returns {Polygon[]}
+ */
 function omitOuter(polys) {
     let inner = [];
     for (let poly of polys) {
@@ -472,6 +542,11 @@ function omitOuter(polys) {
     return inner;
 }
 
+/**
+ * Omits inner polygons from a set of polygons.
+ * @param {Polygon[]} polys
+ * @returns {Polygon[]}
+ */
 function omitInner(polys) {
     for (let poly of polys) {
         poly.inner = undefined;
@@ -479,6 +554,12 @@ function omitInner(polys) {
     return polys;
 }
 
+/**
+ * Omits polygons from a target set that are equivalent to polygons in a matches set.
+ * @param {Polygon[]} target
+ * @param {Polygon[]} matches
+ * @returns {Polygon[]}
+ */
 function omitMatching(target, matches) {
     target = target.clone(true);
     for (let poly of target.filter(p => p.inner)) {
@@ -494,6 +575,13 @@ function omitMatching(target, matches) {
     return target;
 }
 
+/**
+ * Clamps the Z values of a polygon's points between a min and max.
+ * @param {Polygon} poly
+ * @param {number} max
+ * @param {number} min
+ * @returns {Polygon}
+ */
 function clampZ(poly, max, min) {
     for (let p of poly.points) {
         if (p.z < min) p.z = min;
@@ -507,9 +595,13 @@ function clampZ(poly, max, min) {
     return poly;
 }
 
-// box2: THREE.Box2
-// angle: radians (direction of each scan ray)
-// step: spacing between parallel rays (world units)
+/**
+ * Generates scan lines (rays) across a bounding box at a specified angle and step.
+ * @param {THREE.Box2} box2
+ * @param {number} angle - in radians
+ * @param {number} step - spacing between rays
+ * @returns {object[]} array of {a, b} vectors representing lines
+ */
 function scanBoxAtAngle(box2, angle, step) {
     const cx = (box2.min.x + box2.max.x) * 0.5;
     const cy = (box2.min.y + box2.max.y) * 0.5;

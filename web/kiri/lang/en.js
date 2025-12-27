@@ -546,6 +546,8 @@ self.lang['en-us'] = {
     cr_olin_l:      ["limit cutting to","inside part boundaries"],
     cr_clrf_s:      "clear faces",
     cr_clrf_l:      ["add additional clearing passes","for detected z planar flat areas"],
+    cr_adap_s:      "adaptive",
+    cr_adap_l:      ["use adaptive clearing","for roughing passes"],
 
     // CNC OUTLINE
     co_menu:        "outline",
