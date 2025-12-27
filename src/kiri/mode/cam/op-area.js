@@ -247,33 +247,81 @@ class OpArea extends CamOp {
                 proc += pinc;
                 progress(proc, 'clear');
             } else if (mode === 'adaptive') {
-              console.log("Doing adaptive roughing");
+              console.log({
+                msg: "adaptive roughing (on-the-fly)",
+                zTop, zBottom, down, toolOver, area
+              });
 
-              // 1. Slice the model by a small step and store the resulting
-              //    shadows at each height. Also store the area to be machined
-              //    (area minus shadow) for each layer
+              // major Z steps
+              const zs = (down ? base_util.lerp(zTop, zBottom, down) : [ bounds.min.z ]).reverse();
 
+              let cleared_area = [];
+              // 1. Compute and store the object shadow at each z step.
+              let shadows = [];
+              for (let i = 0; i < zs.length; i++) {
+                const shadow = await shadowAt(zs[i]);
+                shadows.push(
+                  shadow.map((poly) => {
+                    return poly;
+                  }));
+              }
+                
               // 2. Starting at the top and working down, set each layer's
               //    machinable area to the intersection of the computed
               //    machinable area and the machinable area for the slice above.
               //    This represents eliminating any area covered by an
               //    overhang.
-              
+
               // 3. Compute Z steps based on the step down distance. Then,
               //    consider the height range from the step down to the top.
-              //
-              //      a) Starting at the bottom of the range, generate a
-              //         toolpath that clears the machinable area.
+              zs.forEach( (z, zidx) => {
+                //      a) Starting at the bottom of the range, generate a
+                //         toolpath that clears the machinable area.
+                // get shadow at current Z
+                const shadow_now = shadows[zidx];
 
-              //      b) Look at the machinable area of the next z-slice up, and
-              //         subtract the machinable area from the slice we just
-              //         cleared. If there's any area left, generate a toolpath
-              //         to clear it. If not, move on to the next step up until
-              //         we hit the top of the range.
-              //
-              //      c) step down to the next major step (based on the step
-              //         down distance) and repeat (a) and (b) upwards until we
-              //         hit the layer we already machined.
+                // machinable area is the selected area minus the part shadow
+                const machinable_now = POLY.subtract([area], shadow_now, [], null, z);
+                console.log(`adaptive: z=${z}, machinable_now=${machinable_now.length} polys`);
+
+                // determine new area to clear at this z level
+                const to_clear = POLY.subtract(machinable_now, cleared_area, [], null, z);
+                console.log(`adaptive: z=${z}, to_clear=${to_clear.length} polys`);
+
+                const to_clear_now = [];
+                if (to_clear.length > 0) {
+                  const slice = newLayer(z);
+                  const layers = slice.output();
+                  const firstOff = -(toolDiam / 2 + (op.leave_xy ?? 0));
+                  POLY.offset(to_clear, [ firstOff, -toolOver ], {
+                    count: op.steps ?? 999, outs: to_clear_now, flat: true, z, ...offopt
+                  });
+                  console.log(`adaptive: z=${z}, generated ${to_clear_now.length} toolpath polys`);
+
+                  if (to_clear_now.length > 0) {
+                    slice.camLines = to_clear_now;
+                    // use shadow_now for collision avoidance at this z level
+                    slice.tool_shadow = [ area, ...shadow_now ];
+                    POLY.setWinding(to_clear_now, direction === 'climb');
+                    layers.setLayer("adaptive", { line: color }, false).addPolys(to_clear_now);
+                  }
+                }
+
+                //      b) Look at the machinable area of the next z-slice up, and
+                //         subtract the machinable area from the slice we just
+                //         cleared. If there's any area left, generate a toolpath
+                //         to clear it. If not, move on to the next step up until
+                //         we hit the top of the range.
+                // (This is implicitly handled because we're iterating bottom-up, and 'cleared_area' accumulates)
+                //      c) step down to the next major step (based on the step
+                //         down distance) and repeat (a) and (b) upwards until we
+                //         hit the layer we already machined.
+                // (The 'zs' loop handles the major steps, and 'cleared_area' handles accumulated machining)
+                cleared_area = POLY.union([...cleared_area, ...to_clear_now], 0.001, true, { z });
+                console.log(`adaptive: z=${z}, cleared_area=${cleared_area.length} polys`);
+              });
+              console.log('adaptive: processing complete');
+
 
             } else if (mode === 'trace') {
                 // 'trace' mode: Follows a line or path
