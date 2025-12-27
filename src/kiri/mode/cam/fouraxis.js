@@ -43,77 +43,13 @@
  * O(1) on average, resulting in a significant performance improvement.
  */
 
-import { base } from '../../../geo/base.js';
-import { newPoint } from '../../../geo/point.js';
-import { newPolygon } from '../../../geo/polygon.js';
+import { base } from "../../../geo/base.js";
+import { newPoint } from "../../../geo/point.js";
+import { newPolygon } from "../../../geo/polygon.js";
+import { SpatialGrid } from "../../../geo/spatial-grid.js";
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
-
-/**
- * A purely 2D spatial grid for fast line segment lookups.
- * Expects all inputs (bounds, segments, points) to have {x, y} properties.
- */
-class SpatialGrid {
-  constructor(bounds, cellSize) {
-    this.bounds = bounds;
-    this.cellSize = cellSize > 0 ? cellSize : 1.0;
-    this.grid = [];
-    this.cols = Math.ceil((bounds.max.x - bounds.min.x) / this.cellSize) || 1;
-    this.rows = Math.ceil((bounds.max.y - bounds.min.y) / this.cellSize) || 1;
-    for (let i = 0; i < this.cols * this.rows; i++) {
-      this.grid.push([]);
-    }
-  }
-
-  _getCells(segment) {
-    const [p1, p2] = segment;
-    const b = {
-      min: { x: Math.min(p1.x, p2.x), y: Math.min(p1.y, p2.y) },
-      max: { x: Math.max(p1.x, p2.x), y: Math.max(p1.y, p2.y) }
-    };
-
-    const minX = Math.floor((b.min.x - this.bounds.min.x) / this.cellSize);
-    const maxX = Math.floor((b.max.x - this.bounds.min.x) / this.cellSize);
-    const minY = Math.floor((b.min.y - this.bounds.min.y) / this.cellSize);
-    const maxY = Math.floor((b.max.y - this.bounds.min.y) / this.cellSize);
-
-    const cells = [];
-    for (let y = Math.max(0, minY); y <= Math.min(this.rows - 1, maxY); y++) {
-      for (let x = Math.max(0, minX); x <= Math.min(this.cols - 1, maxX); x++) {
-        cells.push(y * this.cols + x);
-      }
-    }
-    return cells;
-  }
-
-  insert(segment) {
-    this._getCells(segment).forEach(idx => {
-      this.grid[idx].push(segment);
-    });
-  }
-
-  queryRay(ray_origin) {
-    // Assumes a horizontal ray in the +x direction, as is our use case.
-    const candidates = new Set();
-    const startX = Math.floor((ray_origin.x - this.bounds.min.x) / this.cellSize);
-    const startY = Math.floor((ray_origin.y - this.bounds.min.y) / this.cellSize);
-
-    if (startX >= this.cols || startY < 0 || startY >= this.rows) {
-      return [];
-    }
-
-    // Traverse grid cells horizontally along the ray path
-    for (let x = Math.max(0, startX); x < this.cols; x++) {
-      const y = startY;
-      const idx = y * this.cols + x;
-      if (this.grid[idx]) {
-        this.grid[idx].forEach(seg => candidates.add(seg));
-      }
-    }
-    return [...candidates];
-  }
-}
 
 /**
  * Given a point and a grid containing rotated geometry, checks if a tool can
@@ -137,13 +73,18 @@ function isMachinable(p, vnorm, angle, grid) {
 
   for (let seg of candidates) {
     // segment is already a 2D {x,y} pair
-    let intersects = base.util.intersectRayLine(ray_origin, ray_direction, seg[0], seg[1]);
+    let intersects = base.util.intersectRayLine(
+      ray_origin,
+      ray_direction,
+      seg[0],
+      seg[1]
+    );
 
     if (self.debug_isMachinable && intersects) {
       console.log({
         msg: "intersection found",
         intersects,
-        is_collision: intersects.dist > 1e-6
+        is_collision: intersects.dist > 1e-6,
       });
     }
 
@@ -157,47 +98,50 @@ function isMachinable(p, vnorm, angle, grid) {
 }
 
 function resampleClosedContour(poly, spacing) {
-    if (!poly || !poly.points) return newPolygon();
-    const pts = poly.points;
-    if (!Array.isArray(pts) || pts.length === 0) return newPolygon();
-    if (spacing <= 0) throw new Error("spacing must be > 0");
+  if (!poly || !poly.points) return newPolygon();
+  const pts = poly.points;
+  if (!Array.isArray(pts) || pts.length === 0) return newPolygon();
+  if (spacing <= 0) throw new Error("spacing must be > 0");
 
-    const dist3 = (a, b) => Math.sqrt(Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2));
+  const dist3 = (a, b) =>
+    Math.sqrt(
+      Math.pow(b.x - a.x, 2) + Math.pow(b.y - a.y, 2) + Math.pow(b.z - a.z, 2)
+    );
 
-    const result = [];
-    let accumulatedLength = 0;
-    const epsilon = 1e-9;
+  const result = [];
+  let accumulatedLength = 0;
+  const epsilon = 1e-9;
 
-    for (let i = 0; i < pts.length; i++) {
-        const p1 = pts[i];
-        const p2 = pts[(i + 1) % pts.length];
-        const segmentLength = dist3(p1, p2);
+  for (let i = 0; i < pts.length; i++) {
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % pts.length];
+    const segmentLength = dist3(p1, p2);
 
-        // Add the start point of the segment, avoiding duplicates
-        if (result.length === 0 || dist3(result[result.length - 1], p1) > epsilon) {
-            result.push(p1);
-        }
-
-        if (segmentLength > epsilon) {
-            const numSamples = Math.floor(segmentLength / spacing);
-            
-            for (let j = 1; j <= numSamples; j++) {
-                const sampleDist = j * spacing;
-                if (sampleDist < segmentLength - epsilon) {
-                    const t = sampleDist / segmentLength;
-                    const newPt = newPoint(
-                        p1.x + (p2.x - p1.x) * t,
-                        p1.y + (p2.y - p1.y) * t,
-                        p1.z + (p2.z - p1.z) * t
-                    );
-                    result.push(newPt);
-                }
-            }
-        }
-        accumulatedLength += segmentLength;
+    // Add the start point of the segment, avoiding duplicates
+    if (result.length === 0 || dist3(result[result.length - 1], p1) > epsilon) {
+      result.push(p1);
     }
 
-    return newPolygon().addPoints(result).setClosed();
+    if (segmentLength > epsilon) {
+      const numSamples = Math.floor(segmentLength / spacing);
+
+      for (let j = 1; j <= numSamples; j++) {
+        const sampleDist = j * spacing;
+        if (sampleDist < segmentLength - epsilon) {
+          const t = sampleDist / segmentLength;
+          const newPt = newPoint(
+            p1.x + (p2.x - p1.x) * t,
+            p1.y + (p2.y - p1.y) * t,
+            p1.z + (p2.z - p1.z) * t
+          );
+          result.push(newPt);
+        }
+      }
+    }
+    accumulatedLength += segmentLength;
+  }
+
+  return newPolygon().addPoints(result).setClosed();
 }
 
 function convertBoolsToMDR(machinable) {
@@ -212,7 +156,7 @@ function convertBoolsToMDR(machinable) {
     if (isMachinable && start === -1) {
       // start of a new machinable sector
       start = i;
-    } else if (!isMachinable && start !== -1 ) {
+    } else if (!isMachinable && start !== -1) {
       // end of a sector
       const sectorEnd = (i + 360 - 1) % 360;
       // differentiate zero-length and 360-length sectors
@@ -284,7 +228,9 @@ export async function generateFourAxis(params) {
     }
 
     // 1. Resample contours and pre-calculate normals
-    const resampledContours = contours.map(con => resampleClosedContour(con.poly, 5));
+    const resampledContours = contours.map((con) =>
+      resampleClosedContour(con.poly, 5)
+    );
     for (const contour of resampledContours) {
       const nPoints = contour.points.length;
       if (nPoints === 0) continue;
@@ -297,33 +243,53 @@ export async function generateFourAxis(params) {
         const outgoingEdge = nextPoint.clone().sub(point);
 
         if (incomingEdge.magnitude() === 0 || outgoingEdge.magnitude() === 0) {
-          point._4axis = { machinable: new Array(360).fill(false), vnorm: newPoint(0,0,1) };
+          point._4axis = {
+            machinable: new Array(360).fill(false),
+            vnorm: newPoint(0, 0, 1),
+          };
           continue;
         }
 
-        const incomingEdgeNormal = incomingEdge.clone().rotateYZ(-90 * DEG2RAD).normalize();
-        const outgoingEdgeNormal = outgoingEdge.clone().rotateYZ(-90 * DEG2RAD).normalize();
-        const vertexNormal = incomingEdgeNormal.add(outgoingEdgeNormal).normalize();
+        const incomingEdgeNormal = incomingEdge
+          .clone()
+          .rotateYZ(-90 * DEG2RAD)
+          .normalize();
+        const outgoingEdgeNormal = outgoingEdge
+          .clone()
+          .rotateYZ(-90 * DEG2RAD)
+          .normalize();
+        const vertexNormal = incomingEdgeNormal
+          .add(outgoingEdgeNormal)
+          .normalize();
 
         if (isNaN(vertexNormal.x)) {
           vertexNormal.copy(outgoingEdgeNormal);
         }
 
-        point._4axis = { machinable: new Array(360).fill(false), vnorm: vertexNormal };
+        point._4axis = {
+          machinable: new Array(360).fill(false),
+          vnorm: vertexNormal,
+        };
 
         if (sidx % 200 === 0) {
-          slice.output().setLayer("machinability-normals", {line: 0xFF00FF})
+          slice
+            .output()
+            .setLayer("machinability-normals", { line: 0xff00ff })
             .addPoly(newPolygon([point, point.clone().add(vertexNormal)]));
         }
       }
     }
 
     // 2. Iterate by angle, building a spatial grid for each
-    for (let angle = 0; angle < 360; angle += angleStep) { // Use angleStep here
-      const bounds = { min: { x: Infinity, y: Infinity }, max: { x: -Infinity, y: -Infinity } };
-      const rotatedPolys = resampledContours.map(poly => {
+    for (let angle = 0; angle < 360; angle += angleStep) {
+      // Use angleStep here
+      const bounds = {
+        min: { x: Infinity, y: Infinity },
+        max: { x: -Infinity, y: -Infinity },
+      };
+      const rotatedPolys = resampledContours.map((poly) => {
         const p = poly.clone(true).rotateYZ(angle);
-        p.points.forEach(pt => {
+        p.points.forEach((pt) => {
           bounds.min.x = Math.min(bounds.min.x, pt.z);
           bounds.min.y = Math.min(bounds.min.y, pt.y);
           bounds.max.x = Math.max(bounds.max.x, pt.z);
@@ -340,13 +306,16 @@ export async function generateFourAxis(params) {
       bounds.max.y += padding;
 
       const grid = new SpatialGrid(bounds, 2.0);
-      rotatedPolys.forEach(poly => {
+      rotatedPolys.forEach((poly) => {
         const points = poly.points;
         for (let i = 0; i < points.length; i++) {
           const p1 = points[i];
           const p2 = points[(i + 1) % points.length];
           // project 3D segment to 2D before insertion
-          const seg2d = [ { x: p1.z, y: p1.y }, { x: p2.z, y: p2.y } ];
+          const seg2d = [
+            { x: p1.z, y: p1.y },
+            { x: p2.z, y: p2.y },
+          ];
           grid.insert(seg2d);
         }
       });
@@ -354,16 +323,25 @@ export async function generateFourAxis(params) {
       // 3. Check machinability for each point at this angle
       for (const contour of resampledContours) {
         for (const point of contour.points) {
-          const vnorm_rot = point._4axis.vnorm.clone().rotateYZ(angle * DEG2RAD);
+          const vnorm_rot = point._4axis.vnorm
+            .clone()
+            .rotateYZ(angle * DEG2RAD);
 
           // only check for collisions if the surface normal is generally facing the tool
-          if (/*vnorm_rot.z >= 0*/true) {
+          if (/*vnorm_rot.z >= 0*/ true) {
             if (isMachinable(point, point._4axis.vnorm, angle, grid)) {
               point._4axis.machinable[angle] = true; // Index by the tested rotation angle
-              if (sidx % 200 === 0) { // Removed point_idx filter based on user preference
+              if (sidx % 200 === 0) {
+                // Removed point_idx filter based on user preference
                 const visualization_angle = (360 - angle + 90) % 360;
-                const vec = newPoint(0, Math.cos(visualization_angle * DEG2RAD), Math.sin(visualization_angle * DEG2RAD));
-                slice.output().setLayer("machinability", {line: lineColor})
+                const vec = newPoint(
+                  0,
+                  Math.cos(visualization_angle * DEG2RAD),
+                  Math.sin(visualization_angle * DEG2RAD)
+                );
+                slice
+                  .output()
+                  .setLayer("machinability", { line: lineColor })
                   .addPoly(newPolygon([point, point.add(vec)]));
               }
             }
@@ -377,7 +355,10 @@ export async function generateFourAxis(params) {
       if (!contour.points) continue;
       for (const point of contour.points) {
         // Extrapolate machinability before converting to MDR ranges
-        const fullMachinable = extrapolateMachinability(point._4axis.machinable, angleStep);
+        const fullMachinable = extrapolateMachinability(
+          point._4axis.machinable,
+          angleStep
+        );
         point.MDR = convertBoolsToMDR(fullMachinable);
         delete point._4axis.machinable;
       }
@@ -395,7 +376,7 @@ export async function generateFourAxis(params) {
       let out = sectors[0];
       for (let i = 1; i < sectors.length; i++) {
         const s = sectors[i];
-        if ((s[1] - s[0]) > (out[1] - out[0])) {
+        if (s[1] - s[0] > out[1] - out[0]) {
           out = s;
         }
       }
@@ -405,130 +386,143 @@ export async function generateFourAxis(params) {
     // compute if two sectors overlap by rotating both so that sector1 starts at
     // zero
     const sectorsOverlap = (s1, s2) => {
-      let [a,b] = s1;
-      let [c,d] = s2;
-      
-      let bb = (b-a+360) % 360;
-      let cc = (c-a+360) % 360;
-      let dd = (d-a+360) % 360;
+      let [a, b] = s1;
+      let [c, d] = s2;
+
+      let bb = (b - a + 360) % 360;
+      let cc = (c - a + 360) % 360;
+      let dd = (d - a + 360) % 360;
 
       // return true if s2 starts before s1 ends, OR if s2 wraps past the zero
       // mark (where s1 starts)
-      return (cc <= bb || cc > dd);
+      return cc <= bb || cc > dd;
     };
 
     const nextSector = (currentSector, mdr) => {
       if (!mdr || mdr.length === 0) {
         return null;
       }
-      const intersecting = mdr.filter(s => sectorsOverlap(currentSector, s));
+      const intersecting = mdr.filter((s) => sectorsOverlap(currentSector, s));
       return largestSector(intersecting);
     };
 
     let paths = [];
     for (const contour of resampledContours) {
-        if (!contour.points || contour.points.length === 0) {
-            continue;
+      if (!contour.points || contour.points.length === 0) {
+        continue;
+      }
+
+      // --- Stage 1: Over-segmentation ---
+      // Generate all possible maximal paths from every reachable starting point.
+
+      const potential_paths = [];
+      contour.points.forEach((startPoint, startIndex) => {
+        if (!startPoint.MDR || startPoint.MDR.length === 0) {
+          return;
         }
 
-        // --- Stage 1: Over-segmentation ---
-        // Generate all possible maximal paths from every reachable starting point.
+        const startSector = largestSector(startPoint.MDR);
+        if (!startSector) {
+          return;
+        }
 
-        const potential_paths = [];
-        contour.points.forEach((startPoint, startIndex) => {
-            if (!startPoint.MDR || startPoint.MDR.length === 0) {
-                return;
-            }
+        // extend forward
+        const forwardPath = [{ point: startPoint, sector: startSector }];
+        let lastSectorFwd = startSector;
+        let currentIndex = startIndex;
+        while (true) {
+          currentIndex = (currentIndex + 1) % contour.points.length;
+          const nextPoint = contour.points[currentIndex];
+          if (nextPoint === startPoint) break; // completed a full loop
 
-            const startSector = largestSector(startPoint.MDR);
-            if (!startSector) {
-                return;
-            }
+          const extendingSector = nextSector(lastSectorFwd, nextPoint.MDR);
+          if (extendingSector) {
+            lastSectorFwd = extendingSector;
+            forwardPath.push({ point: nextPoint, sector: lastSectorFwd });
+          } else {
+            break;
+          }
+        }
 
-            // extend forward
-            const forwardPath = [{ point: startPoint, sector: startSector }];
-            let lastSectorFwd = startSector;
-            let currentIndex = startIndex;
-            while (true) {
-                currentIndex = (currentIndex + 1) % contour.points.length;
-                const nextPoint = contour.points[currentIndex];
-                if (nextPoint === startPoint) break; // completed a full loop
+        // extend backward
+        const backwardPath = [];
+        let lastSectorBwd = startSector;
+        currentIndex = startIndex;
+        while (true) {
+          currentIndex =
+            (currentIndex - 1 + contour.points.length) % contour.points.length;
+          const nextPoint = contour.points[currentIndex];
+          if (
+            nextPoint === startPoint ||
+            nextPoint === forwardPath.peek()?.point
+          )
+            break;
 
-                const extendingSector = nextSector(lastSectorFwd, nextPoint.MDR);
-                if (extendingSector) {
-                    lastSectorFwd = extendingSector;
-                    forwardPath.push({ point: nextPoint, sector: lastSectorFwd });
-                } else {
-                    break;
-                }
-            }
+          const extendingSector = nextSector(lastSectorBwd, nextPoint.MDR);
+          if (extendingSector) {
+            lastSectorBwd = extendingSector;
+            backwardPath.push({ point: nextPoint, sector: lastSectorBwd });
+          } else {
+            break;
+          }
+        }
 
-            // extend backward
-            const backwardPath = [];
-            let lastSectorBwd = startSector;
-            currentIndex = startIndex;
-            while (true) {
-                currentIndex = (currentIndex - 1 + contour.points.length) % contour.points.length;
-                const nextPoint = contour.points[currentIndex];
-                if (nextPoint === startPoint || nextPoint === forwardPath.peek()?.point) break;
+        potential_paths.push([...backwardPath.reverse(), ...forwardPath]);
+      });
 
-                const extendingSector = nextSector(lastSectorBwd, nextPoint.MDR);
-                if (extendingSector) {
-                    lastSectorBwd = extendingSector;
-                    backwardPath.push({ point: nextPoint, sector: lastSectorBwd });
-                } else {
-                    break;
-                }
-            }
+      // --- Stage 2: Improved Greedy Selection ---
+      // Iteratively select the best path from the potential paths.
 
-            potential_paths.push([...backwardPath.reverse(), ...forwardPath]);
+      // Add a temporary 'used' flag to each point for this stage
+      contour.points.forEach((p) => {
+        p._used = false;
+      });
+
+      const final_paths = [];
+      while (true) {
+        // Sort potential paths by the number of unused points they contain
+        potential_paths.sort((a, b) => {
+          const a_unused = a.filter((node) => !node.point._used).length;
+          const b_unused = b.filter((node) => !node.point._used).length;
+          return b_unused - a_unused;
         });
 
-        // --- Stage 2: Improved Greedy Selection ---
-        // Iteratively select the best path from the potential paths.
+        const best_path = potential_paths[0];
 
-        // Add a temporary 'used' flag to each point for this stage
-        contour.points.forEach(p => { p._used = false });
-
-        const final_paths = [];
-        while (true) {
-            // Sort potential paths by the number of unused points they contain
-            potential_paths.sort((a, b) => {
-                const a_unused = a.filter(node => !node.point._used).length;
-                const b_unused = b.filter(node => !node.point._used).length;
-                return b_unused - a_unused;
-            });
-
-            const best_path = potential_paths[0];
-
-            // If no more usable paths can be found, we're done
-            if (!best_path || best_path.filter(node => !node.point._used).length === 0) {
-                break;
-            }
-
-            // Add the best path to our final list
-            const path_to_add = best_path.filter(node => !node.point._used);
-            final_paths.push(path_to_add);
-
-            // Mark points in the chosen path as used
-            for (const node of path_to_add) {
-                node.point._used = true;
-            }
+        // If no more usable paths can be found, we're done
+        if (
+          !best_path ||
+          best_path.filter((node) => !node.point._used).length === 0
+        ) {
+          break;
         }
-        paths.appendAll(final_paths);
 
-        // Clean up temporary flags
-        contour.points.forEach(p => { delete p._used });
+        // Add the best path to our final list
+        const path_to_add = best_path.filter((node) => !node.point._used);
+        final_paths.push(path_to_add);
+
+        // Mark points in the chosen path as used
+        for (const node of path_to_add) {
+          node.point._used = true;
+        }
+      }
+      paths.appendAll(final_paths);
+
+      // Clean up temporary flags
+      contour.points.forEach((p) => {
+        delete p._used;
+      });
     }
 
-    paths = [[
-      {point: newPoint(0, -10, -10), sector: [90, 270]},
-      {point: newPoint(0, 0, -10), sector: [90, 270]},
-      {point: newPoint(0, 10, -10), sector: [90, 270]},
+    paths = [
+      [
+        { point: newPoint(0, -10, -10), sector: [90, 270] },
+        { point: newPoint(0, 0, -10), sector: [90, 270] },
+        { point: newPoint(0, 10, -10), sector: [90, 270] },
 
-      {point: newPoint(0, 10, 0), sector: [0, 180]},
-      {point: newPoint(0, 10, 10), sector: [0, 180]},
-    ]
+        { point: newPoint(0, 10, 0), sector: [0, 180] },
+        { point: newPoint(0, 10, 10), sector: [0, 180] },
+      ],
     ];
 
     // do a pass through the paths and assign angles. prefer only changing
@@ -545,22 +539,44 @@ export async function generateFourAxis(params) {
         }
 
         if (path.length == 1) {
-          pt._path.normAngle = (Math.atan2(pt._4axis.vnorm.z, pt._4axis.vnorm.y)*RAD2DEG + 360) % 360;
+          pt._path.normAngle =
+            (Math.atan2(pt._4axis.vnorm.z, pt._4axis.vnorm.y) * RAD2DEG + 360) %
+            360;
         } else if (i == 0) {
-          const nextpt = path[i+1].point;
-          pt._path.normAngle = (Math.atan2(nextpt.z - pt.z, nextpt.y - pt.y)*RAD2DEG + 360 - 90) % 360;
+          const nextpt = path[i + 1].point;
+          pt._path.normAngle =
+            (Math.atan2(nextpt.z - pt.z, nextpt.y - pt.y) * RAD2DEG +
+              360 -
+              90) %
+            360;
         } else if (i == path.length - 1) {
-          const prevpt = path[i-1].point;
-          pt._path.normAngle = (Math.atan2(pt.z - prevpt.z, pt.y - prevpt.y)*RAD2DEG + 360 - 90) % 360;
+          const prevpt = path[i - 1].point;
+          pt._path.normAngle =
+            (Math.atan2(pt.z - prevpt.z, pt.y - prevpt.y) * RAD2DEG +
+              360 -
+              90) %
+            360;
         } else {
-          const nextpt = path[i+1].point;
-          const prevpt = path[i-1].point;
-          pt._path.normAngle = (((Math.atan2(nextpt.z - pt.z, nextpt.y - pt.y)*RAD2DEG + 360 - 90) % 360) +
-                            ((Math.atan2(pt.z - prevpt.z, pt.y - prevpt.y)*RAD2DEG + 360 - 90) % 360)) / 2;
+          const nextpt = path[i + 1].point;
+          const prevpt = path[i - 1].point;
+          pt._path.normAngle =
+            (((Math.atan2(nextpt.z - pt.z, nextpt.y - pt.y) * RAD2DEG +
+              360 -
+              90) %
+              360) +
+              ((Math.atan2(pt.z - prevpt.z, pt.y - prevpt.y) * RAD2DEG +
+                360 -
+                90) %
+                360)) /
+            2;
         }
         if (sidx % 200 === 0) {
-          let normVec = newPoint(0, 1, 0).rotateYZ(pt._path.normAngle * DEG2RAD);
-          slice.output().setLayer("path-normals", {line: 0xFFFFFF})
+          let normVec = newPoint(0, 1, 0).rotateYZ(
+            pt._path.normAngle * DEG2RAD
+          );
+          slice
+            .output()
+            .setLayer("path-normals", { line: 0xffffff })
             .addPoly(newPolygon([pt, pt.clone().add(normVec)]));
         }
       }
@@ -568,17 +584,22 @@ export async function generateFourAxis(params) {
 
     if (sidx == 200) {
       paths.map((path) => {
-        console.log("Path: " + (path.map((pp) => {
-          let p = pp.point;
-          let a = (p._path === undefined) ? "undef" : p._path.normAngle;
-          return `(${p.y}, ${p.z}, ${a}})`;
-        })).reduce((a,b) => (a + " " + b), ""));
+        console.log(
+          "Path: " +
+            path
+              .map((pp) => {
+                let p = pp.point;
+                let a = p._path === undefined ? "undef" : p._path.normAngle;
+                return `(${p.y}, ${p.z}, ${a}})`;
+              })
+              .reduce((a, b) => a + " " + b, "")
+        );
       });
 
       // helper function. given a point on the contour and the global rotation,
       // computes where the point ends up after that rotation.
       let rotatedPoint = (pt, angle_deg) => {
-        return pt.clone().rotateYZ(angle_deg*DEG2RAD);
+        return pt.clone().rotateYZ(angle_deg * DEG2RAD);
       };
 
       let chooseAngle = (p) => {
@@ -609,15 +630,19 @@ export async function generateFourAxis(params) {
         let prevPoint = path[0].point;
         for (let i = 0; i < path.length; i++) {
           let p = path[i];
-          let angle = (chooseAngle(p));
+          let angle = chooseAngle(p);
           if (angle != prevAngle) {
-            console.log(`inserting point to move between ${prevAngle} and ${angle} at ${[prevPoint.y, prevPoint.z]}`);
+            console.log(
+              `inserting point to move between ${prevAngle} and ${angle} at ${[prevPoint.y, prevPoint.z]}`
+            );
             // TODO - does this violate machinability constraints?
             outPath.push(rotatedPoint(p.point, prevAngle).setA(-prevAngle));
           }
           prevAngle = angle;
           prevPoint = p.point;
-          console.log(`including point at ${angle} at ${[p.point.y, p.point.z]}`);
+          console.log(
+            `including point at ${angle} at ${[p.point.y, p.point.z]}`
+          );
           outPath.push(rotatedPoint(p.point, angle).setA(-angle));
         }
         console.log(outPath);
@@ -627,18 +652,27 @@ export async function generateFourAxis(params) {
 
       if (sidx == 200) {
         camPaths.map((path) => {
-          console.log("Augmented path: " + (path.map((p) => {
-            return `(${Math.round(p.y, 2)}, ${Math.round(p.z, 2)}, ${p.a}})`;
-          })).reduce((a,b) => (a + " " + b), ""));
+          console.log(
+            "Augmented path: " +
+              path
+                .map((p) => {
+                  return `(${Math.round(p.y, 2)}, ${Math.round(p.z, 2)}, ${p.a}})`;
+                })
+                .reduce((a, b) => a + " " + b, "")
+          );
         });
         slice.camLines = camPaths.map((path) => {
           return newPolygon().addPoints(path).setOpen();
         });
       }
-       //   console.log(`${[p.point.y, p.point.z, angle]} -> ${[path_point.y, path_point.z]}`);
-    } 
+      //   console.log(`${[p.point.y, p.point.z, angle]} -> ${[path_point.y, path_point.z]}`);
+    }
     if (sidx == 200) {
-      slice.output().setLayer("machinability-paths", {line: [0xFF0000, 0x00FF00, 0x0000FF][Math.floor(Math.random()*3)]})
+      slice
+        .output()
+        .setLayer("machinability-paths", {
+          line: [0xff0000, 0x00ff00, 0x0000ff][Math.floor(Math.random() * 3)],
+        })
         .addPoly(newPolygon().addPoints(slice.camLines).setOpen());
     }
   }
