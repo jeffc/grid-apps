@@ -16,3 +16,4 @@ package-lock.json
 three.js
 tmp
 web/boot/bundle*
+*.sw*
