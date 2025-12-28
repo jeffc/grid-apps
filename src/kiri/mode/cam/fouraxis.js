@@ -102,7 +102,8 @@ function assignNormalsAndFlatness(points) {
       .add(outgoingEdgeNormal)
       .normalize();
     pt._fouraxis.vertex_normal_angle =
-      (Math.atan2(pt._fouraxis.vertex_normal.y, pt._fouraxis.vertex_normal.x) +
+      (Math.atan2(pt._fouraxis.vertex_normal.y, pt._fouraxis.vertex_normal.x) *
+        RAD2DEG +
         360) %
       360;
 
@@ -115,6 +116,16 @@ function assignNormalsAndFlatness(points) {
   }
 
   return points;
+}
+
+// Compute whether a point is machinable given the grid and tool information
+function isMachinable(point, grid, normal, tool_offset = 0.1) {
+  const offset_pt = newPoint(
+    point.x + normal.x * tool_offset,
+    point.y + normal.y * tool_offset
+  );
+  const collisions = grid.queryRay(offset_pt);
+  return collisions.length == 0;
 }
 
 // Resample a contour (set of points) into segments no longer than the given
@@ -227,8 +238,6 @@ export async function generateFourAxis(params) {
       resampledContours.forEach((poly) =>
         poly.points.forEach((p) => {
           const viz_p = newPoint(p.z, p.x, p.y);
-          console.log([viz_p, p._fouraxis.vertex_normal]);
-
           slice
             .output()
             .setLayer("machinability-normals", { line: 0xff00ff })
@@ -246,22 +255,55 @@ export async function generateFourAxis(params) {
       );
     }
 
+    // assign some storage to each point on the contours to store machinability
+    // ranges
+    resampledContours.forEach((poly) => {
+      poly.points.forEach((p) => {
+        p._fouraxis.machinability = {
+          MDR: [],
+          current_range_start: null,
+        };
+      });
+    });
+
+    // generate the segment collision grid based on the original input
+    // contours, since the extra resolution of the resampled contours doesn't
+    // gain us anything
+    let segments = contours
+      .map((c) =>
+        // assume that contours are closed
+        c.points.map((p, i, pts) => [
+          pts[i],
+          pts[(i + 1 + pts.length) % pts.length],
+        ])
+      )
+      .flat();
+    let grid = createFromSegments(segments, 2.0, 5.0);
+
     // Iterate by angle to set machinability for each point
     for (let angle = 0; angle < 360; angle += angleStep) {
-      // generate the segment collision grid based on the original input
-      // contours, since the extra resolution of the resampled contours doesn't
-      // gain us anything
-      let segments = contours
-        .map((c) =>
-          // assume that contours are closed
-          c.points.map((p, i, pts) => [
-            pts[i],
-            pts[(i + 1 + pts.length) % pts.length],
-          ])
-        )
-        .flat();
-      const grid = createFromSegments(segments, 2.0, 5.0);
+      resampledContours.forEach((poly) => {
+        poly.points.forEach((p) => {
+          if (isMachinable(p, grid, p._fouraxis.vertex_normal)) {
+            if (p._fouraxis.machinability.current_range_start === null) {
+              p._fouraxis.machinability.current_range_start = angle;
+            }
+            console.log(`${printPoint(p)} is machinable at angle ${angle}`);
+          } else {
+            if (p._fouraxis.machinability.current_range_start !== null) {
+              p._fouraxis.machinability.MDR.push([
+                p._fouraxis.machinability.current_range_start,
+                angle - angleStep,
+              ]);
+              p._fouraxis.machinability.current_range_start = null;
+            }
+            console.log(`${printPoint(p)} is not machinable at angle ${angle}`);
+          }
+        });
+      });
+      grid = grid.rotate(angleStep);
     }
+    debugger;
   }
   return sliced;
 }
