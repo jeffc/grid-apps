@@ -108,7 +108,10 @@ function assignNormalsAndFlatness(points) {
       360;
 
     pt._INVALID = false;
-    if ( isNaN(pt._fouraxis.vertex_normal.x) || isNaN(pt._fouraxis.vertex_normal.y) ) {
+    if (
+      isNaN(pt._fouraxis.vertex_normal.x) ||
+      isNaN(pt._fouraxis.vertex_normal.y)
+    ) {
       pt._INVALID = true;
     }
     // compute the "flatness" as the absolute value of the dot product of the
@@ -119,7 +122,7 @@ function assignNormalsAndFlatness(points) {
     );
   }
 
-  return points.filter((p) => (p._INVALID === false));
+  return points.filter((p) => p._INVALID === false);
 }
 
 // Compute whether a point is machinable given the grid and tool information
@@ -148,42 +151,36 @@ function isMachinable(point, normal, angle, grid, tool_offset = 0.1) {
 // ASSUMES POINTS ARE ALL ON THE SAME Z LEVEL AND ONLY LOOKS AT X AND Y COORDS
 // We do this for efficiency
 function resampleContour(points, spacing, closed = true) {
+  const epsilon = 1e-6;
+
   // helper to resample a given segment
   // DOES NOT include p2 in the segment
   let resampleSegment = (p1, p2) => {
-    let segOut = [p1.clone(["_fouraxis"])];
     const totalDist = base.util.dist2D(p1, p2);
-
-    // if the total distance between the two points is less than the specified
-    // spacing, just return the original segment
     if (totalDist <= spacing) {
-      return segOut;
+      return [p1];
     }
 
-    // otherwise, do the interpolation
-    const dx = p2.x - p1.x;
-    const dy = p2.y - p1.y;
     const interpSteps = Math.floor(totalDist / spacing);
-
-    // if the spacing cleanly divides the total distance, don't include the last
-    // step because it would duplicate the segment endpoint
-    const skipLast = totalDist % spacing == 0;
-
-    // track our segment x and y so we can do additions rather than
-    // multiplications
-    let px = p1.x,
-      py = p1.y;
-    for (
-      let s = 0;
-      s < interpSteps - (skipLast ? 1 : 0 - (skipLast ? 1 : 0));
-      s++
-    ) {
-      px += dx / interpSteps;
-      py += dy / interpSteps;
-      // make segments copies of p1 to preserve any attached info (including the
-      // z coordinate!)
-      segOut.push(p1.clone(["_fouraxis"]).setX(px).setY(py));
+    // if the spacing almost cleanly divides the total distance, don't
+    // include the last step because it's too close to the endpoint
+    if (Math.abs(totalDist - interpSteps * spacing) < epsilon) {
+      // do nothing special, we'll just skip the last point
     }
+
+    let segOut = [p1];
+    const dx = (p2.x - p1.x) / totalDist;
+    const dy = (p2.y - p1.y) / totalDist;
+
+    for (let i = 1; i < interpSteps; i++) {
+      const dist = i * spacing;
+      segOut.push(
+        newPoint(p1.x + dx * dist, p1.y + dy * dist, p1.z).annotate({
+          _fouraxis: structuredClone(p1._fouraxis),
+        })
+      );
+    }
+
     return segOut;
   };
 
@@ -198,26 +195,7 @@ function resampleContour(points, spacing, closed = true) {
     out.push(points[points.length - 1]);
   }
 
-  // remove duplicate points
-  let outDedup = [];
-  let last = {x: null, y: null, z: null};
-
-  // compare floats to 5 places
-  let cmp = (a,b) => (Math.round(a, 5) == Math.round(b, 5));
-
-  for (let i = 0; i < out.length; i++) {
-    let p = out[i];
-    if (!(cmp(last.x, p.x) && cmp(last.y, p.y) && cmp(last.z, p.z))) {
-      outDedup.push(p);
-      last = p;
-    }
-  }
-
-  if (cmp(outDedup.last.x, outDedup[0].x) && cmp(outDedup.last.y, outDedup[0].y) && cmp(outDedup.last.z, outDedup[0].z)) {
-    outDedup.pop();
-  }
-
-  return outDedup;
+  return out;
 }
 
 // root function that performs the four-axis toolpath generation
@@ -257,11 +235,13 @@ export async function generateFourAxis(params) {
     contours.forEach((poly) => poly.setCounterClockwise());
 
     // next, resample all of the contours into small segments.
-    let resampledContours = contours.map((poly) => {
-      let p = poly.clone(true, [], ["_fouraxis"]);
-      p.points = resampleContour(p.points, 0.5);
-      return p;
-    }).filter((poly) => poly.points.length > 2);
+    let resampledContours = contours
+      .map((poly) => {
+        let p = poly.clone(true, [], ["_fouraxis"]);
+        p.points = resampleContour(p.points, 0.5);
+        return p;
+      })
+      .filter((poly) => poly.points.length > 2);
 
     // Compute and add in the normal vectors for each contour
     resampledContours.forEach((poly) => {
@@ -272,11 +252,9 @@ export async function generateFourAxis(params) {
       resampledContours.forEach((poly) => {
         let pol = newPolygon(poly.points.map((p) => p.clone(["_fouraxis"])));
         slice
-        .output()
-        .setLayer("contours", { line: 0xff0000 })
-        .addPoly(
-          rotateZAxisSliced(pol)
-        );
+          .output()
+          .setLayer("contours", { line: 0xff0000 })
+          .addPoly(rotateZAxisSliced(pol));
       });
     }
 
@@ -358,7 +336,7 @@ export async function generateFourAxis(params) {
           } else if (p._fouraxis.machinability.MDR[0][0] == 0) {
             p._fouraxis.machinability.MDR[0][0] = crs;
           } else {
-            p._fouraxis.machinability.MDR.push([crs, 360-angleStep]);
+            p._fouraxis.machinability.MDR.push([crs, 360 - angleStep]);
           }
         }
       });
@@ -379,15 +357,15 @@ export async function generateFourAxis(params) {
                     viz_p,
                     newPoint(
                       viz_p.x,
-                      viz_p.y + Math.cos((90-a)*DEG2RAD),
-                      viz_p.z + Math.sin((90-a)*DEG2RAD)
+                      viz_p.y + Math.cos((90 - a) * DEG2RAD),
+                      viz_p.z + Math.sin((90 - a) * DEG2RAD)
                     ),
                   ])
                 );
               a += angleStep;
               a %= 360;
             } while (a != mdr[1]);
-          })
+          });
         })
       );
     }
