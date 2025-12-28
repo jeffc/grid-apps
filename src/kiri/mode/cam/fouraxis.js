@@ -254,6 +254,8 @@ export async function generateFourAxis(params) {
     // computation is complete.
     contours = contours.map((poly) => rotateXAxisSliced(poly.clone(true)));
 
+    contours.forEach((poly) => poly.setCounterClockwise());
+
     // next, resample all of the contours into small segments.
     let resampledContours = contours.map((poly) => {
       let p = poly.clone(true, [], ["_fouraxis"]);
