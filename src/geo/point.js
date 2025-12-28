@@ -217,7 +217,7 @@ class Point {
 
     /**
      * Create deep copy of this point
-     * @param {string[]} [keys] - Optional property names to copy to cloned point
+     * @param {string[]} [keys] - Optional property names to deep copy to cloned point
      * @returns {Point} New point with same coordinates
      */
     clone(keys) {
@@ -227,7 +227,7 @@ class Point {
         }
         if (keys) {
             for (let key of keys) {
-                p[key] = this[key];
+                p[key] = structuredClone(this[key]);
             }
         }
         return p;

@@ -4,7 +4,7 @@
 import { base } from "../../../geo/base.js";
 import { newPoint } from "../../../geo/point.js";
 import { newPolygon } from "../../../geo/polygon.js";
-import { SpatialGrid, createFromSegments } from "../../../geo/spatial-grid.js";
+import { SpatialGrid, fromSegments } from "../../../geo/spatial-grid.js";
 import { printPoint, printPolygon } from "../../../geo/print-geom.js";
 
 const RAD2DEG = 180 / Math.PI;
@@ -107,6 +107,10 @@ function assignNormalsAndFlatness(points) {
         360) %
       360;
 
+    pt._INVALID = false;
+    if ( isNaN(pt._fouraxis.vertex_normal.x) || isNaN(pt._fouraxis.vertex_normal.y) ) {
+      pt._INVALID = true;
+    }
     // compute the "flatness" as the absolute value of the dot product of the
     // incoming and outgoing normal vectors.
     const dotProduct = (a, b) => a.x * b.x + a.y * b.y;
@@ -115,17 +119,26 @@ function assignNormalsAndFlatness(points) {
     );
   }
 
-  return points;
+  return points.filter((p) => (p._INVALID === false));
 }
 
 // Compute whether a point is machinable given the grid and tool information
-function isMachinable(point, grid, normal, tool_offset = 0.1) {
-  const offset_pt = newPoint(
+function isMachinable(point, normal, angle, grid, tool_offset = 0.1) {
+  // a point is machinable if the ray cast from the tooltip straight up (+Z)
+  // never hits any other geometry. Rather than rotating the whole grid each
+  // time, we instead rotate the Z vector to point where Z would be in that
+  // coordinate space.
+  const tooltip = newPoint(
     point.x + normal.x * tool_offset,
     point.y + normal.y * tool_offset
   );
-  const collisions = grid.queryRay(offset_pt);
-  return collisions.length == 0;
+
+  if (isNaN(tooltip.x) || isNaN(tooltip.y)) {
+    debugger;
+  }
+  const upAxis = newPoint(0, 1).rotate(-angle * DEG2RAD);
+  const collision = grid.rayCast(tooltip, upAxis);
+  return collision === null;
 }
 
 // Resample a contour (set of points) into segments no longer than the given
@@ -138,7 +151,7 @@ function resampleContour(points, spacing, closed = true) {
   // helper to resample a given segment
   // DOES NOT include p2 in the segment
   let resampleSegment = (p1, p2) => {
-    let segOut = [p1];
+    let segOut = [p1.clone(["_fouraxis"])];
     const totalDist = base.util.dist2D(p1, p2);
 
     // if the total distance between the two points is less than the specified
@@ -185,7 +198,26 @@ function resampleContour(points, spacing, closed = true) {
     out.push(points[points.length - 1]);
   }
 
-  return out;
+  // remove duplicate points
+  let outDedup = [];
+  let last = {x: null, y: null, z: null};
+
+  // compare floats to 5 places
+  let cmp = (a,b) => (Math.round(a, 5) == Math.round(b, 5));
+
+  for (let i = 0; i < out.length; i++) {
+    let p = out[i];
+    if (!(cmp(last.x, p.x) && cmp(last.y, p.y) && cmp(last.z, p.z))) {
+      outDedup.push(p);
+      last = p;
+    }
+  }
+
+  if (cmp(outDedup.last.x, outDedup[0].x) && cmp(outDedup.last.y, outDedup[0].y) && cmp(outDedup.last.z, outDedup[0].z)) {
+    outDedup.pop();
+  }
+
+  return outDedup;
 }
 
 // root function that performs the four-axis toolpath generation
@@ -209,9 +241,9 @@ export async function generateFourAxis(params) {
       continue;
     }
 
-    // if none of the contours have any polygons, there's no work to be done
-    // here.
-    contours = contours.filter((c) => c.points.length > 0);
+    // if none of the contours have any polygons with area, there's no work to
+    // be done here.
+    contours = contours.filter((c) => c.points.length > 2);
     if (contours.length === 0) {
       continue;
     }
@@ -224,14 +256,14 @@ export async function generateFourAxis(params) {
 
     // next, resample all of the contours into small segments.
     let resampledContours = contours.map((poly) => {
-      let p = poly.clone(false, [], ["_fouraxis"]);
-      p.points = resampleContour(p.points, 5);
+      let p = poly.clone(true, [], ["_fouraxis"]);
+      p.points = resampleContour(p.points, 0.5);
       return p;
-    });
+    }).filter((poly) => poly.points.length > 2);
 
     // Compute and add in the normal vectors for each contour
     resampledContours.forEach((poly) => {
-      assignNormalsAndFlatness(poly.points);
+      poly.points = assignNormalsAndFlatness(poly.points);
     });
 
     if (slice_index % 10 == 0) {
@@ -278,17 +310,16 @@ export async function generateFourAxis(params) {
         ])
       )
       .flat();
-    let grid = createFromSegments(segments, 2.0, 5.0);
+    let grid = fromSegments(segments, 2.0, 5.0);
 
     // Iterate by angle to set machinability for each point
-    for (let angle = 0; angle < 360; angle += angleStep) {
-      resampledContours.forEach((poly) => {
-        poly.points.forEach((p) => {
-          if (isMachinable(p, grid, p._fouraxis.vertex_normal)) {
+    resampledContours.forEach((poly) => {
+      poly.points.forEach((p) => {
+        for (let angle = 0; angle < 360; angle += angleStep) {
+          if (isMachinable(p, p._fouraxis.vertex_normal, angle, grid)) {
             if (p._fouraxis.machinability.current_range_start === null) {
               p._fouraxis.machinability.current_range_start = angle;
             }
-            console.log(`${printPoint(p)} is machinable at angle ${angle}`);
           } else {
             if (p._fouraxis.machinability.current_range_start !== null) {
               p._fouraxis.machinability.MDR.push([
@@ -297,13 +328,55 @@ export async function generateFourAxis(params) {
               ]);
               p._fouraxis.machinability.current_range_start = null;
             }
-            console.log(`${printPoint(p)} is not machinable at angle ${angle}`);
           }
-        });
+        }
+
+        // if the last angle we checked is machinable and 0 degrees is
+        // machinable, connect the two
+        const crs = p._fouraxis.machinability.current_range_start;
+        // if the current range start ended at zero, the point is machinable at
+        // every angle (this is a weird degenerate case...)
+        if (crs === 0) {
+          p._fouraxis.machinability.MDR.push([0, 355], [355, 0]);
+        } else if (crs !== null) {
+          if (p._fouraxis.machinability.MDR.length == 0) {
+            p._fouraxis.machinability.MDR.push([crs, crs]);
+          } else if (p._fouraxis.machinability.MDR[0][0] == 0) {
+            p._fouraxis.machinability.MDR[0][0] = crs;
+          } else {
+            p._fouraxis.machinability.MDR.push([crs, 360-angleStep]);
+          }
+        }
       });
-      grid = grid.rotate(angleStep);
+    });
+
+    if (slice_index % 10 == 0) {
+      resampledContours.forEach((poly) =>
+        poly.points.forEach((p) => {
+          p._fouraxis.machinability.MDR.forEach((mdr) => {
+            let a = mdr[0];
+            do {
+              const viz_p = newPoint(p.z, p.x, p.y);
+              slice
+                .output()
+                .setLayer("machinability", { line: 0xffffff })
+                .addPoly(
+                  newPolygon([
+                    viz_p,
+                    newPoint(
+                      viz_p.x,
+                      viz_p.y + Math.cos((90-a)*DEG2RAD),
+                      viz_p.z + Math.sin((90-a)*DEG2RAD)
+                    ),
+                  ])
+                );
+              a += angleStep;
+              a %= 360;
+            } while (a != mdr[1]);
+          })
+        })
+      );
     }
-    debugger;
   }
   return sliced;
 }
