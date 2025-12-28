@@ -104,3 +104,25 @@ export class SpatialGrid {
     return newGrid;
   }
 }
+
+export function createFromSegments(segments, cellSize, padding = 0) {
+  const bounds = {
+    min: { x: Infinity, y: Infinity },
+    max: { x: -Infinity, y: -Infinity }
+  };
+
+  for (const seg of segments) {
+    const [p1, p2] = seg;
+    bounds.min.x = Math.min(bounds.min.x, p1.x, p2.x);
+    bounds.min.y = Math.min(bounds.min.y, p1.y, p2.y);
+    bounds.max.x = Math.max(bounds.max.x, p1.x, p2.x);
+    bounds.max.y = Math.max(bounds.max.y, p1.y, p2.y);
+  }
+
+  const grid = new SpatialGrid(bounds, cellSize, padding);
+  for (const seg of segments) {
+    grid.insert(seg);
+  }
+
+  return grid;
+}

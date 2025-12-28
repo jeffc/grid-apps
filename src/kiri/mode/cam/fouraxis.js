@@ -4,7 +4,7 @@
 import { base } from "../../../geo/base.js";
 import { newPoint } from "../../../geo/point.js";
 import { newPolygon } from "../../../geo/polygon.js";
-import { SpatialGrid } from "../../../geo/spatial-grid.js";
+import { SpatialGrid, createFromSegments } from "../../../geo/spatial-grid.js";
 import { printPoint, printPolygon } from "../../../geo/print-geom.js";
 
 const RAD2DEG = 180 / Math.PI;
@@ -61,6 +61,62 @@ function rotateZAxisSliced(poly) {
   return poly;
 }
 
+// Calculate the normal vectors and "flatness" values at each point around a 2D
+// contour. Assume counterclockwise winding and a closed polygon.
+//
+// returns updated points for chaining
+function assignNormalsAndFlatness(points) {
+  if (!points || points.length < 2) {
+    console.log("Asked to assign normals to zero or one points; aborting");
+    return points;
+  }
+
+  for (let i = 0; i < points.length; i++) {
+    const pt = points[i];
+    if (!pt._fouraxis || !pt._fouraxis.plane == "XY") {
+      console.log(
+        "Asked to find normal for point that isn't in the XY plane. Probably a bug."
+      );
+    }
+
+    const prevPoint = points[(i - 1 + points.length) % points.length];
+    const nextPoint = points[(i + 1 + points.length) % points.length];
+
+    // compute the normals of the incoming and outgoing edge by taking the
+    // difference between each and the current point (assuming CCW winding),
+    // then rotating CLOCKWISE 90 degrees. Avoid the potentially costly sin()
+    // and cos() calls by recognizing that rotating (a, b) by 90 degrees
+    // clockwise gives (b, -a)
+    const incomingEdgeNormal = newPoint(
+      pt.y - prevPoint.y,
+      -(pt.x - prevPoint.x)
+    ).normalize();
+    const outgoingEdgeNormal = newPoint(
+      nextPoint.y - pt.y,
+      -(nextPoint.x - pt.x)
+    ).normalize();
+
+    // compute the vertex normal by adding the two edge normals and normalizing
+    // the result.
+    pt._fouraxis.vertex_normal = incomingEdgeNormal
+      .add(outgoingEdgeNormal)
+      .normalize();
+    pt._fouraxis.vertex_normal_angle =
+      (Math.atan2(pt._fouraxis.vertex_normal.y, pt._fouraxis.vertex_normal.x) +
+        360) %
+      360;
+
+    // compute the "flatness" as the absolute value of the dot product of the
+    // incoming and outgoing normal vectors.
+    const dotProduct = (a, b) => a.x * b.x + a.y * b.y;
+    pt._fouraxis.flatness = Math.abs(
+      dotProduct(incomingEdgeNormal, outgoingEdgeNormal)
+    );
+  }
+
+  return points;
+}
+
 // Resample a contour (set of points) into segments no longer than the given
 // length. Still include all of the original points to make sure that we don't
 // lose any details.
@@ -85,16 +141,24 @@ function resampleContour(points, spacing, closed = true) {
     const dy = p2.y - p1.y;
     const interpSteps = Math.floor(totalDist / spacing);
 
+    // if the spacing cleanly divides the total distance, don't include the last
+    // step because it would duplicate the segment endpoint
+    const skipLast = totalDist % spacing == 0;
+
     // track our segment x and y so we can do additions rather than
     // multiplications
     let px = p1.x,
       py = p1.y;
-    for (let s = 0; s < interpSteps; s++) {
+    for (
+      let s = 0;
+      s < interpSteps - (skipLast ? 1 : 0 - (skipLast ? 1 : 0));
+      s++
+    ) {
       px += dx / interpSteps;
       py += dy / interpSteps;
       // make segments copies of p1 to preserve any attached info (including the
       // z coordinate!)
-      segOut.push(p1.clone().setX(px).setY(py));
+      segOut.push(p1.clone(["_fouraxis"]).setX(px).setY(py));
     }
     return segOut;
   };
@@ -149,17 +213,55 @@ export async function generateFourAxis(params) {
 
     // next, resample all of the contours into small segments.
     let resampledContours = contours.map((poly) => {
-      let p = poly.clone();
+      let p = poly.clone(false, [], ["_fouraxis"]);
       p.points = resampleContour(p.points, 5);
       return p;
     });
 
-    if (slice_index == Math.floor(sliced.length / 2)) {
-      console.log(slice_index);
-      console.log(contours.map((p) => printPolygon(p)).join("\n"));
-      console.log(resampledContours.map((p) => printPolygon(p)).join("\n"));
+    // Compute and add in the normal vectors for each contour
+    resampledContours.forEach((poly) => {
+      assignNormalsAndFlatness(poly.points);
+    });
+
+    if (slice_index % 10 == 0) {
+      resampledContours.forEach((poly) =>
+        poly.points.forEach((p) => {
+          const viz_p = newPoint(p.z, p.x, p.y);
+          console.log([viz_p, p._fouraxis.vertex_normal]);
+
+          slice
+            .output()
+            .setLayer("machinability-normals", { line: 0xff00ff })
+            .addPoly(
+              newPolygon([
+                viz_p,
+                newPoint(
+                  viz_p.x,
+                  viz_p.y + p._fouraxis.vertex_normal.x,
+                  viz_p.z + p._fouraxis.vertex_normal.y
+                ),
+              ])
+            );
+        })
+      );
+    }
+
+    // Iterate by angle to set machinability for each point
+    for (let angle = 0; angle < 360; angle += angleStep) {
+      // generate the segment collision grid based on the original input
+      // contours, since the extra resolution of the resampled contours doesn't
+      // gain us anything
+      let segments = contours
+        .map((c) =>
+          // assume that contours are closed
+          c.points.map((p, i, pts) => [
+            pts[i],
+            pts[(i + 1 + pts.length) % pts.length],
+          ])
+        )
+        .flat();
+      const grid = createFromSegments(segments, 2.0, 5.0);
     }
   }
-
   return sliced;
 }
