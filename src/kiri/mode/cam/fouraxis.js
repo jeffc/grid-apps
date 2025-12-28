@@ -47,9 +47,9 @@ function rotateZAxisSliced(poly) {
     }
 
     let [x, y, z] = [pt.x, pt.y, pt.z];
-    pt.x = y;
-    pt.y = z;
-    pt.z = x;
+    pt.x = z;
+    pt.y = x;
+    pt.z = y;
 
     // set a flag on the points
     if (!pt._fouraxis) {
@@ -252,7 +252,7 @@ export async function generateFourAxis(params) {
     // Many of the geometry libraries assume 2D points on the XY plane, so we just
     // transform them once at the beginning and un-transform them after the
     // computation is complete.
-    contours = contours.map((poly) => rotateXAxisSliced(poly));
+    contours = contours.map((poly) => rotateXAxisSliced(poly.clone(true)));
 
     // next, resample all of the contours into small segments.
     let resampledContours = contours.map((poly) => {
@@ -265,6 +265,18 @@ export async function generateFourAxis(params) {
     resampledContours.forEach((poly) => {
       poly.points = assignNormalsAndFlatness(poly.points);
     });
+
+    if (slice_index % 10 == 0) {
+      resampledContours.forEach((poly) => {
+        let pol = newPolygon(poly.points.map((p) => p.clone(["_fouraxis"])));
+        slice
+        .output()
+        .setLayer("contours", { line: 0xff0000 })
+        .addPoly(
+          rotateZAxisSliced(pol)
+        );
+      });
+    }
 
     if (slice_index % 10 == 0) {
       resampledContours.forEach((poly) =>
@@ -310,7 +322,7 @@ export async function generateFourAxis(params) {
         ])
       )
       .flat();
-    let grid = fromSegments(segments, 2.0, 5.0);
+    let grid = fromSegments(segments, 2.0, 10.0);
 
     // Iterate by angle to set machinability for each point
     resampledContours.forEach((poly) => {
