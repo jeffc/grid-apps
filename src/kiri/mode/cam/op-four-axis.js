@@ -4,31 +4,6 @@ import { CamOp } from './op.js';
 import { generate as topo4_generate } from './topo4.js';
 import { newPoint } from '../../../geo/point.js';
 
-function createFilter(op) {
-    let ok = () => true;
-    let filter = slices => slices;
-    let filterString = op.filter?.map(l => l.trim()).join('\n');
-    if (filterString) {
-        try {
-            const obj = eval(`( ${filterString} )`);
-            const accept = [];
-            let index = 0;
-            let sl_fn = obj?.slices ?? ok;
-            filter = function (slices) {
-                for (let slice of slices) {
-                    if (sl_fn(slice, index++)) {
-                        accept.push(slice);
-                    }
-                }
-                return accept;
-            };
-        } catch (e) {
-            console.log('filter parse error', e, op.filter);
-        }
-    }
-    return filter;
-}
-
 class OpFourAxis extends CamOp {
     constructor(state, op) {
         super(state, op);
@@ -37,7 +12,6 @@ class OpFourAxis extends CamOp {
     async slice(progress) {
         let { op, state } = this;
         let { addSlices, color } = state;
-        let filter = createFilter(op);
         this.topo = await topo4_generate({
             op,
             state,
@@ -45,7 +19,6 @@ class OpFourAxis extends CamOp {
                 progress(pct, msg);
             },
             ondone: (slices) => {
-                slices = filter(slices);
                 this.slices = slices;
                 addSlices(slices, false);
             }

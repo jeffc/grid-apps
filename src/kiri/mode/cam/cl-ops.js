@@ -124,9 +124,12 @@ export function createPopOp(type, map) {
         new: () => {
             let rec = { type };
             for (let [key, src] of Object.entries(map)) {
-                rec[key] = typeof (src) === 'string'
-                    ? env.current.process[src.replace('~', '')]
-                    : src;
+                if (typeof(src) === 'string') {
+                    let val = env.current.process[src.replace('~', '')];
+                    rec[key] = val !== undefined ? val : src;
+                } else {
+                    rec[key] = src;
+                }
             }
             return rec;
         },
@@ -371,17 +374,16 @@ export function createPopOps() {
     };
 
     createPopOp('four axis', {
-        tool: 'camFourAxisTool',
-        spindle: 'camFourAxisSpindle',
-        step: 'camFourAxisOver',
-        angle: 'camFourAxisAngle',
-        rate: 'camFourAxisSpeed',
-        tolerance: 'camTolerance',
-        filter: 'camContourFilter',
-        leave: 'camContourLeave',
-        linear: 'camFourAxisLinear',
-        offStart: 'camFourAxisOffStart',
-        offEnd: 'camFourAxisOffEnd',
+        tool: 4,
+        spindle: 1000,
+        step: 1,
+        angle: 5,
+        rate: 250,
+        tolerance: 0.1,
+        leave: 0,
+        linear: false,
+        offStart: 0,
+        offEnd: 0,
     }).inputs = {
         tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
         sep: UC.newBlank({ class: "pop-sep" }),
