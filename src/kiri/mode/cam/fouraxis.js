@@ -141,6 +141,14 @@ function isMachinable(point, normal, angle, grid, tool_offset = 0.1) {
   }
   const upAxis = newPoint(0, 1).rotate(-angle * DEG2RAD);
   const collision = grid.rayCast(tooltip, upAxis);
+  if (point.debug) {
+    console.log({
+      p: printPoint(point),
+      n: printPoint(normal),
+      a: angle,
+      coll: collision ? printPoint(collision) : null,
+    });
+  }
   return collision === null;
 }
 
@@ -260,7 +268,7 @@ export async function generateFourAxis(params) {
 
     if (slice_index % 10 == 0) {
       resampledContours.forEach((poly) =>
-        poly.points.forEach((p) => {
+        poly.points.forEach((p, i) => {
           const viz_p = newPoint(p.z, p.x, p.y);
           slice
             .output()
@@ -270,8 +278,8 @@ export async function generateFourAxis(params) {
                 viz_p,
                 newPoint(
                   viz_p.x,
-                  viz_p.y + p._fouraxis.vertex_normal.x,
-                  viz_p.z + p._fouraxis.vertex_normal.y
+                  viz_p.y + (i == 0 ? 3 : 1) * p._fouraxis.vertex_normal.x,
+                  viz_p.z + (i == 0 ? 3 : 1) * p._fouraxis.vertex_normal.y
                 ),
               ])
             );
@@ -306,65 +314,82 @@ export async function generateFourAxis(params) {
 
     // Iterate by angle to set machinability for each point
     resampledContours.forEach((poly) => {
+      poly.points.forEach((p, i) => {
+        if (slice_index === 10 && i == 119) {
+          console.log(`DEBUGGING POINT ${i}: (${[p.x, p.y]})`);
+          p.debug = true;
+        }
+      });
       poly.points.forEach((p) => {
+        const machinable = (p._fouraxis.machinable = []);
         for (let angle = 0; angle < 360; angle += angleStep) {
-          if (isMachinable(p, p._fouraxis.vertex_normal, angle, grid)) {
-            if (p._fouraxis.machinability.current_range_start === null) {
-              p._fouraxis.machinability.current_range_start = angle;
-            }
-          } else {
-            if (p._fouraxis.machinability.current_range_start !== null) {
-              p._fouraxis.machinability.MDR.push([
-                p._fouraxis.machinability.current_range_start,
-                angle - angleStep,
-              ]);
-              p._fouraxis.machinability.current_range_start = null;
-            }
-          }
+          machinable[angle] = isMachinable(
+            p,
+            p._fouraxis.vertex_normal,
+            angle,
+            grid
+          );
+        }
+        if (p.debug) {
+          console.log(p._fouraxis.machinable.map((m) => (m ? 1 : 0)).join(""));
         }
 
-        // if the last angle we checked is machinable and 0 degrees is
-        // machinable, connect the two
-        const crs = p._fouraxis.machinability.current_range_start;
-        // if the current range start ended at zero, the point is machinable at
-        // every angle (this is a weird degenerate case...)
-        if (crs === 0) {
-          p._fouraxis.machinability.MDR.push([0, 355], [355, 0]);
-        } else if (crs !== null) {
-          if (p._fouraxis.machinability.MDR.length == 0) {
-            p._fouraxis.machinability.MDR.push([crs, crs]);
-          } else if (p._fouraxis.machinability.MDR[0][0] == 0) {
-            p._fouraxis.machinability.MDR[0][0] = crs;
-          } else {
-            p._fouraxis.machinability.MDR.push([crs, 360 - angleStep]);
+        let inRange = false;
+        let rangeStart = 0;
+        for (let angle = 0; angle < 360; angle += angleStep) {
+          if (machinable[angle] && !inRange) {
+            inRange = true;
+            rangeStart = angle;
+          } else if (!machinable[angle] && inRange) {
+            inRange = false;
+            p._fouraxis.machinability.MDR.push([rangeStart, angle - angleStep]);
+          }
+        }
+        if (inRange) {
+          p._fouraxis.machinability.MDR.push([rangeStart, 360 - angleStep]);
+        }
+
+        // stitch together ranges that wrap around 0/360
+        if (p._fouraxis.machinability.MDR.length > 1) {
+          const first = p._fouraxis.machinability.MDR[0];
+          const last = p._fouraxis.machinability.MDR.peek();
+          if (first[0] === 0 && last[1] === 360 - angleStep) {
+            last[1] = first[1];
+            p._fouraxis.machinability.MDR.shift();
           }
         }
       });
     });
 
     if (slice_index % 10 == 0) {
+      let visualizeMachinabilityAngle = (p, angle) => {
+        const viz_p = newPoint(p.z, p.x, p.y);
+        slice
+          .output()
+          .setLayer(`machinability`, { line: 0xffffff })
+          .addPoly(
+            newPolygon([
+              viz_p,
+              newPoint(
+                viz_p.x,
+                viz_p.y + Math.cos((90 - angle) * DEG2RAD),
+                viz_p.z + Math.sin((90 - angle) * DEG2RAD)
+              ),
+            ])
+          );
+      };
+
       resampledContours.forEach((poly) =>
-        poly.points.forEach((p) => {
+        poly.points.forEach((p, i) => {
           p._fouraxis.machinability.MDR.forEach((mdr) => {
-            let a = mdr[0];
-            do {
-              const viz_p = newPoint(p.z, p.x, p.y);
-              slice
-                .output()
-                .setLayer("machinability", { line: 0xffffff })
-                .addPoly(
-                  newPolygon([
-                    viz_p,
-                    newPoint(
-                      viz_p.x,
-                      viz_p.y + Math.cos((90 - a) * DEG2RAD),
-                      viz_p.z + Math.sin((90 - a) * DEG2RAD)
-                    ),
-                  ])
-                );
-              a += angleStep;
-              a %= 360;
-            } while (a != mdr[1]);
+            // in order to handle wrap-around / zero-crossings, offset the MDR
+            // so that our loop iterator always remains positive
+            let viz_offset = (360 - mdr[0] + 360) % 360;
+            let viz_limit = (mdr[1] + viz_offset) % 360;
+            for (let a = 0; a < viz_limit; a++)
+              if ((a - viz_offset) % angleStep == 0) {
+                visualizeMachinabilityAngle(p, (a - viz_offset + 360) % 360);
+              }
           });
         })
       );
