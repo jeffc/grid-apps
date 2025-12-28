@@ -206,6 +206,61 @@ function resampleContour(points, spacing, closed = true) {
   return out;
 }
 
+// function to compute machinability range (MDR) and assign to each point in a
+// contour
+function assignMDRs(poly, grid, angleStep) {
+  // assign some storage to each point on the contours to store machinability
+  // ranges
+  poly.points.forEach((p) => {
+    p._fouraxis.machinability = {
+      MDR: [],
+      current_range_start: null,
+    };
+  });
+
+  // now compute
+  poly.points.forEach((p) => {
+    const machinable = (p._fouraxis.machinable = []);
+    for (let angle = 0; angle < 360; angle += angleStep) {
+      machinable[angle] = isMachinable(
+        p,
+        p._fouraxis.vertex_normal,
+        angle,
+        grid
+      );
+    }
+    if (p.debug) {
+      console.log(p._fouraxis.machinable.map((m) => (m ? 1 : 0)).join(""));
+    }
+
+    let inRange = false;
+    let rangeStart = 0;
+    for (let angle = 0; angle < 360; angle += angleStep) {
+      if (machinable[angle] && !inRange) {
+        inRange = true;
+        rangeStart = angle;
+      } else if (!machinable[angle] && inRange) {
+        inRange = false;
+        p._fouraxis.machinability.MDR.push([rangeStart, angle - angleStep]);
+      }
+    }
+    if (inRange) {
+      p._fouraxis.machinability.MDR.push([rangeStart, 360 - angleStep]);
+    }
+
+    // stitch together ranges that wrap around 0/360
+    if (p._fouraxis.machinability.MDR.length > 1) {
+      const first = p._fouraxis.machinability.MDR[0];
+      const last = p._fouraxis.machinability.MDR.peek();
+      if (first[0] === 0 && last[1] === 360 - angleStep) {
+        last[1] = first[1];
+        p._fouraxis.machinability.MDR.shift();
+      }
+    }
+  });
+  return poly; // for chaining, if necessary
+}
+
 // root function that performs the four-axis toolpath generation
 export async function generateFourAxis(params) {
   const { sliced, onupdate, lineColor } = params;
@@ -287,17 +342,6 @@ export async function generateFourAxis(params) {
       );
     }
 
-    // assign some storage to each point on the contours to store machinability
-    // ranges
-    resampledContours.forEach((poly) => {
-      poly.points.forEach((p) => {
-        p._fouraxis.machinability = {
-          MDR: [],
-          current_range_start: null,
-        };
-      });
-    });
-
     // generate the segment collision grid based on the original input
     // contours, since the extra resolution of the resampled contours doesn't
     // gain us anything
@@ -312,55 +356,10 @@ export async function generateFourAxis(params) {
       .flat();
     let grid = fromSegments(segments, 2.0, 10.0);
 
-    // Iterate by angle to set machinability for each point
-    resampledContours.forEach((poly) => {
-      poly.points.forEach((p, i) => {
-        if (slice_index === 10 && i == 119) {
-          console.log(`DEBUGGING POINT ${i}: (${[p.x, p.y]})`);
-          p.debug = true;
-        }
-      });
-      poly.points.forEach((p) => {
-        const machinable = (p._fouraxis.machinable = []);
-        for (let angle = 0; angle < 360; angle += angleStep) {
-          machinable[angle] = isMachinable(
-            p,
-            p._fouraxis.vertex_normal,
-            angle,
-            grid
-          );
-        }
-        if (p.debug) {
-          console.log(p._fouraxis.machinable.map((m) => (m ? 1 : 0)).join(""));
-        }
+    // Set machinability for each point
+    resampledContours.forEach((poly) => assignMDRs(poly, grid, angleStep));
 
-        let inRange = false;
-        let rangeStart = 0;
-        for (let angle = 0; angle < 360; angle += angleStep) {
-          if (machinable[angle] && !inRange) {
-            inRange = true;
-            rangeStart = angle;
-          } else if (!machinable[angle] && inRange) {
-            inRange = false;
-            p._fouraxis.machinability.MDR.push([rangeStart, angle - angleStep]);
-          }
-        }
-        if (inRange) {
-          p._fouraxis.machinability.MDR.push([rangeStart, 360 - angleStep]);
-        }
-
-        // stitch together ranges that wrap around 0/360
-        if (p._fouraxis.machinability.MDR.length > 1) {
-          const first = p._fouraxis.machinability.MDR[0];
-          const last = p._fouraxis.machinability.MDR.peek();
-          if (first[0] === 0 && last[1] === 360 - angleStep) {
-            last[1] = first[1];
-            p._fouraxis.machinability.MDR.shift();
-          }
-        }
-      });
-    });
-
+    // visualization for debugging
     if (slice_index % 10 == 0) {
       let visualizeMachinabilityAngle = (p, angle) => {
         const viz_p = newPoint(p.z, p.x, p.y);
