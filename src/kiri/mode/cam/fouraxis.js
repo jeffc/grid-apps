@@ -768,7 +768,6 @@ export async function generateFourAxis(params) {
         (mds.start + sectorSize(mds.start, mds.stop) / 2) % 360;
     });
     /*
-
     let angleDelta = 0;
     do {
       for (let i = 0; i < toolpath.length; i++) {
@@ -776,18 +775,23 @@ export async function generateFourAxis(params) {
         if (!p) {
           continue; // retract point
         }
-        let currentAngle = p._fouraxis.chosenAngle;
-        let npts = 1;
-        let total = currentAngle;
+        
+        let angles = [p._fouraxis.chosenAngle];
         if (i > 0 && toolpath[i - 1]) {
-          total += toolpath[i - 1]._fouraxis.chosenAngle;
-          npts++;
+          angles.push(toolpath[i - 1]._fouraxis.chosenAngle);
         }
         if (i < toolpath.length - 1 && toolpath[i + 1]) {
-          total += toolpath[i + 1]._fouraxis.chosenAngle;
-          npts++;
+          angles.push(toolpath[i + 1]._fouraxis.chosenAngle);
         }
-        p._fouraxis.newAngle = total / npts;
+
+        let sum_x = 0;
+        let sum_y = 0;
+        for (const angle of angles) {
+            sum_x += Math.cos(angle * DEG2RAD);
+            sum_y += Math.sin(angle * DEG2RAD);
+        }
+
+        p._fouraxis.newAngle = (Math.atan2(sum_y, sum_x) * RAD2DEG + 360) % 360;
       }
 
       angleDelta = 0;
@@ -800,10 +804,15 @@ export async function generateFourAxis(params) {
         let newAngle = p._fouraxis.newAngle;
         let mds = p._fouraxis.chosenMDS;
         if (!angleInSector(mds, newAngle)) {
-          newAngle =
-            Math.abs(mds.start - newAngle) < Math.abs(mds.stop - newAngle)
-              ? mds.start
-              : mds.stop;
+          const distToStart = Math.min(
+            Math.abs(mds.start - newAngle),
+            360 - Math.abs(mds.start - newAngle)
+          );
+          const distToStop = Math.min(
+            Math.abs(mds.stop - newAngle),
+            360 - Math.abs(mds.stop - newAngle)
+          );
+          newAngle = distToStart < distToStop ? mds.start : mds.stop;
         }
         angleDelta += Math.abs(newAngle - p._fouraxis.chosenAngle);
         p._fouraxis.chosenAngle = newAngle;
@@ -812,7 +821,50 @@ export async function generateFourAxis(params) {
     } while (angleDelta > 1);
     */
 
-    let finalToolpath = toolpath.map((p) => {
+    // iterate over the toolpath and approximate the actual distance travelled
+    // by the tool between the given points (taking into account the rotation).
+    // If that distance is larger than 0.5 work units, interpolate steps
+    let interpolatedToolpath = [];
+    let prevPoint = null;
+    for (let i = 0; i < toolpath.length; i++) {
+      const p = toolpath[i];
+      if (!p || !prevPoint) {
+        interpolatedToolpath.push(p);
+        prevPoint = p;
+        continue;
+      }
+
+      // quickly estimate the distance travelled by averaging the arc length of
+      // the previous and current point's travel along the angle delta
+      const da =
+        ((p._fouraxis.chosenAngle - prevPoint._fouraxis.chosenAngle + 360) %
+          360) *
+        DEG2RAD;
+
+      const mag = (pp) => Math.sqrt(pp.x * pp.x + pp.y * pp.y);
+      const dArc = (da * (mag(p) + mag(prevPoint))) / 2;
+      if (dArc > 2) {
+        // TODO - make configurable?
+        let segs = Math.max(Math.floor(dArc / 2), 1);
+        let interpX = (p.x - prevPoint.x) / segs;
+        let interpY = (p.y - prevPoint.y) / segs;
+        let interpA =
+          (p._fouraxis.chosenAngle - prevPoint._fouraxis.chosenAngle) / segs;
+        let interpPoint = structuredClone(prevPoint);
+        for (let step = 0; step < segs - 1; step++) {
+          interpPoint.x += interpX;
+          interpPoint.y += interpY;
+          interpPoint._fouraxis.chosenAngle += interpA + 360;
+          interpPoint._fouraxis.chosenAngle %= 360;
+
+          interpolatedToolpath.push(structuredClone(interpPoint));
+        }
+      }
+      interpolatedToolpath.push(p);
+      prevPoint = p;
+    }
+
+    let finalToolpath = interpolatedToolpath.map((p) => {
       if (!p) {
         return null;
       }
