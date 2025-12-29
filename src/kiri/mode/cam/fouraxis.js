@@ -298,7 +298,6 @@ function assignMDSLabels(poly) {
     return cc <= bb || cc > dd;
   };
 
-  poly._fouraxis = { paths: [] };
   // segment labels are unique per contour
   let nextLabel = 0;
 
@@ -335,6 +334,15 @@ function assignMDSLabels(poly) {
         if (nextMDS.segmentLabel !== null) {
           break;
         }
+        // If another MDS on this point is already part of the current path,
+        // then this is an invalid merge of two disjoint paths.
+        if (
+          nextPt._fouraxis.machinability.MDR.some(
+            (m) => m !== nextMDS && m.segmentLabel === nextLabel
+          )
+        ) {
+          break;
+        }
         nextMDS.segmentLabel = nextLabel;
         currentMDS = nextMDS;
         pointsOnPath.push(nextPt);
@@ -357,6 +365,15 @@ function assignMDSLabels(poly) {
         if (nextMDS.segmentLabel !== null) {
           break;
         }
+        // If another MDS on this point is already part of the current path,
+        // then this is an invalid merge of two disjoint paths.
+        if (
+          nextPt._fouraxis.machinability.MDR.some(
+            (m) => m !== nextMDS && m.segmentLabel === nextLabel
+          )
+        ) {
+          break;
+        }
         nextMDS.segmentLabel = nextLabel;
         currentMDS = nextMDS;
         pointsOnPath.push(nextPt);
@@ -364,13 +381,88 @@ function assignMDSLabels(poly) {
       // reverse the path again so we get back to a CCW winding order
       pointsOnPath.reverse();
 
-      poly._fouraxis.paths.push({ label: nextLabel, points: pointsOnPath });
-
       console.log(
         `Assigned ${pointsOnPath.length} points to label ${nextLabel}`
       );
     }
   }
+  return poly;
+}
+
+// Assign individual path labels to points in a polygon
+function assignPaths(poly) {
+  const pts = poly.points;
+  pts.forEach((p) => {
+    // TODO - properly implement graph-cut-based assignment
+
+    // choose the path label with the largest MDS
+    const sectorSize = (start, stop) => (stop - start + 360) % 360;
+    const chosenMDS = p._fouraxis.machinability.MDR.reduce(
+      (mds1, mds2) =>
+        sectorSize(mds1.start, mds1.stop) > sectorSize(mds2.start, mds2.stop)
+          ? mds1
+          : mds2,
+      { start: 0, stop: 0, segmentLabel: null }
+    );
+    p._fouraxis.segmentLabel = chosenMDS.segmentLabel;
+  });
+
+  const paths = {};
+  const visited = new Array(pts.length).fill(false);
+
+  for (let i = 0; i < pts.length; i++) {
+    if (visited[i]) {
+      continue;
+    }
+
+    const currentLabel = pts[i]._fouraxis.segmentLabel;
+    if (currentLabel === null) {
+      visited[i] = true;
+      continue;
+    }
+
+    // We've found a point on a new, unvisited path.
+    // First, find the absolute start of this segment by traversing backwards.
+    let startIdx = i;
+    while (
+      pts[(startIdx - 1 + pts.length) % pts.length]._fouraxis.segmentLabel ===
+      currentLabel
+    ) {
+      startIdx = (startIdx - 1 + pts.length) % pts.length;
+      if (startIdx === i) {
+        // Full circle path, break to avoid infinite loop
+        break;
+      }
+    }
+
+    // Now, we are at the start of the segment. Traverse forward and collect points.
+    const pathPoints = [];
+    let currentIdx = startIdx;
+    while (true) {
+      pathPoints.push(pts[currentIdx]);
+      visited[currentIdx] = true;
+
+      const nextIdx = (currentIdx + 1) % pts.length;
+      if (pts[nextIdx]._fouraxis.segmentLabel !== currentLabel) {
+        // The segment has ended.
+        break;
+      }
+      currentIdx = nextIdx;
+      if (currentIdx === startIdx) {
+        // We've completed a full circle.
+        break;
+      }
+    }
+    paths[currentLabel] = pathPoints;
+  }
+
+  if (!poly._fouraxis) {
+    poly._fouraxis = {};
+  }
+  poly._fouraxis.paths = paths;
+  console.log(`found ${Object.keys(paths).length} paths`);
+  debugger;
+
   return poly;
 }
 
@@ -476,7 +568,9 @@ export async function generateFourAxis(params) {
 
     // assign segment candidate labels
     resampledContours.forEach((poly) => assignMDSLabels(poly));
-    debugger;
+
+    // group points into paths by segment label
+    resampledContours.forEach((poly) => assignPaths(poly));
 
     // visualization for debugging
     if (slice_index % 10 == 0) {
@@ -511,6 +605,24 @@ export async function generateFourAxis(params) {
           });
         })
       );
+    }
+
+    if (slice_index % 10 == 0) {
+      const colors = [0xff0000, 0x00ff00, 0x0000ff];
+      resampledContours.forEach((poly) => {
+        Object.entries(poly._fouraxis.paths).forEach(([pathi, path]) => {
+          let viz_path_pts = [];
+          path.forEach((p) => {
+            viz_path_pts.push(newPoint(p.z, p.x, p.y));
+          });
+          slice
+            .output()
+            .setLayer(`segments-${pathi % colors.length}`, {
+              line: colors[pathi % colors.length],
+            })
+            .addPoly(newPolygon(viz_path_pts).setOpen());
+        });
+      });
     }
   }
   return sliced;
