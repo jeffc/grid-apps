@@ -58,6 +58,7 @@ export class Topo {
         this.resolution = resolution;
         this.vertices = widget.getGeoVertices({ unroll: true, translate: true });
         this.tabverts = widget.getTabVertices();
+        this.toolObj = tool;
         this.tool = tool.generateProfile(resolution).profile;
         this.maxo = tool.profileDim.maxo * resolution;
         this.diam = tool.fluteDiameter();
@@ -331,10 +332,10 @@ export class Topo {
     }
 
     async fourAxis(onupdate) {
-      const { sliced, tool, zoff, leave, linear, lineColor } = this;
+      const { sliced, toolObj, zoff, leave, linear, lineColor } = this;
       return await generateFourAxis({
           sliced,
-          tool,
+          toolObj,
           zoff,
           leave,
           linear,

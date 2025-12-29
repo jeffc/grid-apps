@@ -126,7 +126,7 @@ function assignNormalsAndFlatness(points) {
 }
 
 // Compute whether a point is machinable given the grid and tool information
-function isMachinable(point, normal, angle, grid, tool_offset = 0.1) {
+function isMachinable(point, normal, angle, grid, toolObj, tool_offset = 0.1) {
   // a point is machinable if the ray cast from the tooltip straight up (+Z)
   // never hits any other geometry. Rather than rotating the whole grid each
   // time, we instead rotate the Z vector to point where Z would be in that
@@ -136,20 +136,30 @@ function isMachinable(point, normal, angle, grid, tool_offset = 0.1) {
     point.y + normal.y * tool_offset
   );
 
+  // TODO - add more tool geom logic here
+  const toolDiam = toolObj.shaftDiameter();
+  const toolRadiusOffset = newPoint(-normal.y, normal.x).scale(
+    toolDiam / 2,
+    toolDiam / 2,
+    1
+  );
+  const toolEdge1 = newPoint(
+    tooltip.x + toolRadiusOffset.x,
+    tooltip.y + toolRadiusOffset.y
+  );
+  const toolEdge2 = newPoint(
+    tooltip.x - toolRadiusOffset.x,
+    tooltip.y - toolRadiusOffset.y
+  );
+
   if (isNaN(tooltip.x) || isNaN(tooltip.y)) {
     debugger;
   }
   const upAxis = newPoint(0, 1).rotate(-angle * DEG2RAD);
-  const collision = grid.rayCast(tooltip, upAxis);
-  if (point.debug) {
-    console.log({
-      p: printPoint(point),
-      n: printPoint(normal),
-      a: angle,
-      coll: collision ? printPoint(collision) : null,
-    });
-  }
-  return collision === null;
+  return (
+    grid.rayCast(toolEdge1, upAxis) === null &&
+    grid.rayCast(toolEdge2, upAxis) === null
+  );
 }
 
 // Resample a contour (set of points) into segments no longer than the given
@@ -208,7 +218,7 @@ function resampleContour(points, spacing, closed = true) {
 
 // function to compute machinability range (MDR) and assign to each point in a
 // contour
-function assignMDRs(poly, grid, angleStep) {
+function assignMDRs(poly, grid, angleStep, toolObj) {
   // assign some storage to each point on the contours to store machinability
   // ranges
   poly.points.forEach((p) => {
@@ -226,7 +236,8 @@ function assignMDRs(poly, grid, angleStep) {
         p,
         p._fouraxis.vertex_normal,
         angle,
-        grid
+        grid,
+        toolObj
       );
     }
     if (p.debug) {
@@ -241,19 +252,27 @@ function assignMDRs(poly, grid, angleStep) {
         rangeStart = angle;
       } else if (!machinable[angle] && inRange) {
         inRange = false;
-        p._fouraxis.machinability.MDR.push([rangeStart, angle - angleStep]);
+        p._fouraxis.machinability.MDR.push({
+          start: rangeStart,
+          stop: angle - angleStep,
+          segmentLabel: null,
+        });
       }
     }
     if (inRange) {
-      p._fouraxis.machinability.MDR.push([rangeStart, 360 - angleStep]);
+      p._fouraxis.machinability.MDR.push({
+        start: rangeStart,
+        stop: 360 - angleStep,
+        segmentLabel: null,
+      });
     }
 
     // stitch together ranges that wrap around 0/360
     if (p._fouraxis.machinability.MDR.length > 1) {
       const first = p._fouraxis.machinability.MDR[0];
       const last = p._fouraxis.machinability.MDR.peek();
-      if (first[0] === 0 && last[1] === 360 - angleStep) {
-        last[1] = first[1];
+      if (first.start === 0 && last.stop === 360 - angleStep) {
+        last.stop = first.stop;
         p._fouraxis.machinability.MDR.shift();
       }
     }
@@ -261,9 +280,103 @@ function assignMDRs(poly, grid, angleStep) {
   return poly; // for chaining, if necessary
 }
 
+// perform an exhaustive back-and-forth analysis to assign possible segment
+// labels to each point (one label per MDS)
+function assignMDSLabels(poly) {
+  // compute if two sectors overlap by rotating both so that sector1 starts at
+  // zero
+  const sectorsOverlap = (s1, s2) => {
+    let [a, b] = [s1.start, s1.stop];
+    let [c, d] = [s2.start, s2.stop];
+
+    let bb = (b - a + 360) % 360;
+    let cc = (c - a + 360) % 360;
+    let dd = (d - a + 360) % 360;
+
+    // return true if s2 starts before s1 ends, OR if s2 wraps past the zero
+    // mark (where s1 starts)
+    return cc <= bb || cc > dd;
+  };
+
+  poly._fouraxis = { paths: [] };
+  // segment labels are unique per contour
+  let nextLabel = 0;
+
+  const pts = poly.points;
+  for (let pi = 0; pi < poly.points.length; pi++) {
+    let pt = pts[pi];
+    for (let mdsi = 0; mdsi < pt._fouraxis.machinability.MDR.length; mdsi++) {
+      let mds = pt._fouraxis.machinability.MDR[mdsi];
+      if (mds.segmentLabel != null) {
+        continue;
+      }
+
+      // get a fresh label
+      nextLabel++;
+      mds.segmentLabel = nextLabel;
+      let pointsOnPath = [pt];
+
+      // traverse forward and assign the segment label to points which have
+      // overlapping MDSs. If we encounter a point that doesn't overlap or that
+      // has two disjoint overlaps, or one that already has a label (which
+      // shouldn't ever happen...) stop assigning.
+      let traverseidx = pi;
+      let currentMDS = mds;
+      while (true) {
+        traverseidx = (traverseidx + 1) % pts.length;
+        let nextPt = pts[traverseidx];
+        let overlappingMDSs = nextPt._fouraxis.machinability.MDR.filter((m) =>
+          sectorsOverlap(currentMDS, m)
+        );
+        if (overlappingMDSs.length != 1) {
+          break;
+        }
+        let nextMDS = overlappingMDSs[0];
+        if (nextMDS.segmentLabel !== null) {
+          break;
+        }
+        nextMDS.segmentLabel = nextLabel;
+        currentMDS = nextMDS;
+        pointsOnPath.push(nextPt);
+      }
+      traverseidx = pi;
+      currentMDS = mds;
+      // reverse the path so that we can push() the backwards traversal on the
+      // end
+      pointsOnPath.reverse();
+      while (true) {
+        traverseidx = (traverseidx - 1 + pts.length) % pts.length;
+        let nextPt = pts[traverseidx];
+        let overlappingMDSs = nextPt._fouraxis.machinability.MDR.filter((m) =>
+          sectorsOverlap(currentMDS, m)
+        );
+        if (overlappingMDSs.length != 1) {
+          break;
+        }
+        let nextMDS = overlappingMDSs[0];
+        if (nextMDS.segmentLabel !== null) {
+          break;
+        }
+        nextMDS.segmentLabel = nextLabel;
+        currentMDS = nextMDS;
+        pointsOnPath.push(nextPt);
+      }
+      // reverse the path again so we get back to a CCW winding order
+      pointsOnPath.reverse();
+
+      poly._fouraxis.paths.push({ label: nextLabel, points: pointsOnPath });
+
+      console.log(
+        `Assigned ${pointsOnPath.length} points to label ${nextLabel}`
+      );
+    }
+  }
+  return poly;
+}
+
 // root function that performs the four-axis toolpath generation
 export async function generateFourAxis(params) {
-  const { sliced, onupdate, lineColor } = params;
+  const { sliced, onupdate, toolObj, lineColor } = params;
 
   console.log(`Four axis slicing: ${sliced.length} slices`);
 
@@ -357,7 +470,13 @@ export async function generateFourAxis(params) {
     let grid = fromSegments(segments, 2.0, 10.0);
 
     // Set machinability for each point
-    resampledContours.forEach((poly) => assignMDRs(poly, grid, angleStep));
+    resampledContours.forEach((poly) =>
+      assignMDRs(poly, grid, angleStep, toolObj)
+    );
+
+    // assign segment candidate labels
+    resampledContours.forEach((poly) => assignMDSLabels(poly));
+    debugger;
 
     // visualization for debugging
     if (slice_index % 10 == 0) {
@@ -383,8 +502,8 @@ export async function generateFourAxis(params) {
           p._fouraxis.machinability.MDR.forEach((mdr) => {
             // in order to handle wrap-around / zero-crossings, offset the MDR
             // so that our loop iterator always remains positive
-            let viz_offset = (360 - mdr[0] + 360) % 360;
-            let viz_limit = (mdr[1] + viz_offset) % 360;
+            let viz_offset = (360 - mdr.start + 360) % 360;
+            let viz_limit = (mdr.stop + viz_offset) % 360;
             for (let a = 0; a < viz_limit; a++)
               if ((a - viz_offset) % angleStep == 0) {
                 visualizeMachinabilityAngle(p, (a - viz_offset + 360) % 360);
