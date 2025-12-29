@@ -625,89 +625,74 @@ export async function generateFourAxis(params) {
 
     // find a safe path between two nodes, if one exists
     const findConnectingPath = (n1, n2) => {
-      // we can short-circut the rest if the chosen MDS for the start and
-      // end of the segment don't overlap at all
-      if (
-        !sectorsOverlap(
-          n1.point._fouraxis.chosenMDS,
-          n2.point._fouraxis.chosenMDS
-        )
-      ) {
+      if (!n1 || !n2) {
         return null;
       }
+      let p1 = n1.point;
+      let p2 = n2.point;
 
-      const dist = base.util.dist2D(n1.point, n2.point);
-      const dir = newPoint(n2.point.x - n1.point.x, n2.point.y - n1.point.y);
-      if (dist > 0) {
-        dir.normalize();
-      }
+      let displacement = newPoint(p2.x - p1.x, p2.y - p1.y);
+      let distance = displacement.magnitude();
+      let direction = displacement.clone().normalize();
 
-      // Ensure at least 3 intermediate points for thorough checking, even on short moves.
-      const min_steps = 4; // creates 3 intermediate points before the final point
-      const steps_by_dist = Math.ceil(dist / 0.2); // 0.2 is the step size
-      const interpSteps = Math.max(min_steps, steps_by_dist);
+      console.log(`Points are ${distance} units apart`);
 
-      let betweenPoints = [];
-      const step_x = (n2.point.x - n1.point.x) / interpSteps;
-      const step_y = (n2.point.y - n1.point.y) / interpSteps;
-
-      for (let i = 0; i < interpSteps; i++) {
-        let p = newPoint(
-          n1.point.x + i * step_x,
-          n1.point.y + i * step_y,
-          n1.point.z
+      // interpolate at least three points between the two
+      let nPoints = Math.round(Math.max(distance / 0.2, 3));
+      let samplePoints = [];
+      for (let i = 0; i < nPoints; i++) {
+        const newP = newPoint(
+          p1.x + (i * displacement.x) / nPoints,
+          p1.y + (i * displacement.y) / nPoints,
+          p1.z
         );
-        // assign a vertex_normal that's just normal to the connecting
-        // segment. it doesn't actually matter if it's flipped or not
-        p._fouraxis = {
-          vertex_normal: newPoint(dir.y, -dir.x),
+        newP._fouraxis = {
+          // assign a normal along our path
+          vertex_normal: newPoint(-direction.y, direction.x),
         };
-        betweenPoints.push(p);
+        samplePoints.push(newP);
       }
-      betweenPoints.push(n2.point.clone(["_fouraxis"]));
+      // assign possible MDRs to our points
+      const candidatePath = newPolygon(samplePoints).setOpen();
+      assignMDRs(candidatePath, grid, angleStep, toolObj);
 
-      const betweenPoly = newPolygon(betweenPoints);
-      assignMDRs(betweenPoly, grid, angleStep, toolObj);
-      let currentMDS = n1.point._fouraxis.chosenMDS;
-      betweenPoly.points[0]._fouraxis.chosenMDS = currentMDS;
-      // Propagate chosenMDS up to the second-to-last point
-      for (let sx = 1; sx < betweenPoly.points.length - 1; sx++) {
-        const point = betweenPoly.points[sx];
-        const candMDS = point._fouraxis.MDR?.filter((mds) =>
-          sectorsOverlap(mds, currentMDS)
-        ).sort(
-          (a, b) => sectorSize(b.start, b.stop) - sectorSize(a.start, a.stop)
-        );
-        if (candMDS && candMDS.length > 0) {
-          point._fouraxis.chosenMDS = candMDS[0];
-          currentMDS = candMDS[0];
-        } else {
-          return null; // Path is broken in the middle
+      // now force the MDRs of our start and end points to only contain the
+      // chosen MDS for those points
+      samplePoints[0]._fouraxis.machinability.MDR = [p1._fouraxis.chosenMDS];
+      samplePoints.last()._fouraxis.machinability.MDR = [
+        p2._fouraxis.chosenMDS,
+      ];
+
+      // now do a traversal along the path. We can't re-use our existing
+      // functions because we're looking to find one specific continuous path,
+      // if it exists.
+      let currentMDS = p1._fouraxis.chosenMDS;
+      for (let i = 1; i < samplePoints.length; i++) {
+        const p = samplePoints[i];
+        const chosenMDS = p._fouraxis.machinability.MDR.filter((mds) => {
+          return sectorsOverlap(currentMDS, mds);
+        }).reduce((mds1, mds2) => {
+          if (!mds1) return mds2;
+          if (!mds2) return mds1;
+
+          return sectorSize(mds1.start, mds1.stop) >
+            sectorSize(mds2.start, mds2.stop)
+            ? mds1
+            : mds2;
+        }, null);
+
+        // if we got to the point where we can't find a continuous MDS, give up
+        // and say there's no path
+        if (!chosenMDS) {
+          return null;
         }
+        p._fouraxis.chosenMDS = chosenMDS;
+        currentMDS = chosenMDS;
       }
-
-      // For the very last point, find an MDS that bridges the gap between the
-      // propagated path and the destination's required angle range.
-      const lastPoint = betweenPoly.last();
-      const finalCandMDS = lastPoint._fouraxis.MDR?.filter(
-        (mds) =>
-          sectorsOverlap(mds, currentMDS) &&
-          sectorsOverlap(mds, n2.point._fouraxis.chosenMDS)
-      );
-
-      if (finalCandMDS && finalCandMDS.length > 0) {
-        // Bridge found. Assign the best bridging MDS to the last point.
-        lastPoint._fouraxis.chosenMDS = finalCandMDS.sort(
-          (a, b) => sectorSize(b.start, b.stop) - sectorSize(a.start, a.stop)
-        )[0];
-        return betweenPoly.points;
-      }
-
-      // No bridging MDS found, the path is invalid.
-      return null;
+      console.log(`Path found!`);
+      return samplePoints.slice(1, samplePoints.length - 1);
     };
 
-    debugger;
     for (let i = 0; i < toolpathNodes.length; i++) {
       const n1 = toolpathNodes[i];
       for (let j = 0; j < i; j++) {
@@ -784,7 +769,6 @@ export async function generateFourAxis(params) {
         return pathData.points || pathData || [];
       })
       .flat();
-    debugger;
 
     // compute the actual machining angles along the toolpath. start by choosing
     // the middle of each point's MDS, then do laplacian smoothing until the
@@ -938,10 +922,18 @@ export async function generateFourAxis(params) {
         let interpY = (p.y - prevPoint.y) / segs;
         let interpA = diff / segs;
         let interpPoint = structuredClone(prevPoint);
+        const segmentDir = newPoint(
+          p.x - prevPoint.x,
+          p.y - prevPoint.y
+        ).normalize();
         for (let step = 0; step < segs - 1; step++) {
           interpPoint.x += interpX;
           interpPoint.y += interpY;
           interpPoint._fouraxis.chosenAngle += interpA;
+          interpPoint._fouraxis.vertex_normal = newPoint(
+            segmentDir.y,
+            -segmentDir.x
+          );
           sanityCheckPoint(interpPoint, grid, toolObj);
           interpolatedToolpath.push(structuredClone(interpPoint));
         }
