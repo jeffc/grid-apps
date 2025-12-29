@@ -525,27 +525,6 @@ export async function generateFourAxis(params) {
       });
     }
 
-    if (slice_index % 10 == 0) {
-      resampledContours.forEach((poly) =>
-        poly.points.forEach((p, i) => {
-          const viz_p = newPoint(p.z, p.x, p.y);
-          slice
-            .output()
-            .setLayer("machinability-normals", { line: 0xff00ff })
-            .addPoly(
-              newPolygon([
-                viz_p,
-                newPoint(
-                  viz_p.x,
-                  viz_p.y + (i == 0 ? 3 : 1) * p._fouraxis.vertex_normal.x,
-                  viz_p.z + (i == 0 ? 3 : 1) * p._fouraxis.vertex_normal.y
-                ),
-              ])
-            );
-        })
-      );
-    }
-
     // generate the segment collision grid based on the original input
     // contours, since the extra resolution of the resampled contours doesn't
     // gain us anything
@@ -615,15 +594,103 @@ export async function generateFourAxis(params) {
       point: null,
     });
 
+    toolpathNodes.forEach((node) => {
+      toolpathGraph.addEdge(node.name, "RETRACT", 1e5); // from path to retract
+      toolpathGraph.addEdge("RETRACT", node.name, 1e5); // from retract to path
+    });
+
+    // find a safe path between two nodes, if one exists
+    const findConnectingPath = (n1, n2) => {
+      // we can short-circut the rest if the chosen MDS for the start and
+      // end of the segment don't overlap at all
+      if (
+        !sectorsOverlap(
+          n1.point._fouraxis.chosenMDS,
+          n2.point._fouraxis.chosenMDS
+        )
+      ) {
+        return null;
+      }
+
+      const dist = base.util.dist2D(n1.point, n2.point);
+      const dir = newPoint(n2.point.x - n1.point.x, n2.point.y - n1.point.y);
+      if (dist > 0) {
+        dir.normalize();
+      }
+
+      // Ensure at least 3 intermediate points for thorough checking, even on short moves.
+      const min_steps = 4; // creates 3 intermediate points before the final point
+      const steps_by_dist = Math.ceil(dist / 0.2); // 0.2 is the step size
+      const interpSteps = Math.max(min_steps, steps_by_dist);
+
+      let betweenPoints = [];
+      const step_x = (n2.point.x - n1.point.x) / interpSteps;
+      const step_y = (n2.point.y - n1.point.y) / interpSteps;
+
+      for (let i = 0; i < interpSteps; i++) {
+        let p = newPoint(
+          n1.point.x + i * step_x,
+          n1.point.y + i * step_y,
+          n1.point.z
+        );
+        // assign a vertex_normal that's just normal to the connecting
+        // segment. it doesn't actually matter if it's flipped or not
+        p._fouraxis = {
+          vertex_normal: newPoint(dir.y, -dir.x),
+        };
+        betweenPoints.push(p);
+      }
+      betweenPoints.push(n2.point.clone(["_fouraxis"]));
+
+      const betweenPoly = newPolygon(betweenPoints);
+      assignMDRs(betweenPoly, grid, angleStep, toolObj);
+      let currentMDS = n1.point._fouraxis.chosenMDS;
+      betweenPoly.points[0]._fouraxis.chosenMDS = currentMDS;
+      // Propagate chosenMDS up to the second-to-last point
+      for (let sx = 1; sx < betweenPoly.points.length - 1; sx++) {
+        const point = betweenPoly.points[sx];
+        const candMDS = point._fouraxis.MDR?.filter((mds) =>
+          sectorsOverlap(mds, currentMDS)
+        ).sort(
+          (a, b) => sectorSize(b.start, b.stop) - sectorSize(a.start, a.stop)
+        );
+        if (candMDS && candMDS.length > 0) {
+          point._fouraxis.chosenMDS = candMDS[0];
+          currentMDS = candMDS[0];
+        } else {
+          return null; // Path is broken in the middle
+        }
+      }
+
+      // For the very last point, find an MDS that bridges the gap between the
+      // propagated path and the destination's required angle range.
+      const lastPoint = betweenPoly.last();
+      const finalCandMDS = lastPoint._fouraxis.MDR?.filter(
+        (mds) =>
+          sectorsOverlap(mds, currentMDS) &&
+          sectorsOverlap(mds, n2.point._fouraxis.chosenMDS)
+      );
+
+      if (finalCandMDS && finalCandMDS.length > 0) {
+        // Bridge found. Assign the best bridging MDS to the last point.
+        lastPoint._fouraxis.chosenMDS = finalCandMDS.sort(
+          (a, b) => sectorSize(b.start, b.stop) - sectorSize(a.start, a.stop)
+        )[0];
+        return betweenPoly.points;
+      }
+
+      // No bridging MDS found, the path is invalid.
+      return null;
+    };
+
     for (let i = 0; i < toolpathNodes.length; i++) {
       const n1 = toolpathNodes[i];
-      toolpathGraph.addEdge(n1.name, "RETRACT", 1e5); // make retraction expensive, but possible, from any node
       for (let j = 0; j < i; j++) {
         const n2 = toolpathNodes[j];
 
         if (n1.path.name == n2.path.name) {
           const pathBetween = structuredClone(n1.path.points);
-          const pathBetweenRev = structuredClone(n1.path.points);
+          const pathBetweenRev = structuredClone(n1.path.points).reverse();
           if (n1.start) {
             toolpathGraph.addEdge(n1.name, n2.name, 0, { path: pathBetween });
             toolpathGraph.addEdge(n2.name, n1.name, 0, {
@@ -636,69 +703,37 @@ export async function generateFourAxis(params) {
             toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween });
           }
         } else {
+          console.log("Looking for connecting paths...");
           // check if there's a safe machinable path between n1 and n2
-
-          // we can short-circut the rest if the chosen MDS for the start and
-          // end of the segment don't overlap at all
-          if (
-            sectorsOverlap(
-              n1.point._fouraxis.chosenMDS,
-              n2.point._fouraxis.chosenMDS
-            )
-          ) {
-            const dist = base.util.dist2D(n1.point, n2.point);
-            // generate a segment between n1 and n2, interpolated every 0.2 units
-            const dir = newPoint(
-              n2.point.x - n1.point.x,
-              n2.point.y - n1.point.y
-            ).normalize();
-            const interpSteps = dist / 0.2; // TODO make this configurable?
-            let betweenPoints = [];
-            let [curX, curY] = [n1.point.x, n1.point.y];
-            for (let step = 0; step < interpSteps; step++) {
-              let p = newPoint(curX, curY);
-              // assign a vertex_normal that's just normal to the connecting
-              // segment. it doesn't actually matter if it's flipped or not
-              p._fouraxis = {
-                vertex_normal: newPoint(-dir.y, dir.x),
-              };
-              betweenPoints.push(p);
-              curX += dir.x * 0.2;
-              curY += dir.y * 0.2;
-            }
-
-            const betweenPoly = newPolygon(betweenPoints);
-            assignMDRs(betweenPoly, grid, angleStep, toolObj);
-            let currentMDS = n1.point._fouraxis.chosenMDS;
-            betweenPoly.points[0]._fouraxis.chosenMDS = currentMDS;
-            let overlapOK = true;
-            for (
-              let sx = 1;
-              overlapOK && sx < betweenPoly.points.length;
-              sx++
-            ) {
-              const candMDS = betweenPoly.points[sx]._fouraxis.MDR?.filter(
-                (mds) => sectorsOverlap(mds, currentMDS)
-              ).sort(
-                (a, b) =>
-                  sectorSize(b.start, b.stop) - sectorSize(a.start, a.stop)
-              );
-              if (candMDS && candMDS.length > 0) {
-                betweenPoly.points[sx]._fouraxis.chosenMDS = candMDS;
-                currentMDS = candMDS;
-              } else {
-                overlapOK = false;
+          const forwardPath = findConnectingPath(n1, n2);
+          if (forwardPath) {
+            console.log(
+              `Found connecting path between ${n1.name} and ${n2.name}`
+            );
+            console.log(forwardPath);
+            toolpathGraph.addEdge(
+              n1.name,
+              n2.name,
+              base.util.dist2D(n1.point, n2.point),
+              {
+                path: { points: forwardPath },
               }
-            }
+            );
+          }
 
-            if (overlapOK) {
-              toolpathGraph.addEdge(n1.name, n2.name, dist, {
-                path: { points: betweenPoly.points },
-              });
-              toolpathGraph.addEdge(n2.name, n1.name, dist, {
-                path: { points: structuredClone(betweenPoly.points).reverse() },
-              });
-            }
+          const reversePath = findConnectingPath(n2, n1);
+          if (reversePath) {
+            console.log(
+              `Found connecting path between ${n2.name} and ${n1.name}`
+            );
+            toolpathGraph.addEdge(
+              n2.name,
+              n1.name,
+              base.util.dist2D(n2.point, n1.point),
+              {
+                path: { points: reversePath },
+              }
+            );
           }
         }
       }
@@ -712,10 +747,11 @@ export async function generateFourAxis(params) {
     // create a toolpath without explicit angles assigned
     let toolpath = edgeTraversalOrder
       .map((e) => {
-        // TODO handle retraction
-        if (e.from == "RETRACT" || e.to == "RETRACT") return [newPoint(0, 100)];
-
-        return e.edgeData.data.path || [];
+        if (e.from == "RETRACT" || e.to == "RETRACT") {
+          return [null]; // Use null as a marker for retraction
+        }
+        const pathData = e.edgeData.data.path;
+        return pathData.points || pathData || [];
       })
       .flat();
 
@@ -723,7 +759,7 @@ export async function generateFourAxis(params) {
     // the middle of each point's MDS, then do laplacian smoothing until the
     // total angle variance converges within 1 degree.
     toolpath.forEach((p) => {
-      if (!p._fouraxis) {
+      if (!p) {
         // this is a retract point
         return;
       }
@@ -731,22 +767,23 @@ export async function generateFourAxis(params) {
       p._fouraxis.chosenAngle =
         (mds.start + sectorSize(mds.start, mds.stop) / 2) % 360;
     });
+    /*
 
     let angleDelta = 0;
     do {
       for (let i = 0; i < toolpath.length; i++) {
         let p = toolpath[i];
-        if (!p._fouraxis) {
+        if (!p) {
           continue; // retract point
         }
         let currentAngle = p._fouraxis.chosenAngle;
         let npts = 1;
         let total = currentAngle;
-        if (i > 0 && toolpath[i - 1]._fouraxis) {
+        if (i > 0 && toolpath[i - 1]) {
           total += toolpath[i - 1]._fouraxis.chosenAngle;
           npts++;
         }
-        if (i < toolpath.length - 1 && toolpath[i + 1]._fouraxis) {
+        if (i < toolpath.length - 1 && toolpath[i + 1]) {
           total += toolpath[i + 1]._fouraxis.chosenAngle;
           npts++;
         }
@@ -757,7 +794,7 @@ export async function generateFourAxis(params) {
       const angleInSector = (mds, a) =>
         (a - mds.start + 360) % 360 < (mds.stop - mds.start + 360) % 360;
       toolpath.forEach((p) => {
-        if (!p._fouraxis) {
+        if (!p) {
           return;
         }
         let newAngle = p._fouraxis.newAngle;
@@ -773,9 +810,10 @@ export async function generateFourAxis(params) {
         p._fouraxis.newAngle = undefined;
       });
     } while (angleDelta > 1);
+    */
 
     let finalToolpath = toolpath.map((p) => {
-      if (!p._fouraxis) {
+      if (!p) {
         return null;
       }
       return newPoint(p.z, p.x, p.y)
@@ -786,17 +824,20 @@ export async function generateFourAxis(params) {
     slice.camLines = [];
     let line = [];
     finalToolpath.forEach((p) => {
-      if (p === null && line.length > 0) {
-        slice.camLines.push(newPolygon(line).setOpen());
-        line = [];
-      } else {
+      if (p) {
+        // if p is a valid point, add it to the current line
         line.push(p);
+      } else {
+        // if p is null, it's a retraction, so finalize the current line
+        if (line.length > 0) {
+          slice.camLines.push(newPolygon(line).setOpen());
+          line = [];
+        }
       }
     });
     if (line.length > 0) {
       slice.camLines.push(newPolygon(line).setOpen());
     }
-    debugger;
 
     // visualizations for debugging
     if (slice_index % 10 == 0) {
@@ -816,6 +857,45 @@ export async function generateFourAxis(params) {
             ])
           );
       };
+
+      if (slice_index % 10 == 0) {
+        resampledContours.forEach((poly) =>
+          poly.points.forEach((p, i) => {
+            const viz_p = newPoint(p.z, p.x, p.y);
+            slice
+              .output()
+              .setLayer("machinability-normals", { line: 0xff00ff })
+              .addPoly(
+                newPolygon([
+                  viz_p,
+                  newPoint(
+                    viz_p.x,
+                    viz_p.y + (i == 0 ? 3 : 1) * p._fouraxis.vertex_normal.x,
+                    viz_p.z + (i == 0 ? 3 : 1) * p._fouraxis.vertex_normal.y
+                  ),
+                ])
+              );
+          })
+        );
+      }
+
+      if (slice_index % 10 == 0) {
+        toolpath.forEach((p) => {
+          if (!p) return;
+          const viz_p = newPoint(p.z, p.x, p.y);
+          const machiningAngle = p._fouraxis.chosenAngle * DEG2RAD;
+          const [vx, vy] = [
+            -Math.sin(machiningAngle),
+            Math.cos(machiningAngle),
+          ];
+          slice
+            .output()
+            .setLayer("machinability-angle", { line: 0x00ffff })
+            .addPoly(
+              newPolygon([viz_p, newPoint(viz_p.x, viz_p.y + vx, viz_p.z + vy)])
+            );
+        });
+      }
 
       resampledContours.forEach((poly) =>
         poly.points.forEach((p, i) => {
@@ -849,15 +929,6 @@ export async function generateFourAxis(params) {
             .addPoly(newPolygon(viz_path_pts).setOpen());
         });
       });
-    }
-
-    if (slice_index % 10 == 0) {
-      slice
-        .output()
-        .setLayer(`toolpath`, { line: 0xffff00 })
-        .addPoly(
-          newPolygon(toolpath.map((p) => newPoint(p.z, p.x, p.y))).setOpen()
-        );
     }
   }
   return sliced;
