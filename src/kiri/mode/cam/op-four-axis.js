@@ -57,7 +57,7 @@ class OpFourAxis extends CamOp {
               newPoint(lastPoint.x, lastpoint.y, zSafe).setA(lastAngle),
               0
             );
-            setNextIsMove();
+            //setNextIsMove();
           }
         }
       }

@@ -132,91 +132,187 @@ export class Graph {
     }
   }
 
-  /**
-   * Finds a path that visits every node in the graph using a nearest-neighbor
-   * heuristic, which is a fast approximation for the Traveling Salesman Problem (TSP).
-   *
-   * @param {*} [startNode] - The node to start the path from. If not provided,
-   *   it will start with an arbitrary node.
-   * @returns {{path: Array<*>, edges: Array<{from: *, to: *, edgeData: {weight: number, data: Object}}>, weight: number, missing: Array<*>}|null} An object
-   *   containing the generated path, the sequence of edges visited, its total weight,
-   *   and any nodes that were unreachable (in case of a disconnected graph).
-   *   Returns null if the graph is empty.
-   */
-  findPathTSP(startNode) {
-    const nodes = Array.from(this.getNodes());
-    if (nodes.length === 0) {
-      return null;
-    }
+    /**
+     * Finds a shortest path between two nodes using Dijkstra's algorithm, constrained
+     * to a specific set of allowed nodes.
+     * @param {*} startNode 
+     * @param {*} endNode 
+     * @param {Set} allowedNodes - A set of nodes the path is allowed to traverse.
+     * @returns {{path: Array<*>, edges: Array<*>, weight: number}|null}
+     * @private
+     */
+    _findShortestPath(startNode, endNode, allowedNodes) {
+        let distances = new Map();
+        let prev = new Map();
+        let pq = new Map(); // Using a Map as a min-priority queue
 
-    if (!startNode || !this.adj.has(startNode)) {
-      startNode = nodes[0];
-    }
-
-    const unvisited = new Set(nodes);
-    const path = [];
-    const edges = []; // New array to store visited edges
-    let totalWeight = 0;
-    let currentNode = startNode;
-
-    while (unvisited.size > 0) {
-      path.push(currentNode);
-      unvisited.delete(currentNode);
-
-      if (unvisited.size === 0) {
-        break;
-      }
-
-      const neighbors = this.getNeighbors(currentNode);
-      let nearestNeighbor = null;
-      let minWeight = Infinity;
-      let connectingEdge = null; // To store the edge object
-
-      if (neighbors) {
-        for (const [neighbor, edge] of neighbors.entries()) {
-          if (unvisited.has(neighbor) && edge.weight < minWeight) {
-            minWeight = edge.weight;
-            nearestNeighbor = neighbor;
-            connectingEdge = edge;
-          }
+        for (const node of allowedNodes) {
+            distances.set(node, Infinity);
+            prev.set(node, null);
+            pq.set(node, Infinity);
         }
-      }
 
-      if (nearestNeighbor) {
-        totalWeight += minWeight;
-        edges.push({
-          from: currentNode,
-          to: nearestNeighbor,
-          edgeData: connectingEdge,
-        }); // Store the edge
-        currentNode = nearestNeighbor;
-      } else if (unvisited.size > 0) {
-        // Handle disconnected graph: jump to the next available unvisited node.
-        // This is no longer a single path, but a series of paths.
-        // The connection between them has an effective "infinite" weight.
-        // No edge is added here as it's a "jump" not a graph edge traversal.
-        currentNode = unvisited.values().next().value;
-      }
+        distances.set(startNode, 0);
+        pq.set(startNode, 0);
+
+        while (pq.size > 0) {
+            // Get node with smallest distance from priority queue
+            let closestNode = null;
+            let minDistance = Infinity;
+            for (const [node, dist] of pq.entries()) {
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    closestNode = node;
+                }
+            }
+            
+            if (closestNode === null) break;
+            pq.delete(closestNode);
+
+            if (closestNode === endNode) {
+                // Reconstruct path
+                let path = [];
+                let edges = [];
+                let current = endNode;
+                while (current !== null) {
+                    path.unshift(current);
+                    let p = prev.get(current);
+                    if (p) {
+                        const edgeData = this.adj.get(p)?.get(current);
+                        edges.unshift({ from: p, to: current, edgeData });
+                    }
+                    current = p;
+                }
+                return { path, edges, weight: distances.get(endNode) };
+            }
+
+            const neighbors = this.getNeighbors(closestNode);
+            if (neighbors) {
+                for (const [neighbor, edge] of neighbors.entries()) {
+                    if (allowedNodes.has(neighbor)) {
+                        let newDist = distances.get(closestNode) + edge.weight;
+                        if (newDist < distances.get(neighbor)) {
+                            distances.set(neighbor, newDist);
+                            prev.set(neighbor, closestNode);
+                            pq.set(neighbor, newDist);
+                        }
+                    }
+                }
+            }
+        }
+
+        return null; // No path found
     }
 
-    // Close the loop by returning to the start node to complete the tour
-    const lastNodeInPath = path[path.length - 1];
-    const closingEdgeObj = this.adj.get(lastNodeInPath)?.get(startNode);
-    if (closingEdgeObj !== undefined) {
-      totalWeight += closingEdgeObj.weight;
-      edges.push({
-        from: lastNodeInPath,
-        to: startNode,
-        edgeData: closingEdgeObj,
-      }); // Store closing edge
-      path.push(startNode);
-    }
+    /**
+     * Finds a path that visits every node in the graph. It uses a nearest-neighbor
+     * heuristic, but if it gets stuck, it finds the globally cheapest edge to an
+     * unvisited node and uses Dijkstra's algorithm to pathfind to it, allowing
+     * nodes to be re-visited to ensure a single continuous path.
+     *
+     * @param {*} [startNode] - The node to start the path from. If not provided,
+     *   it will start with an arbitrary node.
+     * @returns {{path: Array<*>, edges: Array<{from: *, to: *, edgeData: {weight: number, data: Object}}>, weight: number, missing: Array<*>}|null} An object
+     *   containing the generated path, the sequence of edges visited, its total weight,
+     *   and any nodes that were unreachable (in case of a disconnected graph).
+     *   Returns null if the graph is empty.
+     */
+    findPathTSP(startNode) {
+        const nodes = Array.from(this.getNodes());
+        if (nodes.length === 0) {
+            return null;
+        }
 
-    return {
-      path: path,
-      edges: edges, // Include edges in the return object
-      weight: totalWeight,
-      missing: [...unvisited], // will be empty if all nodes were visited
-    };
-  }
+        if (!startNode || !this.adj.has(startNode)) {
+            startNode = nodes[0];
+        }
+
+        const visited = new Set();
+        const path = [startNode];
+        const edges = [];
+        let totalWeight = 0;
+        let currentNode = startNode;
+        
+        visited.add(startNode);
+
+        while (visited.size < nodes.length) {
+            // First, try a simple nearest-neighbor search from the current node
+            const neighbors = this.getNeighbors(currentNode);
+            let nearestNeighbor = null;
+            let minWeight = Infinity;
+            let connectingEdge = null;
+
+            if (neighbors) {
+                for (const [neighbor, edge] of neighbors.entries()) {
+                    if (!visited.has(neighbor) && edge.weight < minWeight) {
+                        minWeight = edge.weight;
+                        nearestNeighbor = neighbor;
+                        connectingEdge = edge;
+                    }
+                }
+            }
+
+            if (nearestNeighbor) {
+                // Found a simple connection to an unvisited node
+                totalWeight += minWeight;
+                edges.push({ from: currentNode, to: nearestNeighbor, edgeData: connectingEdge });
+                currentNode = nearestNeighbor;
+                path.push(currentNode);
+                visited.add(currentNode);
+            } else {
+                // Stuck. Find the globally cheapest edge from any visited node to any unvisited one.
+                let bestV = null, bestU = null, minGlobalWeight = Infinity, bestEdge = null;
+
+                for (const v of visited) {
+                    const v_neighbors = this.getNeighbors(v);
+                    if (v_neighbors) {
+                        for (const [u, edge] of v_neighbors.entries()) {
+                            if (!visited.has(u) && edge.weight < minGlobalWeight) {
+                                minGlobalWeight = edge.weight;
+                                bestV = v;
+                                bestU = u;
+                                bestEdge = edge;
+                            }
+                        }
+                    }
+                }
+
+                if (bestV === null) {
+                    // No path from visited to unvisited nodes, graph is disconnected
+                    break; 
+                }
+
+                // Find a path from the current end of the path to the start of the best new edge
+                const bridge = this._findShortestPath(currentNode, bestV, visited);
+                if (bridge) {
+                    // Append the bridging path (re-visiting nodes)
+                    path.push(...bridge.path.slice(1));
+                    edges.push(...bridge.edges);
+                    totalWeight += bridge.weight;
+                }
+
+                // Append the new cheapest edge and node
+                totalWeight += minGlobalWeight;
+                edges.push({ from: bestV, to: bestU, edgeData: bestEdge });
+                currentNode = bestU;
+                path.push(currentNode);
+                visited.add(currentNode);
+            }
+        }
+
+        // Close the loop by finding the shortest path back to the start node
+        const closing_path = this._findShortestPath(currentNode, startNode, new Set(nodes));
+        if (closing_path) {
+            totalWeight += closing_path.weight;
+            edges.push(...closing_path.edges);
+            path.push(...closing_path.path.slice(1));
+        }
+
+        return {
+            path: path,
+            edges: edges,
+            weight: totalWeight,
+            missing: nodes.filter(n => !visited.has(n))
+        };
+    }
 }

@@ -465,6 +465,28 @@ function assignPaths(poly) {
   return poly;
 }
 
+function sanityCheckPoint(p, grid, toolObj) {
+  if (
+    p &&
+    !isMachinable(
+      p,
+      p._fouraxis.vertex_normal,
+      p._fouraxis.chosenAngle,
+      grid,
+      toolObj
+    )
+  ) {
+    console.log("POINT NOT MACHINABLE AT CHOSEN ANGLE");
+    debugger;
+  }
+}
+
+function sanityCheckToolpath(tp, grid, toolObj) {
+  tp.forEach((p) => {
+    sanityCheckPoint(p, grid, toolObj);
+  });
+}
+
 // root function that performs the four-axis toolpath generation
 export async function generateFourAxis(params) {
   const { sliced, onupdate, toolObj, lineColor } = params;
@@ -478,6 +500,8 @@ export async function generateFourAxis(params) {
   for (const slice of sliced) {
     // update the progress bar
     onupdate(slice_index++ / sliced.length, `slice ${slice_index}`);
+
+    if (slice_index !== 100) continue;
 
     // get the contours from the slicer
     let contours = slice.tops.map((t) => t.poly);
@@ -571,22 +595,21 @@ export async function generateFourAxis(params) {
     // directed edges with their path data.
     let toolpathGraph = new Graph();
     // generate the list of nodes for the graph
-    const toolpathNodes = allPaths
-      .map((path) => [
-        {
-          name: `${path.name}-start`,
-          path: path,
-          start: true,
-          point: path.start,
-        },
-        {
-          name: `${path.name}-end`,
-          path: path,
-          start: false,
-          point: path.end,
-        },
-      ])
-      .flat();
+    const toolpathPairs = allPaths.map((path) => [
+      {
+        name: `${path.name}-start`,
+        path: path,
+        start: true,
+        point: path.start,
+      },
+      {
+        name: `${path.name}-end`,
+        path: path,
+        start: false,
+        point: path.end,
+      },
+    ]);
+    const toolpathNodes = toolpathPairs.flat();
     toolpathNodes.forEach((n) => toolpathGraph.addNode(n.name, n));
     toolpathGraph.addNode("RETRACT", {
       name: "retract",
@@ -684,12 +707,14 @@ export async function generateFourAxis(params) {
       return null;
     };
 
+    debugger;
     for (let i = 0; i < toolpathNodes.length; i++) {
       const n1 = toolpathNodes[i];
       for (let j = 0; j < i; j++) {
         const n2 = toolpathNodes[j];
 
         if (n1.path.name == n2.path.name) {
+          console.log(`Connecting ${n1.name} and ${n2.name} with zero weight`);
           const pathBetween = structuredClone(n1.path.points);
           const pathBetweenRev = structuredClone(n1.path.points).reverse();
           if (n1.start) {
@@ -736,6 +761,10 @@ export async function generateFourAxis(params) {
               }
             );
           }
+
+          if (!forwardPath && !reversePath) {
+            console.log(`No connecting path found`);
+          }
         }
       }
     }
@@ -755,6 +784,7 @@ export async function generateFourAxis(params) {
         return pathData.points || pathData || [];
       })
       .flat();
+    debugger;
 
     // compute the actual machining angles along the toolpath. start by choosing
     // the middle of each point's MDS, then do laplacian smoothing until the
@@ -792,28 +822,29 @@ export async function generateFourAxis(params) {
         return;
       }
 
-      let ccw = true;
-      // calculate the bisector angle between the previous and current chosen
-      // angle. If that angle is in the MDS for both points, we move through
-      // that bisector ("the short way"). Otherwise, we move around the arc
-      // ("the long way")
       let thisA = p._fouraxis.chosenAngle;
       let prevA = prevP._fouraxis.chosenAngle;
-      let bisector = (prevA + sectorSize(prevA, thisA) / 2 + 360) % 360;
 
-      if (
+      const ccw_arc_len = sectorSize(prevA, thisA);
+      const is_ccw_short = ccw_arc_len <= 180;
+      const bisector = (prevA + ccw_arc_len / 2 + 360) % 360;
+
+      // Check if the midpoint of the direct CCW arc is valid for both points
+      const ccw_path_is_valid =
         angleInMDS(p._fouraxis.chosenMDS, bisector) &&
-        angleInMDS(prevP._fouraxis.chosenMDS, bisector)
-      ) {
-        ccw = sectorSize(prevA, thisA) <= 180;
-      } else {
-        ccw = sectorSize(prevA, thisA) < 180;
-      }
-      p._fouraxis.ccw = ccw;
+        angleInMDS(prevP._fouraxis.chosenMDS, bisector);
 
-      if (prevA > thisA && ccw) {
+      if (ccw_path_is_valid) {
+        // The direct CCW path is clear, so choose the shorter of the two rotational paths.
+        p._fouraxis.ccw = is_ccw_short;
+      } else {
+        // The direct CCW path is blocked, so we MUST go the other way (CW).
+        p._fouraxis.ccw = false;
+      }
+
+      if (prevA > thisA && p._fouraxis.ccw) {
         totalRotations++;
-      } else if (thisA > prevA && !ccw) {
+      } else if (thisA > prevA && !p._fouraxis.ccw) {
         totalRotations--;
       }
       p._fouraxis.totalRotations = totalRotations;
@@ -872,6 +903,7 @@ export async function generateFourAxis(params) {
       });
     } while (angleDelta > 1);
     */
+    sanityCheckToolpath(toolpath, grid, toolObj);
 
     // iterate over the toolpath and approximate the actual distance travelled
     // by the tool between the given points (taking into account the rotation).
@@ -910,12 +942,15 @@ export async function generateFourAxis(params) {
           interpPoint.x += interpX;
           interpPoint.y += interpY;
           interpPoint._fouraxis.chosenAngle += interpA;
+          sanityCheckPoint(interpPoint, grid, toolObj);
           interpolatedToolpath.push(structuredClone(interpPoint));
         }
       }
       interpolatedToolpath.push(p);
       prevPoint = p;
     }
+
+    sanityCheckToolpath(interpolatedToolpath, grid, toolObj);
 
     let finalToolpath = interpolatedToolpath.map((p) => {
       if (!p) {
@@ -990,8 +1025,8 @@ export async function generateFourAxis(params) {
           const viz_p = newPoint(p.z, p.x, p.y);
           const machiningAngle = p._fouraxis.chosenAngle * DEG2RAD;
           const [vx, vy] = [
-            -Math.sin(machiningAngle),
-            Math.cos(machiningAngle),
+            -Math.sin(-machiningAngle),
+            Math.cos(-machiningAngle),
           ];
           slice
             .output()
@@ -1035,6 +1070,7 @@ export async function generateFourAxis(params) {
         });
       });
     }
+    debugger;
   }
   return sliced;
 }
