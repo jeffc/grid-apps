@@ -474,11 +474,10 @@ export async function generateFourAxis(params) {
   const angleStep = 5; // User-defined angle step TODO - make this a parameter
 
   let slice_index = 0;
+  let totalRotations = 0;
   for (const slice of sliced) {
     // update the progress bar
     onupdate(slice_index++ / sliced.length, `slice ${slice_index}`);
-
-    if (slice_index != 100) continue;
 
     // get the contours from the slicer
     let contours = slice.tops.map((t) => t.poly);
@@ -784,7 +783,6 @@ export async function generateFourAxis(params) {
     // use this information to track the number of CW/CCW zero-crossings we
     // perform and track the total number of rotations the axis has made
     // (positive number = CCW rotation)
-    let totalRotations = 0;
     toolpath.forEach((p, i, tp) => {
       if (!p || i == 0) {
         return;
@@ -888,29 +886,30 @@ export async function generateFourAxis(params) {
         continue;
       }
 
-      // quickly estimate the distance travelled by averaging the arc length of
-      // the previous and current point's travel along the angle delta
-      const da =
-        ((p._fouraxis.chosenAngle - prevPoint._fouraxis.chosenAngle + 360) %
-          360) *
-        DEG2RAD;
+      const p_angle = p._fouraxis.chosenAngle;
+      const prev_angle = prevPoint._fouraxis.chosenAngle;
+
+      let diff = p_angle - prev_angle;
+      if (p._fouraxis.ccw) {
+        if (diff < 0) diff += 360;
+      } else {
+        if (diff > 0) diff -= 360;
+      }
+      const da_rad = Math.abs(diff * DEG2RAD);
 
       const mag = (pp) => Math.sqrt(pp.x * pp.x + pp.y * pp.y);
-      const dArc = (da * (mag(p) + mag(prevPoint))) / 2;
-      if (dArc > 2) {
+      const dArc = (da_rad * (mag(p) + mag(prevPoint))) / 2;
+      if (dArc > 0.5) {
         // TODO - make configurable?
-        let segs = Math.max(Math.floor(dArc / 2), 1);
+        let segs = Math.max(Math.floor(dArc / 0.5), 1);
         let interpX = (p.x - prevPoint.x) / segs;
         let interpY = (p.y - prevPoint.y) / segs;
-        let interpA =
-          (p._fouraxis.chosenAngle - prevPoint._fouraxis.chosenAngle) / segs;
+        let interpA = diff / segs;
         let interpPoint = structuredClone(prevPoint);
         for (let step = 0; step < segs - 1; step++) {
           interpPoint.x += interpX;
           interpPoint.y += interpY;
-          interpPoint._fouraxis.chosenAngle += interpA + 360;
-          interpPoint._fouraxis.chosenAngle %= 360;
-
+          interpPoint._fouraxis.chosenAngle += interpA;
           interpolatedToolpath.push(structuredClone(interpPoint));
         }
       }
