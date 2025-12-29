@@ -478,6 +478,8 @@ export async function generateFourAxis(params) {
     // update the progress bar
     onupdate(slice_index++ / sliced.length, `slice ${slice_index}`);
 
+    if (slice_index != 100) continue;
+
     // get the contours from the slicer
     let contours = slice.tops.map((t) => t.poly);
 
@@ -767,6 +769,58 @@ export async function generateFourAxis(params) {
       p._fouraxis.chosenAngle =
         (mds.start + sectorSize(mds.start, mds.stop) / 2) % 360;
     });
+
+    const angleInMDS = (mds, a) => {
+      if (mds.start < mds.stop) {
+        return mds.start <= a && a <= mds.stop;
+      } else {
+        return mds.start <= a || a <= mds.stop;
+      }
+    };
+
+    // compute whether we should move to each point with a clockwise or
+    // counterclockwise rotation of the A axis.
+    //
+    // use this information to track the number of CW/CCW zero-crossings we
+    // perform and track the total number of rotations the axis has made
+    // (positive number = CCW rotation)
+    let totalRotations = 0;
+    toolpath.forEach((p, i, tp) => {
+      if (!p || i == 0) {
+        return;
+      }
+      let prevP = tp[i - 1];
+      if (!prevP) {
+        return;
+      }
+
+      let ccw = true;
+      // calculate the bisector angle between the previous and current chosen
+      // angle. If that angle is in the MDS for both points, we move through
+      // that bisector ("the short way"). Otherwise, we move around the arc
+      // ("the long way")
+      let thisA = p._fouraxis.chosenAngle;
+      let prevA = prevP._fouraxis.chosenAngle;
+      let bisector = (prevA + sectorSize(prevA, thisA) / 2 + 360) % 360;
+
+      if (
+        angleInMDS(p._fouraxis.chosenMDS, bisector) &&
+        angleInMDS(prevP._fouraxis.chosenMDS, bisector)
+      ) {
+        ccw = sectorSize(prevA, thisA) <= 180;
+      } else {
+        ccw = sectorSize(prevA, thisA) < 180;
+      }
+      p._fouraxis.ccw = ccw;
+
+      if (prevA > thisA && ccw) {
+        totalRotations++;
+      } else if (thisA > prevA && !ccw) {
+        totalRotations--;
+      }
+      p._fouraxis.totalRotations = totalRotations;
+    });
+
     /*
     let angleDelta = 0;
     do {
@@ -870,7 +924,7 @@ export async function generateFourAxis(params) {
       }
       return newPoint(p.z, p.x, p.y)
         .rotateYZ(p._fouraxis.chosenAngle * DEG2RAD)
-        .setA(-p._fouraxis.chosenAngle);
+        .setA(-p._fouraxis.chosenAngle - p._fouraxis.totalRotations * 360);
     });
 
     slice.camLines = [];
