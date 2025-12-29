@@ -280,25 +280,24 @@ function assignMDRs(poly, grid, angleStep, toolObj) {
   });
   return poly; // for chaining, if necessary
 }
+// Helper function: compute if two sectors overlap by rotating both so that
+// sector1 starts at zero
+function sectorsOverlap(s1, s2) {
+  let [a, b] = [s1.start, s1.stop];
+  let [c, d] = [s2.start, s2.stop];
+
+  let bb = (b - a + 360) % 360;
+  let cc = (c - a + 360) % 360;
+  let dd = (d - a + 360) % 360;
+
+  // return true if s2 starts before s1 ends, OR if s2 wraps past the zero
+  // mark (where s1 starts)
+  return cc <= bb || cc > dd;
+}
 
 // perform an exhaustive back-and-forth analysis to assign possible segment
 // labels to each point (one label per MDS)
 function assignMDSLabels(poly) {
-  // compute if two sectors overlap by rotating both so that sector1 starts at
-  // zero
-  const sectorsOverlap = (s1, s2) => {
-    let [a, b] = [s1.start, s1.stop];
-    let [c, d] = [s2.start, s2.stop];
-
-    let bb = (b - a + 360) % 360;
-    let cc = (c - a + 360) % 360;
-    let dd = (d - a + 360) % 360;
-
-    // return true if s2 starts before s1 ends, OR if s2 wraps past the zero
-    // mark (where s1 starts)
-    return cc <= bb || cc > dd;
-  };
-
   // segment labels are unique per contour
   let nextLabel = 0;
 
@@ -633,18 +632,74 @@ export async function generateFourAxis(params) {
             toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween });
           }
         } else {
-          // todo - check if segment from n1 to n2 is clear (interpolate points
+          // TODO - check if segment from n1 to n2 is clear (interpolate points
           // along straight line path from n1.point to n2.point, compute the MDR
           // at each interpolated point, and see if there exists a traverse MDS
           // along that whole segment.
 
-          const dist = base.util.dist2D(n1.point, n2.point);
-          toolpathGraph.addEdge(n1.name, n2.name, dist, {
-            path: { points: [n1.point, n2.point] },
-          });
-          toolpathGraph.addEdge(n2.name, n1.name, dist, {
-            path: { points: [n2.point, n1.point] },
-          });
+          // we can short-circut the rest if the chosen MDS for the start and
+          // end of the segment don't overlap at all
+          if (
+            sectorsOverlap(
+              n1.point._fouraxis.chosenMDS,
+              n2.point._fouraxis.chosenMDS
+            )
+          ) {
+            const dist = base.util.dist2D(n1.point, n2.point);
+            // generate a segment between n1 and n2, interpolated every 0.2 units
+            const dir = newPoint(
+              n2.point.x - n1.point.x,
+              n2.point.y - n1.point.y
+            ).normalize();
+            const interpSteps = dist / 0.2; // TODO make this configurable?
+            let betweenPoints = [];
+            let [curX, curY] = [n1.point.x, n1.point.y];
+            for (let step = 0; step < interpSteps; step++) {
+              let p = newPoint(curX, curY);
+              // assign a vertex_normal that's just normal to the connecting
+              // segment. it doesn't actually matter if it's flipped or not
+              p._fouraxis = {
+                vertex_normal: newPoint(-dir.y, dir.x),
+              };
+              betweenPoints.push(p);
+              curX += dir.x * 0.2;
+              curY += dir.y * 0.2;
+            }
+
+            const betweenPoly = newPolygon(betweenPoints);
+            assignMDRs(betweenPoly, grid, angleStep, toolObj);
+            let currentMDS = n1.point._fouraxis.chosenMDS;
+            betweenPoly.points[0]._fouraxis.chosenMDS = currentMDS;
+            let overlapOK = true;
+            const sectorSize = (start, stop) => (stop - start + 360) % 360;
+            for (
+              let sx = 1;
+              overlapOK && sx < betweenPoly.points.length;
+              sx++
+            ) {
+              const candMDS = betweenPoly.points[sx]._fouraxis.MDR?.filter(
+                (mds) => sectorsOverlap(mds, currentMDS)
+              ).sort(
+                (a, b) =>
+                  sectorSize(b.start, b.stop) - sectorSize(a.start, a.stop)
+              );
+              if (candMDS && candMDS.length > 0) {
+                betweenPoly.points[sx]._fouraxis.chosenMDS = candMDS;
+                currentMDS = candMDS;
+              } else {
+                overlapOK = false;
+              }
+            }
+
+            if (overlapOK) {
+              toolpathGraph.addEdge(n1.name, n2.name, dist, {
+                path: { points: betweenPoly.points },
+              });
+              toolpathGraph.addEdge(n2.name, n1.name, dist, {
+                path: { points: structuredClone(betweenPoly.points).reverse() },
+              });
+            }
+          }
         }
       }
     }
