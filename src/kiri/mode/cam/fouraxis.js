@@ -5,6 +5,7 @@ import { base } from "../../../geo/base.js";
 import { newPoint } from "../../../geo/point.js";
 import { newPolygon } from "../../../geo/polygon.js";
 import { SpatialGrid, fromSegments } from "../../../geo/spatial-grid.js";
+import { Graph } from "../../../geo/graph.js";
 import { printPoint, printPolygon } from "../../../geo/print-geom.js";
 
 const RAD2DEG = 180 / Math.PI;
@@ -380,10 +381,6 @@ function assignMDSLabels(poly) {
       }
       // reverse the path again so we get back to a CCW winding order
       pointsOnPath.reverse();
-
-      console.log(
-        `Assigned ${pointsOnPath.length} points to label ${nextLabel}`
-      );
     }
   }
   return poly;
@@ -405,6 +402,7 @@ function assignPaths(poly) {
       { start: 0, stop: 0, segmentLabel: null }
     );
     p._fouraxis.segmentLabel = chosenMDS.segmentLabel;
+    p._fouraxis.chosenMDS = chosenMDS;
   });
 
   const paths = {};
@@ -460,8 +458,6 @@ function assignPaths(poly) {
     poly._fouraxis = {};
   }
   poly._fouraxis.paths = paths;
-  console.log(`found ${Object.keys(paths).length} paths`);
-  debugger;
 
   return poly;
 }
@@ -572,7 +568,102 @@ export async function generateFourAxis(params) {
     // group points into paths by segment label
     resampledContours.forEach((poly) => assignPaths(poly));
 
-    // visualization for debugging
+    // get all of the paths in the current slice and compute an ordering for
+    // them
+    let allPaths = resampledContours
+      .map((poly) =>
+        Object.entries(poly._fouraxis.paths).map(([pathidx, path]) => {
+          return {
+            name: `${poly.id}-${pathidx}`,
+            points: path,
+            start: path[0],
+            end: path[path.length - 1],
+          };
+        })
+      )
+      .flat();
+
+    // compute segment connectivity graph. The graph is logically undirected,
+    // but we represent it using a directed graph so that we can annotate
+    // directed edges with their path data.
+    let toolpathGraph = new Graph();
+    // generate the list of nodes for the graph
+    const toolpathNodes = allPaths
+      .map((path) => [
+        {
+          name: `${path.name}-start`,
+          path: path,
+          start: true,
+          point: path.start,
+        },
+        {
+          name: `${path.name}-end`,
+          path: path,
+          start: false,
+          point: path.end,
+        },
+      ])
+      .flat();
+    toolpathNodes.forEach((n) => toolpathGraph.addNode(n.name, n));
+    toolpathGraph.addNode("RETRACT", {
+      name: "retract",
+      path: null,
+      start: null,
+      point: null,
+    });
+
+    for (let i = 0; i < toolpathNodes.length; i++) {
+      const n1 = toolpathNodes[i];
+      toolpathGraph.addEdge(n1.name, "RETRACT", 1e5); // make retraction expensive, but possible, from any node
+      for (let j = 0; j < i; j++) {
+        const n2 = toolpathNodes[j];
+
+        if (n1.path.name == n2.path.name) {
+          const pathBetween = structuredClone(n1.path.points);
+          const pathBetweenRev = structuredClone(n1.path.points);
+          if (n1.start) {
+            toolpathGraph.addEdge(n1.name, n2.name, 0, { path: pathBetween });
+            toolpathGraph.addEdge(n2.name, n1.name, 0, {
+              path: pathBetweenRev,
+            });
+          } else {
+            toolpathGraph.addEdge(n1.name, n2.name, 0, {
+              path: pathBetweenRev,
+            });
+            toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween });
+          }
+        } else {
+          // todo - check if segment from n1 to n2 is clear (interpolate points
+          // along straight line path from n1.point to n2.point, compute the MDR
+          // at each interpolated point, and see if there exists a traverse MDS
+          // along that whole segment.
+
+          const dist = base.util.dist2D(n1.point, n2.point);
+          toolpathGraph.addEdge(n1.name, n2.name, dist, {
+            path: { points: [n1.point, n2.point] },
+          });
+          toolpathGraph.addEdge(n2.name, n1.name, dist, {
+            path: { points: [n2.point, n1.point] },
+          });
+        }
+      }
+    }
+
+    // now find a traversal order
+    let tspPath = toolpathGraph.findPathTSP("RETRACT");
+    let nodeTraversalOrder = tspPath.path;
+    let edgeTraversalOrder = tspPath.edges;
+
+    let finalToolpath = edgeTraversalOrder
+      .map((e) => {
+        // TODO handle retraction
+        if (e.from == "RETRACT" || e.to == "RETRACT") return [newPoint(0, 100)];
+
+        return e.edgeData.data.path || [];
+      })
+      .flat();
+
+    // visualizations for debugging
     if (slice_index % 10 == 0) {
       let visualizeMachinabilityAngle = (p, angle) => {
         const viz_p = newPoint(p.z, p.x, p.y);
@@ -623,6 +714,17 @@ export async function generateFourAxis(params) {
             .addPoly(newPolygon(viz_path_pts).setOpen());
         });
       });
+    }
+
+    if (slice_index % 10 == 0) {
+      slice
+        .output()
+        .setLayer(`toolpath`, { line: 0xffff00 })
+        .addPoly(
+          newPolygon(
+            finalToolpath.map((p) => newPoint(p.z, p.x, p.y))
+          ).setOpen()
+        );
     }
   }
   return sliced;
