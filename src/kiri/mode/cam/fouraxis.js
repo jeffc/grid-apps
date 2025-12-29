@@ -773,6 +773,29 @@ export async function generateFourAxis(params) {
         p._fouraxis.newAngle = undefined;
       });
     } while (angleDelta > 1);
+
+    let finalToolpath = toolpath.map((p) => {
+      if (!p._fouraxis) {
+        return null;
+      }
+      return newPoint(p.z, p.x, p.y)
+        .rotateYZ(p._fouraxis.chosenAngle * DEG2RAD)
+        .setA(-p._fouraxis.chosenAngle);
+    });
+
+    slice.camLines = [];
+    let line = [];
+    finalToolpath.forEach((p) => {
+      if (p === null && line.length > 0) {
+        slice.camLines.push(newPolygon(line).setOpen());
+        line = [];
+      } else {
+        line.push(p);
+      }
+    });
+    if (line.length > 0) {
+      slice.camLines.push(newPolygon(line).setOpen());
+    }
     debugger;
 
     // visualizations for debugging
