@@ -385,6 +385,11 @@ function assignMDSLabels(poly) {
   return poly;
 }
 
+// helper, determines sector size given start and stop in degrees
+function sectorSize(start, stop) {
+  return (stop - start + 360) % 360;
+}
+
 // Assign individual path labels to points in a polygon
 function assignPaths(poly) {
   const pts = poly.points;
@@ -392,7 +397,6 @@ function assignPaths(poly) {
     // TODO - properly implement graph-cut-based assignment
 
     // choose the path label with the largest MDS
-    const sectorSize = (start, stop) => (stop - start + 360) % 360;
     const chosenMDS = p._fouraxis.machinability.MDR.reduce(
       (mds1, mds2) =>
         sectorSize(mds1.start, mds1.stop) > sectorSize(mds2.start, mds2.stop)
@@ -632,10 +636,7 @@ export async function generateFourAxis(params) {
             toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween });
           }
         } else {
-          // TODO - check if segment from n1 to n2 is clear (interpolate points
-          // along straight line path from n1.point to n2.point, compute the MDR
-          // at each interpolated point, and see if there exists a traverse MDS
-          // along that whole segment.
+          // check if there's a safe machinable path between n1 and n2
 
           // we can short-circut the rest if the chosen MDS for the start and
           // end of the segment don't overlap at all
@@ -671,7 +672,6 @@ export async function generateFourAxis(params) {
             let currentMDS = n1.point._fouraxis.chosenMDS;
             betweenPoly.points[0]._fouraxis.chosenMDS = currentMDS;
             let overlapOK = true;
-            const sectorSize = (start, stop) => (stop - start + 360) % 360;
             for (
               let sx = 1;
               overlapOK && sx < betweenPoly.points.length;
@@ -709,7 +709,8 @@ export async function generateFourAxis(params) {
     let nodeTraversalOrder = tspPath.path;
     let edgeTraversalOrder = tspPath.edges;
 
-    let finalToolpath = edgeTraversalOrder
+    // create a toolpath without explicit angles assigned
+    let toolpath = edgeTraversalOrder
       .map((e) => {
         // TODO handle retraction
         if (e.from == "RETRACT" || e.to == "RETRACT") return [newPoint(0, 100)];
@@ -717,6 +718,62 @@ export async function generateFourAxis(params) {
         return e.edgeData.data.path || [];
       })
       .flat();
+
+    // compute the actual machining angles along the toolpath. start by choosing
+    // the middle of each point's MDS, then do laplacian smoothing until the
+    // total angle variance converges within 1 degree.
+    toolpath.forEach((p) => {
+      if (!p._fouraxis) {
+        // this is a retract point
+        return;
+      }
+      const mds = p._fouraxis.chosenMDS;
+      p._fouraxis.chosenAngle =
+        (mds.start + sectorSize(mds.start, mds.stop) / 2) % 360;
+    });
+
+    let angleDelta = 0;
+    do {
+      for (let i = 0; i < toolpath.length; i++) {
+        let p = toolpath[i];
+        if (!p._fouraxis) {
+          continue; // retract point
+        }
+        let currentAngle = p._fouraxis.chosenAngle;
+        let npts = 1;
+        let total = currentAngle;
+        if (i > 0 && toolpath[i - 1]._fouraxis) {
+          total += toolpath[i - 1]._fouraxis.chosenAngle;
+          npts++;
+        }
+        if (i < toolpath.length - 1 && toolpath[i + 1]._fouraxis) {
+          total += toolpath[i + 1]._fouraxis.chosenAngle;
+          npts++;
+        }
+        p._fouraxis.newAngle = total / npts;
+      }
+
+      angleDelta = 0;
+      const angleInSector = (mds, a) =>
+        (a - mds.start + 360) % 360 < (mds.stop - mds.start + 360) % 360;
+      toolpath.forEach((p) => {
+        if (!p._fouraxis) {
+          return;
+        }
+        let newAngle = p._fouraxis.newAngle;
+        let mds = p._fouraxis.chosenMDS;
+        if (!angleInSector(mds, newAngle)) {
+          newAngle =
+            Math.abs(mds.start - newAngle) < Math.abs(mds.stop - newAngle)
+              ? mds.start
+              : mds.stop;
+        }
+        angleDelta += Math.abs(newAngle - p._fouraxis.chosenAngle);
+        p._fouraxis.chosenAngle = newAngle;
+        p._fouraxis.newAngle = undefined;
+      });
+    } while (angleDelta > 1);
+    debugger;
 
     // visualizations for debugging
     if (slice_index % 10 == 0) {
@@ -776,9 +833,7 @@ export async function generateFourAxis(params) {
         .output()
         .setLayer(`toolpath`, { line: 0xffff00 })
         .addPoly(
-          newPolygon(
-            finalToolpath.map((p) => newPoint(p.z, p.x, p.y))
-          ).setOpen()
+          newPolygon(toolpath.map((p) => newPoint(p.z, p.x, p.y))).setOpen()
         );
     }
   }
