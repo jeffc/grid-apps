@@ -792,11 +792,7 @@ export async function generateFourAxis(params) {
     };
 
     // compute whether we should move to each point with a clockwise or
-    // counterclockwise rotation of the A axis.
-    //
-    // use this information to track the number of CW/CCW zero-crossings we
-    // perform and track the total number of rotations the axis has made
-    // (positive number = CCW rotation)
+    // counterclockwise rotation of the A axis. this is needed for interpolation
     toolpath.forEach((p, i, tp) => {
       if (!p || i == 0) {
         return;
@@ -825,13 +821,6 @@ export async function generateFourAxis(params) {
         // The direct CCW path is blocked, so we MUST go the other way (CW).
         p._fouraxis.ccw = false;
       }
-
-      if (prevA > thisA && p._fouraxis.ccw) {
-        totalRotations++;
-      } else if (thisA > prevA && !p._fouraxis.ccw) {
-        totalRotations--;
-      }
-      p._fouraxis.totalRotations = totalRotations;
     });
 
     /*
@@ -936,23 +925,49 @@ export async function generateFourAxis(params) {
           );
           sanityCheckPoint(interpPoint, grid, toolObj);
           interpolatedToolpath.push(structuredClone(interpPoint));
-          if (interpPoint._fouraxis.totalRotations === undefined) {
-            debugger;
-          }
         }
       }
       interpolatedToolpath.push(p);
       prevPoint = p;
     }
 
+    // re-calculate ccw and totalRotations for the final, interpolated toolpath
+    totalRotations = 0;
+    interpolatedToolpath.forEach((p, i, tp) => {
+      if (!p) {
+        return;
+      }
+      if (i == 0) {
+        p._fouraxis.totalRotations = totalRotations;
+        return;
+      }
+      let prevP = tp[i - 1];
+      if (!prevP) {
+        p._fouraxis.totalRotations = totalRotations;
+        return;
+      }
+
+      let thisA = p._fouraxis.chosenAngle;
+      let prevA = prevP._fouraxis.chosenAngle;
+
+      // for interpolated points, we assume the shortest path is the correct one
+      // because the MDS validity check was done on the original points.
+      const ccw_arc_len = sectorSize(prevA, thisA);
+      p._fouraxis.ccw = ccw_arc_len <= 180;
+
+      if (prevA > thisA && p._fouraxis.ccw) {
+        totalRotations++;
+      } else if (thisA > prevA && !p._fouraxis.ccw) {
+        totalRotations--;
+      }
+      p._fouraxis.totalRotations = totalRotations;
+    });
+
     sanityCheckToolpath(interpolatedToolpath, grid, toolObj);
 
     let finalToolpath = interpolatedToolpath.map((p) => {
       if (!p) {
         return null;
-      }
-      if (isNaN(p._fouraxis.chosenAngle) || isNaN(p._fouraxis.totalRotations)) {
-        debugger;
       }
       return newPoint(p.z, p.x, p.y)
         .rotateYZ(p._fouraxis.chosenAngle * DEG2RAD)
