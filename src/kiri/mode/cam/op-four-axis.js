@@ -35,7 +35,7 @@ class OpFourAxis extends CamOp {
 
     // start top center, X = 0, Y = 0 closest to 4th axis chuck
     camOut(newPoint(0, 0, zSafe).setA(0), 0);
-    setContouring(true);
+    setContouring(false); // contouring logic interferes with 4-axis moves
     setNextIsMove();
 
     for (let slice of slices) {
@@ -44,22 +44,40 @@ class OpFourAxis extends CamOp {
         continue;
       }
 
+      // get last point in widget coordinates
+      let lastPoint = ops.getLastPoint();
+
       for (let path of slice.camLines) {
-        let lastAngle = 0;
-        let lastPoint = newPoint(0, 0, zSafe).setA(0);
-        for (let point of path.points) {
-          if (point !== null) {
-            lastAngle = point.a;
-            lastPoint = point;
-            camOut(point, 1);
-          } else {
-            camOut(
-              newPoint(lastPoint.x, lastpoint.y, zSafe).setA(lastAngle),
-              0
-            );
-            //setNextIsMove();
-          }
+        if (path.points.length === 0) {
+          continue;
         }
+
+        let startPoint = path.points[0];
+
+        // if moving between paths, perform a safe retract then rotate then travel
+        if (lastPoint) {
+          console.log(
+            `Retract move from ${[lastPoint.y, lastPoint.z, lastPoint.a]} to ${[startPoint.y, startPoint.z, lastPoint.a]}`
+          );
+          // 1. retract to safe Z at last point's XY
+          camOut(lastPoint.clone().setZ(zSafe), 0);
+          // 2. at retracted XY, rotate to the next contour's start angle
+          camOut(lastPoint.clone().setZ(zSafe).setA(startPoint.a), 0);
+          // 3. at safe Z and new angle, travel to the start of the next contour
+          camOut(startPoint.clone().setZ(zSafe), 0);
+        }
+
+        // emit the actual path
+        // first point will be a plunge because of the state of printPoint
+        setNextIsMove();
+        for (let point of path.points) {
+          if (isNaN(point.a)) {
+            debugger;
+          }
+          camOut(point, 1);
+        }
+        debugger;
+        lastPoint = path.points.peek();
       }
 
       newLayer();
@@ -67,10 +85,10 @@ class OpFourAxis extends CamOp {
 
     // move to safe height and reset A axis
     newLayer();
-    ops.addGCode([
-      `G0 Z${zSafe.round(2)}`,
-      gcodeResetA.join("\n") ?? "G92.4 A0 R0",
-    ]);
+    //ops.addGCode([
+    //  `G0 Z${zSafe.round(2)}`,
+    //  gcodeResetA.join("\n") ?? "G92.4 A0 R0",
+    //]);
   }
 }
 

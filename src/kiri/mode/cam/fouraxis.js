@@ -936,6 +936,9 @@ export async function generateFourAxis(params) {
           );
           sanityCheckPoint(interpPoint, grid, toolObj);
           interpolatedToolpath.push(structuredClone(interpPoint));
+          if (interpPoint._fouraxis.totalRotations === undefined) {
+            debugger;
+          }
         }
       }
       interpolatedToolpath.push(p);
@@ -947,6 +950,9 @@ export async function generateFourAxis(params) {
     let finalToolpath = interpolatedToolpath.map((p) => {
       if (!p) {
         return null;
+      }
+      if (isNaN(p._fouraxis.chosenAngle) || isNaN(p._fouraxis.totalRotations)) {
+        debugger;
       }
       return newPoint(p.z, p.x, p.y)
         .rotateYZ(p._fouraxis.chosenAngle * DEG2RAD)
@@ -1062,7 +1068,6 @@ export async function generateFourAxis(params) {
         });
       });
     }
-    debugger;
   }
   return sliced;
 }
