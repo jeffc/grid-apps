@@ -501,8 +501,6 @@ export async function generateFourAxis(params) {
     // update the progress bar
     onupdate(slice_index++ / sliced.length, `slice ${slice_index}`);
 
-    if (slice_index !== 100) continue;
-
     // get the contours from the slicer
     let contours = slice.tops.map((t) => t.poly);
 

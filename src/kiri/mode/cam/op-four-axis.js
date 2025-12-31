@@ -71,12 +71,8 @@ class OpFourAxis extends CamOp {
         // first point will be a plunge because of the state of printPoint
         setNextIsMove();
         for (let point of path.points) {
-          if (isNaN(point.a)) {
-            debugger;
-          }
           camOut(point, 1);
         }
-        debugger;
         lastPoint = path.points.peek();
       }
 
