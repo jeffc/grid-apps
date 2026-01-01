@@ -700,16 +700,26 @@ export async function generateFourAxis(params) {
           console.log(`Connecting ${n1.name} and ${n2.name} with zero weight`);
           const pathBetween = structuredClone(n1.path.points);
           const pathBetweenRev = structuredClone(n1.path.points).reverse();
+          // traversing the path the first time is 0-weight because it's
+          // something we have to do, but the "re-traversal cost" is the length
+          // of the path.
+          const pathLength = n1.path.points.map((pt, i, pts) => {
+            if (i == 0) {
+              return 0;
+            }
+            return base.util.dist2D(pt, pts[i-1]);
+          }).reduce((a, b) => a+b, 0);
+
           if (n1.start) {
-            toolpathGraph.addEdge(n1.name, n2.name, 0, { path: pathBetween });
+            toolpathGraph.addEdge(n1.name, n2.name, 0, { path: pathBetween }, pathLength);
             toolpathGraph.addEdge(n2.name, n1.name, 0, {
               path: pathBetweenRev,
-            });
+            }, pathLength);
           } else {
             toolpathGraph.addEdge(n1.name, n2.name, 0, {
               path: pathBetweenRev,
-            });
-            toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween });
+            }, pathLength);
+            toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween }, pathLength);
           }
         } else {
           console.log("Looking for connecting paths...");
@@ -719,6 +729,12 @@ export async function generateFourAxis(params) {
             console.log(
               `Found connecting path between ${n1.name} and ${n2.name}`
             );
+            const forwardPathLength = n1.path.points.map((pt, i, pts) => {
+              if (i == 0) {
+                return 0;
+              }
+              return base.util.dist2D(pt, pts[i-1]);
+            }).reduce((a, b) => a+b, 0);
             console.log(forwardPath);
             toolpathGraph.addEdge(
               n1.name,
@@ -726,7 +742,8 @@ export async function generateFourAxis(params) {
               base.util.dist2D(n1.point, n2.point),
               {
                 path: { points: forwardPath },
-              }
+              },
+              forwardPathLength
             );
           }
 
@@ -735,13 +752,20 @@ export async function generateFourAxis(params) {
             console.log(
               `Found connecting path between ${n2.name} and ${n1.name}`
             );
+            const reversePathLength = n1.path.points.map((pt, i, pts) => {
+              if (i == 0) {
+                return 0;
+              }
+              return base.util.dist2D(pt, pts[i-1]);
+            }).reduce((a, b) => a+b, 0);
             toolpathGraph.addEdge(
               n2.name,
               n1.name,
               base.util.dist2D(n2.point, n1.point),
               {
                 path: { points: reversePath },
-              }
+              },
+              reversePathLength
             );
           }
 
@@ -930,7 +954,6 @@ export async function generateFourAxis(params) {
     }
 
     // re-calculate ccw and totalRotations for the final, interpolated toolpath
-    totalRotations = 0;
     interpolatedToolpath.forEach((p, i, tp) => {
       if (!p) {
         return;

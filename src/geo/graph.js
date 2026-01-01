@@ -38,11 +38,14 @@ export class Graph {
    * @param {number} weight
    * @param {Object} [data={}] - Optional arbitrary data to associate with the edge.
    */
-  addEdge(source, destination, weight, data = {}) {
+  addEdge(source, destination, weight, data = {}, retraversal_cost = undefined) {
     this.addNode(source);
     this.addNode(destination);
 
     const edge = { weight, data };
+    if (retraversal_cost !== undefined) {
+      edge.retraversal_cost = retraversal_cost;
+    }
     this.adj.get(source).set(destination, edge);
   }
 
@@ -135,13 +138,14 @@ export class Graph {
     /**
      * Finds a shortest path between two nodes using Dijkstra's algorithm, constrained
      * to a specific set of allowed nodes.
-     * @param {*} startNode 
-     * @param {*} endNode 
+     * @param {*} startNode
+     * @param {*} endNode
      * @param {Set} allowedNodes - A set of nodes the path is allowed to traverse.
+     * @param {Set} [traversed] - A set of already traversed edges to apply retraversal costs.
      * @returns {{path: Array<*>, edges: Array<*>, weight: number}|null}
      * @private
      */
-    _findShortestPath(startNode, endNode, allowedNodes) {
+    _findShortestPath(startNode, endNode, allowedNodes, traversed) {
         let distances = new Map();
         let prev = new Map();
         let pq = new Map(); // Using a Map as a min-priority queue
@@ -165,7 +169,7 @@ export class Graph {
                     closestNode = node;
                 }
             }
-            
+
             if (closestNode === null) break;
             pq.delete(closestNode);
 
@@ -190,7 +194,10 @@ export class Graph {
             if (neighbors) {
                 for (const [neighbor, edge] of neighbors.entries()) {
                     if (allowedNodes.has(neighbor)) {
-                        let newDist = distances.get(closestNode) + edge.weight;
+                        let weight = edge.weight;
+                                    if (traversed && traversed.has(edge)) {
+                                        weight += (edge.retraversal_cost || 0);
+                                    }                        let newDist = distances.get(closestNode) + weight;
                         if (newDist < distances.get(neighbor)) {
                             distances.set(neighbor, newDist);
                             prev.set(neighbor, closestNode);
@@ -230,9 +237,10 @@ export class Graph {
         const visited = new Set();
         const path = [startNode];
         const edges = [];
+        const traversedEdges = new Set();
         let totalWeight = 0;
         let currentNode = startNode;
-        
+
         visited.add(startNode);
 
         while (visited.size < nodes.length) {
@@ -244,10 +252,16 @@ export class Graph {
 
             if (neighbors) {
                 for (const [neighbor, edge] of neighbors.entries()) {
-                    if (!visited.has(neighbor) && edge.weight < minWeight) {
-                        minWeight = edge.weight;
-                        nearestNeighbor = neighbor;
-                        connectingEdge = edge;
+                    if (!visited.has(neighbor)) {
+                        let weight = edge.weight;
+                        if (traversedEdges.has(edge)) {
+                            weight += (edge.retraversal_cost || 0);
+                        }
+                        if (weight < minWeight) {
+                            minWeight = weight;
+                            nearestNeighbor = neighbor;
+                            connectingEdge = edge;
+                        }
                     }
                 }
             }
@@ -256,6 +270,7 @@ export class Graph {
                 // Found a simple connection to an unvisited node
                 totalWeight += minWeight;
                 edges.push({ from: currentNode, to: nearestNeighbor, edgeData: connectingEdge });
+                traversedEdges.add(connectingEdge);
                 currentNode = nearestNeighbor;
                 path.push(currentNode);
                 visited.add(currentNode);
@@ -267,11 +282,17 @@ export class Graph {
                     const v_neighbors = this.getNeighbors(v);
                     if (v_neighbors) {
                         for (const [u, edge] of v_neighbors.entries()) {
-                            if (!visited.has(u) && edge.weight < minGlobalWeight) {
-                                minGlobalWeight = edge.weight;
-                                bestV = v;
-                                bestU = u;
-                                bestEdge = edge;
+                            if (!visited.has(u)) {
+                                let weight = edge.weight;
+                                if (traversedEdges.has(edge)) {
+                                    weight += (edge.retraversal_cost || 0);
+                                }
+                                if (weight < minGlobalWeight) {
+                                    minGlobalWeight = weight;
+                                    bestV = v;
+                                    bestU = u;
+                                    bestEdge = edge;
+                                }
                             }
                         }
                     }
@@ -279,21 +300,23 @@ export class Graph {
 
                 if (bestV === null) {
                     // No path from visited to unvisited nodes, graph is disconnected
-                    break; 
+                    break;
                 }
 
                 // Find a path from the current end of the path to the start of the best new edge
-                const bridge = this._findShortestPath(currentNode, bestV, visited);
+                const bridge = this._findShortestPath(currentNode, bestV, visited, traversedEdges);
                 if (bridge) {
                     // Append the bridging path (re-visiting nodes)
                     path.push(...bridge.path.slice(1));
                     edges.push(...bridge.edges);
+                    bridge.edges.forEach(e => traversedEdges.add(e.edgeData));
                     totalWeight += bridge.weight;
                 }
 
                 // Append the new cheapest edge and node
                 totalWeight += minGlobalWeight;
                 edges.push({ from: bestV, to: bestU, edgeData: bestEdge });
+                traversedEdges.add(bestEdge);
                 currentNode = bestU;
                 path.push(currentNode);
                 visited.add(currentNode);
@@ -301,7 +324,7 @@ export class Graph {
         }
 
         // Close the loop by finding the shortest path back to the start node
-        const closing_path = this._findShortestPath(currentNode, startNode, new Set(nodes));
+        const closing_path = this._findShortestPath(currentNode, startNode, new Set(nodes), traversedEdges);
         if (closing_path) {
             totalWeight += closing_path.weight;
             edges.push(...closing_path.edges);
