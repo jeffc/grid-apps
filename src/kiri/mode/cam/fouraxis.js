@@ -1,6 +1,14 @@
 // implements simultaneous four-axis machining based on
 // https://haisenzhao.github.io/FourAxis/files/four-axis.pdf
 
+// REMAINING TASKS
+//  - Better 2D tool geometry handling
+//  - 3D tool geometry handling
+//  - Graph-cut segment decomposition
+//  - Better toolpath-to-toolpath pathfinding
+//  - CAM generation improvements
+//  - General cleanup
+
 import { base } from "../../../geo/base.js";
 import { newPoint } from "../../../geo/point.js";
 import { newPolygon } from "../../../geo/polygon.js";
