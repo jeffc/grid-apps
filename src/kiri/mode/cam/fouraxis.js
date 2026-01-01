@@ -524,6 +524,10 @@ export async function generateFourAxis(params) {
 
     contours.forEach((poly) => poly.setCounterClockwise());
 
+    // add the start point to the end of the polygon's path, since what we
+    // really care about are path segments (not their endpoints)
+    contours.forEach((poly) => poly.points.push(poly.points[0]));
+
     // next, resample all of the contours into small segments.
     let resampledContours = contours
       .map((poly) => {
@@ -775,6 +779,7 @@ export async function generateFourAxis(params) {
         return pathData.points || pathData || [];
       })
       .flat();
+
 
     // compute the actual machining angles along the toolpath. start by choosing
     // the middle of each point's MDS, then do laplacian smoothing until the

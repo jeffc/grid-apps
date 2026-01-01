@@ -2,6 +2,89 @@
  * A directed, weighted graph data structure that can store arbitrary data on
  * both nodes and edges.
  */
+
+class MinHeap {
+    constructor() {
+        this.heap = [];
+        this.indices = new Map();
+    }
+
+    add(node, priority) {
+        this.heap.push({ node, priority });
+        this.indices.set(node, this.heap.length - 1);
+        this._bubbleUp(this.heap.length - 1);
+    }
+
+    extractMin() {
+        if (this.isEmpty()) {
+            return null;
+        }
+        this._swap(0, this.heap.length - 1);
+        const { node, priority } = this.heap.pop();
+        this.indices.delete(node);
+        if (!this.isEmpty()) {
+            this._bubbleDown(0);
+        }
+        return { node, priority };
+    }
+
+    decreasePriority(node, newPriority) {
+        if (!this.indices.has(node)) {
+            this.add(node, newPriority);
+            return;
+        }
+        const index = this.indices.get(node);
+        if (this.heap[index].priority > newPriority) {
+            this.heap[index].priority = newPriority;
+            this._bubbleUp(index);
+        }
+    }
+
+    isEmpty() {
+        return this.heap.length === 0;
+    }
+
+    _bubbleUp(index) {
+        while (index > 0) {
+            const parentIndex = Math.floor((index - 1) / 2);
+            if (this.heap[parentIndex].priority > this.heap[index].priority) {
+                this._swap(parentIndex, index);
+                index = parentIndex;
+            } else {
+                break;
+            }
+        }
+    }
+
+    _bubbleDown(index) {
+        while (true) {
+            const leftChildIndex = 2 * index + 1;
+            const rightChildIndex = 2 * index + 2;
+            let smallestChildIndex = index;
+
+            if (leftChildIndex < this.heap.length && this.heap[leftChildIndex].priority < this.heap[smallestChildIndex].priority) {
+                smallestChildIndex = leftChildIndex;
+            }
+            if (rightChildIndex < this.heap.length && this.heap[rightChildIndex].priority < this.heap[smallestChildIndex].priority) {
+                smallestChildIndex = rightChildIndex;
+            }
+
+            if (smallestChildIndex !== index) {
+                this._swap(smallestChildIndex, index);
+                index = smallestChildIndex;
+            } else {
+                break;
+            }
+        }
+    }
+
+    _swap(i, j) {
+        [this.heap[i], this.heap[j]] = [this.heap[j], this.heap[i]];
+        this.indices.set(this.heap[i].node, i);
+        this.indices.set(this.heap[j].node, j);
+    }
+}
+
 export class Graph {
   /**
    * Initializes a new Graph.
@@ -148,30 +231,18 @@ export class Graph {
     _findShortestPath(startNode, endNode, allowedNodes, traversed) {
         let distances = new Map();
         let prev = new Map();
-        let pq = new Map(); // Using a Map as a min-priority queue
+        let pq = new MinHeap();
 
         for (const node of allowedNodes) {
             distances.set(node, Infinity);
             prev.set(node, null);
-            pq.set(node, Infinity);
         }
 
         distances.set(startNode, 0);
-        pq.set(startNode, 0);
+        pq.add(startNode, 0);
 
-        while (pq.size > 0) {
-            // Get node with smallest distance from priority queue
-            let closestNode = null;
-            let minDistance = Infinity;
-            for (const [node, dist] of pq.entries()) {
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    closestNode = node;
-                }
-            }
-
-            if (closestNode === null) break;
-            pq.delete(closestNode);
+        while (!pq.isEmpty()) {
+            const { node: closestNode } = pq.extractMin();
 
             if (closestNode === endNode) {
                 // Reconstruct path
@@ -195,13 +266,14 @@ export class Graph {
                 for (const [neighbor, edge] of neighbors.entries()) {
                     if (allowedNodes.has(neighbor)) {
                         let weight = edge.weight;
-                                    if (traversed && traversed.has(edge)) {
-                                        weight += (edge.retraversal_cost || 0);
-                                    }                        let newDist = distances.get(closestNode) + weight;
+                        if (traversed && traversed.has(edge)) {
+                            weight += (edge.retraversal_cost || 0);
+                        }
+                        let newDist = distances.get(closestNode) + weight;
                         if (newDist < distances.get(neighbor)) {
                             distances.set(neighbor, newDist);
                             prev.set(neighbor, closestNode);
-                            pq.set(neighbor, newDist);
+                            pq.decreasePriority(neighbor, newDist);
                         }
                     }
                 }
@@ -209,6 +281,47 @@ export class Graph {
         }
 
         return null; // No path found
+    }
+
+    _calculatePathWeight(path, traversedEdges = new Set()) {
+        let weight = 0;
+        for (let i = 0; i < path.length - 1; i++) {
+            const from = path[i];
+            const to = path[i+1];
+            const edge = this.adj.get(from)?.get(to);
+            if (!edge) return Infinity;
+            let cost = edge.weight;
+            if (traversedEdges.has(edge)) {
+                cost += edge.retraversal_cost || 0;
+            }
+            weight += cost;
+        }
+        return weight;
+    }
+
+    _twoOpt(path) {
+        let newPath = [...path];
+        let improved = true;
+        while (improved) {
+            improved = false;
+            for (let i = 1; i < newPath.length - 2; i++) {
+                for (let j = i + 1; j < newPath.length - 1; j++) {
+                    const n1 = newPath[i-1], n2 = newPath[i], n3 = newPath[j], n4 = newPath[j+1];
+                    const w12 = this.getWeight(n1, n2) || Infinity;
+                    const w34 = this.getWeight(n3, n4) || Infinity;
+                    const w13 = this.getWeight(n1, n3) || Infinity;
+                    const w24 = this.getWeight(n2, n4) || Infinity;
+
+                    if ((w12 + w34) > (w13 + w24)) {
+                        const part = newPath.slice(i, j + 1);
+                        part.reverse();
+                        newPath.splice(i, part.length, ...part);
+                        improved = true;
+                    }
+                }
+            }
+        }
+        return newPath;
     }
 
     /**
@@ -331,10 +444,42 @@ export class Graph {
             path.push(...closing_path.path.slice(1));
         }
 
+        const optimizedPath = this._twoOpt(path);
+
+        const newEdges = [];
+        let newTotalWeight = 0;
+        const newTraversedEdges = new Set();
+
+        for (let i=0; i < optimizedPath.length - 1; i++) {
+            const from = optimizedPath[i];
+            const to = optimizedPath[i+1];
+            let edge = this.adj.get(from)?.get(to);
+            let cost = edge?.weight;
+
+            if (!edge) {
+                const bridge = this._findShortestPath(from, to, new Set(nodes), newTraversedEdges);
+                if (bridge) {
+                    newEdges.push(...bridge.edges);
+                    bridge.edges.forEach(e => newTraversedEdges.add(e.edgeData));
+                    newTotalWeight += bridge.weight;
+                } else {
+                    console.error('2-opt created a path with a missing edge and no bridge found');
+                }
+                continue;
+            }
+
+            if (newTraversedEdges.has(edge)) {
+                cost += edge.retraversal_cost || 0;
+            }
+            newTotalWeight += cost;
+            newEdges.push({ from, to, edgeData: edge });
+            newTraversedEdges.add(edge);
+        }
+
         return {
-            path: path,
-            edges: edges,
-            weight: totalWeight,
+            path: optimizedPath,
+            edges: newEdges,
+            weight: newTotalWeight,
             missing: nodes.filter(n => !visited.has(n))
         };
     }
