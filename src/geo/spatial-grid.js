@@ -1,3 +1,5 @@
+import { base } from './base.js';
+
 export class SpatialGrid {
   /**
    * @param {Object} bounds - { min: {x, y}, max: {x, y} }
@@ -37,7 +39,7 @@ export class SpatialGrid {
     return Math.floor((val - offset) / this.cellSize);
   }
 
-  addSegment(p1, p2) {
+  addSegment(p1, p2, id) {
     // Convert both points to Grid Coordinates
     const c1 = this._toGridCoord(p1.x, this.offsetX);
     const r1 = this._toGridCoord(p1.y, this.offsetY);
@@ -49,7 +51,7 @@ export class SpatialGrid {
     const minRow = Math.min(r1, r2);
     const maxRow = Math.max(r1, r2);
 
-    const segment = { p1, p2, id: Math.random() };
+    const segment = { p1, p2, id };
 
     // Loop strictly over the touched cells
     // Clamp to 0 and cols-1 to handle lines that might slightly exceed bounds
@@ -68,11 +70,30 @@ export class SpatialGrid {
     }
   }
 
-  rayCast(origin, direction, maxDistance = Infinity) {
+  _rayCastWasm(origin, direction, maxDistance = Infinity) {
+    const wasm = base.wasm;
+    const gridBuffer = this.wasm_buffer;
 
+    if (gridBuffer.byteLength > wasm.grid_buffer_size) {
+        console.error("WASM grid buffer too small");
+        return this._rayCastJS(origin, direction, maxDistance);
+    }
+
+    const gridPtr = wasm.grid_buffer;
+    new Uint8Array(wasm.memory.buffer, gridPtr, gridBuffer.byteLength).set(new Uint8Array(gridBuffer));
+
+    return wasm.fn.grid_raycast(
+        gridPtr,
+        origin.x, origin.y,
+        direction.x, direction.y,
+        maxDistance
+    );
+  }
+
+  _rayCastJS(origin, direction, maxDistance = Infinity) {
     if (isNaN(origin.x) || isNaN(origin.y) || isNaN(direction.x) || isNaN(direction.y)) {
       debugger;
-      return null;
+      return false;
     }
 
     // 1. Convert Ray Origin to "Grid Space" (0-based)
@@ -134,7 +155,7 @@ export class SpatialGrid {
 
       // Optimization: If hit is within the current cell's "t-boundary"
       if (closestHit && closestHit.distance < Math.min(tMaxX, tMaxY)) {
-        return closestHit;
+        return true;
       }
 
       if (tMaxX < tMaxY) {
@@ -148,7 +169,14 @@ export class SpatialGrid {
       if (tMaxX > maxDistance && tMaxY > maxDistance) break;
     }
 
-    return closestHit;
+    return closestHit !== null;
+  }
+
+  rayCast(origin, direction, maxDistance = Infinity) {
+    if (base.wasm && this.wasm_buffer) {
+        return this._rayCastWasm(origin, direction, maxDistance);
+    }
+    return this._rayCastJS(origin, direction, maxDistance);
   }
 
   // (Math Helper remains exactly the same as previous version)
@@ -190,9 +218,64 @@ export function fromSegments(segments, cellSize, padding = 0) {
 
   const grid = new SpatialGrid(bounds, cellSize, padding);
 
-  for (const seg of segments) {
-    grid.addSegment(seg[0], seg[1]);
+  for (let i = 0; i < segments.length; i++) {
+    grid.addSegment(segments[i][0], segments[i][1], i);
   }
+
+  // --- Create WASM buffer ---
+  const wasmSegments = new Float32Array(segments.length * 4);
+  for (let i=0; i<segments.length; i++) {
+    wasmSegments[i*4+0] = segments[i][0].x;
+    wasmSegments[i*4+1] = segments[i][0].y;
+    wasmSegments[i*4+2] = segments[i][1].x;
+    wasmSegments[i*4+3] = segments[i][1].y;
+  }
+
+  const cellIndices = new Uint32Array(grid.rows * grid.cols * 2);
+  const cellSegmentMapList = [];
+  let mapOffset = 0;
+
+  for (let i = 0; i < grid.cells.length; i++) {
+    const cell = grid.cells[i];
+    const segmentIds = cell.map(seg => seg.id);
+
+    cellIndices[i * 2] = mapOffset;
+    cellIndices[i * 2 + 1] = segmentIds.length;
+
+    for (const id of segmentIds) {
+        cellSegmentMapList.push(id);
+    }
+    mapOffset += segmentIds.length;
+  }
+
+  const cellSegmentMap = new Uint32Array(cellSegmentMapList);
+
+  const header = new ArrayBuffer(28);
+  const headerF32 = new Float32Array(header, 0, 3);
+  const headerU32 = new Uint32Array(header, 12, 4);
+
+  headerF32[0] = grid.offsetX;
+  headerF32[1] = grid.offsetY;
+  headerF32[2] = grid.cellSize;
+  headerU32[0] = grid.cols;
+  headerU32[1] = grid.rows;
+  headerU32[2] = segments.length;
+  headerU32[3] = cellSegmentMap.length;
+
+  const segmentsBuffer = wasmSegments.buffer;
+  const cellIndicesBuffer = cellIndices.buffer;
+  const cellSegmentMapBuffer = cellSegmentMap.buffer;
+
+  const totalSize = header.byteLength + segmentsBuffer.byteLength + cellIndicesBuffer.byteLength + cellSegmentMapBuffer.byteLength;
+  const wasmBuffer = new ArrayBuffer(totalSize);
+  const wasmU8 = new Uint8Array(wasmBuffer);
+
+  wasmU8.set(new Uint8Array(header), 0);
+  wasmU8.set(new Uint8Array(segmentsBuffer), header.byteLength);
+  wasmU8.set(new Uint8Array(cellIndicesBuffer), header.byteLength + segmentsBuffer.byteLength);
+  wasmU8.set(new Uint8Array(cellSegmentMapBuffer), header.byteLength + segmentsBuffer.byteLength + cellIndicesBuffer.byteLength);
+
+  grid.wasm_buffer = wasmBuffer;
 
   return grid;
 }

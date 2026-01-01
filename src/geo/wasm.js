@@ -159,19 +159,15 @@ export function enable() {
                 debug_string: (len, ptr) => { console.log('wasm', readString(ptr, len)) }
             },
             wasi_snapshot_preview1: {
-                // args_get: (count,bufsize) => { return 0 },
-                // args_sizes_get: (count,bufsize) => { },
-                // environ_get: (count,bufsize) => { return 0 },
-                // environ_sizes_get: (count,bufsize) => { },
                 proc_exit: (code) => { return code }
             }
         }))
         .then(results => {
-            // console.log({enabled: base.wasm});
             delete base._wasm;
             let { module, instance } = results;
             let { exports } = instance;
             let heap = new DataView(exports.memory.buffer);
+            const GRID_BUFFER_SIZE = 1024 * 1024 * 5;
             let wasm = base.wasm = {
                 heap,
                 exports,
@@ -180,11 +176,14 @@ export function enable() {
                 malloc: exports.mem_get,
                 free: exports.mem_clr
             };
-            wasm.shared = wasm.malloc(1024 * 1024 * 30),
+            wasm.shared = wasm.malloc(1024 * 1024 * 30);
+            wasm.grid_buffer = wasm.malloc(GRID_BUFFER_SIZE);
+            wasm.grid_buffer_size = GRID_BUFFER_SIZE;
             wasm.fn = {
                 diff: exports.poly_diff,
                 union: exports.poly_union,
-                offset: exports.poly_offset
+                offset: exports.poly_offset,
+                grid_raycast: exports.grid_raycast
             };
             wasm.js = {
                 diff: polyDiff,
@@ -197,6 +196,7 @@ export function enable() {
 export function disable() {
     if (base.wasm) {
         base.wasm.free(base.wasm.shared);
+        base.wasm.free(base.wasm.grid_buffer);
         delete base.wasm;
     }
 }

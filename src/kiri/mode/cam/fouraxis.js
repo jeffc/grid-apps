@@ -158,8 +158,8 @@ function isMachinable(point, normal, angle, grid, toolObj, tool_offset = 0.1) {
   }
   const upAxis = newPoint(0, 1).rotate(-angle * DEG2RAD);
   return (
-    grid.rayCast(toolEdge1, upAxis) === null &&
-    grid.rayCast(toolEdge2, upAxis) === null
+    !grid.rayCast(toolEdge1, upAxis) &&
+    !grid.rayCast(toolEdge2, upAxis)
   );
 }
 
@@ -633,8 +633,6 @@ export async function generateFourAxis(params) {
       let distance = displacement.magnitude();
       let direction = displacement.clone().normalize();
 
-      console.log(`Points are ${distance} units apart`);
-
       // interpolate at least three points between the two
       let nPoints = Math.round(Math.max(distance / 0.2, 3));
       let samplePoints = [];
@@ -687,7 +685,6 @@ export async function generateFourAxis(params) {
         p._fouraxis.chosenMDS = chosenMDS;
         currentMDS = chosenMDS;
       }
-      console.log(`Path found!`);
       return samplePoints.slice(1, samplePoints.length - 1);
     };
 
@@ -697,7 +694,6 @@ export async function generateFourAxis(params) {
         const n2 = toolpathNodes[j];
 
         if (n1.path.name == n2.path.name) {
-          console.log(`Connecting ${n1.name} and ${n2.name} with zero weight`);
           const pathBetween = structuredClone(n1.path.points);
           const pathBetweenRev = structuredClone(n1.path.points).reverse();
           // traversing the path the first time is 0-weight because it's
@@ -722,20 +718,15 @@ export async function generateFourAxis(params) {
             toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween }, pathLength);
           }
         } else {
-          console.log("Looking for connecting paths...");
           // check if there's a safe machinable path between n1 and n2
           const forwardPath = findConnectingPath(n1, n2);
           if (forwardPath) {
-            console.log(
-              `Found connecting path between ${n1.name} and ${n2.name}`
-            );
             const forwardPathLength = n1.path.points.map((pt, i, pts) => {
               if (i == 0) {
                 return 0;
               }
               return base.util.dist2D(pt, pts[i-1]);
             }).reduce((a, b) => a+b, 0);
-            console.log(forwardPath);
             toolpathGraph.addEdge(
               n1.name,
               n2.name,
@@ -749,9 +740,6 @@ export async function generateFourAxis(params) {
 
           const reversePath = findConnectingPath(n2, n1);
           if (reversePath) {
-            console.log(
-              `Found connecting path between ${n2.name} and ${n1.name}`
-            );
             const reversePathLength = n1.path.points.map((pt, i, pts) => {
               if (i == 0) {
                 return 0;
@@ -767,10 +755,6 @@ export async function generateFourAxis(params) {
               },
               reversePathLength
             );
-          }
-
-          if (!forwardPath && !reversePath) {
-            console.log(`No connecting path found`);
           }
         }
       }
