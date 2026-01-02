@@ -7,7 +7,7 @@
 //  - Graph-cut segment decomposition
 //  - Better toolpath-to-toolpath pathfinding
 //  - CAM generation improvements
-//  - General cleanup
+//  - General cleanup and removal of debugging
 
 import { base } from "../../../geo/base.js";
 import { newPoint } from "../../../geo/point.js";
@@ -18,6 +18,85 @@ import { printPoint, printPolygon } from "../../../geo/print-geom.js";
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
+
+function intersectMDRs(mdr1, mdr2) {
+  const events = [];
+
+  const processMDR = (mdr) => {
+    for (const seg of mdr) {
+      if (seg.start <= seg.stop) {
+        events.push({ type: 'start', val: seg.start });
+        events.push({ type: 'end', val: seg.stop });
+      } else {
+        // Wrap-around case: split into two segments
+        events.push({ type: 'start', val: seg.start });
+        events.push({ type: 'end', val: 360 });
+        events.push({ type: 'start', val: 0 });
+        events.push({ type: 'end', val: seg.stop });
+      }
+    }
+  };
+
+  processMDR(mdr1);
+  processMDR(mdr2);
+
+  // Sort events by value. If values are equal, process 'start' before 'end'
+  // to correctly handle adjacent segments.
+  events.sort((a, b) => a.val - b.val || (a.type === 'start' ? -1 : 1));
+
+  const result = [];
+  let count = 0;
+  let intersectionStart = null;
+
+  for (const event of events) {
+    if (event.type === 'start') {
+      if (count === 1) {
+        // Transitioning from 1 to 2 active segments means an intersection starts
+        intersectionStart = event.val;
+      }
+      count++;
+    } else { // event.type === 'end'
+      if (count === 2) {
+        // Transitioning from 2 to 1 active segments means an intersection ends
+        if (intersectionStart !== null && intersectionStart < event.val) {
+          result.push([intersectionStart, event.val]);
+        }
+        intersectionStart = null;
+      }
+      count--;
+    }
+  }
+
+  // Post-processing to merge segments that may have been split at 0/360
+  if (result.length > 1) {
+    const first = result[0];
+    const last = result[result.length - 1];
+    if (first[0] === 0 && last[1] === 360) {
+      const newStart = last[0];
+      const newEnd = first[1];
+      // Remove the two segments that will be merged
+      result.shift();
+      result.pop();
+      // Add the new merged segment
+      result.push([newStart, newEnd]);
+    }
+  }
+
+  return result.map((s) => {return {start: s[0], stop: s[1], segmentLabel: null}});
+}
+
+// Represents a path segment
+class Segment {
+  // start and end are Point objects
+  constructor(start, end) {
+    this.start = start;
+    this.end = end;
+
+    // compute the MDR that's the intersection of the two endpoint MDRs
+    this.MDR = intersectMDRs(this.start._fouraxis.machinability.MDR, this.end._fouraxis.machinability.MDR);
+  }
+}
+
 
 // translates (x, y, z) contours in a polygon to (y, z, x) contours so that all processing
 // can happen in the XY plane.
@@ -305,15 +384,14 @@ function sectorsOverlap(s1, s2) {
 
 // perform an exhaustive back-and-forth analysis to assign possible segment
 // labels to each point (one label per MDS)
-function assignMDSLabels(poly) {
+function assignMDSLabels(segs) {
   // segment labels are unique per contour
   let nextLabel = 0;
 
-  const pts = poly.points;
-  for (let pi = 0; pi < poly.points.length; pi++) {
-    let pt = pts[pi];
-    for (let mdsi = 0; mdsi < pt._fouraxis.machinability.MDR.length; mdsi++) {
-      let mds = pt._fouraxis.machinability.MDR[mdsi];
+  for (let si = 0; si < segs.length; si++) {
+    let seg = segs[si];
+    for (let mdsi = 0; mdsi < seg.MDR.length; mdsi++) {
+      let mds = seg.MDR[mdsi];
       if (mds.segmentLabel != null) {
         continue;
       }
@@ -321,76 +399,70 @@ function assignMDSLabels(poly) {
       // get a fresh label
       nextLabel++;
       mds.segmentLabel = nextLabel;
-      let pointsOnPath = [pt];
+      let segsInPath = [seg];
 
       // traverse forward and assign the segment label to points which have
-      // overlapping MDSs. If we encounter a point that doesn't overlap or that
-      // has two disjoint overlaps, or one that already has a label (which
-      // shouldn't ever happen...) stop assigning.
-      let traverseidx = pi;
-      let currentMDS = mds;
+      // overlapping MDSs. If we encounter a point that doesn't overlap, or one
+      // that already has a label (which shouldn't ever happen, unless we loop
+      // back around...) stop
+      // assigning.
+
+      let traverseidx = si;
+      let currentMDR = [mds];
       while (true) {
-        traverseidx = (traverseidx + 1) % pts.length;
-        let nextPt = pts[traverseidx];
-        let overlappingMDSs = nextPt._fouraxis.machinability.MDR.filter((m) =>
-          sectorsOverlap(currentMDS, m)
+        traverseidx = (traverseidx + 1) % segs.length;
+        let nextSeg = segs[traverseidx];
+        let overlappingMDR = nextSeg.MDR.filter((m) =>
+          currentMDR.some((s) => sectorsOverlap(s, m))
         );
-        if (overlappingMDSs.length != 1) {
+        if (overlappingMDR.length == 0) {
           break;
         }
-        let nextMDS = overlappingMDSs[0];
-        if (nextMDS.segmentLabel !== null) {
+
+        if (overlappingMDR.some((m) => m.segmentLabel !== null)) {
+          debugger; // this shouldn't happen
           break;
         }
-        // If another MDS on this point is already part of the current path,
-        // then this is an invalid merge of two disjoint paths.
-        if (
-          nextPt._fouraxis.machinability.MDR.some(
-            (m) => m !== nextMDS && m.segmentLabel === nextLabel
-          )
-        ) {
-          break;
-        }
-        nextMDS.segmentLabel = nextLabel;
-        currentMDS = nextMDS;
-        pointsOnPath.push(nextPt);
+
+        overlappingMDR.forEach((m) => {
+          m.segmentLabel = nextLabel;
+        });
+
+        currentMDR = overlappingMDR;
+        segsInPath.push(nextSeg);
       }
-      traverseidx = pi;
-      currentMDS = mds;
+      traverseidx = si;
+      currentMDR = [mds];
       // reverse the path so that we can push() the backwards traversal on the
       // end
-      pointsOnPath.reverse();
+      segsInPath.reverse();
       while (true) {
-        traverseidx = (traverseidx - 1 + pts.length) % pts.length;
-        let nextPt = pts[traverseidx];
-        let overlappingMDSs = nextPt._fouraxis.machinability.MDR.filter((m) =>
-          sectorsOverlap(currentMDS, m)
+        traverseidx = (traverseidx - 1 + segs.length) % segs.length;
+        let nextSeg = segs[traverseidx];
+        let overlappingMDR = nextSeg.MDR.filter((m) =>
+          currentMDR.some((s) => sectorsOverlap(s, m))
         );
-        if (overlappingMDSs.length != 1) {
+        if (overlappingMDR.length == 0) {
           break;
         }
-        let nextMDS = overlappingMDSs[0];
-        if (nextMDS.segmentLabel !== null) {
+
+        if (overlappingMDR.some((m) => m.segmentLabel !== null)) {
+          debugger; // this shouldn't happen
           break;
         }
-        // If another MDS on this point is already part of the current path,
-        // then this is an invalid merge of two disjoint paths.
-        if (
-          nextPt._fouraxis.machinability.MDR.some(
-            (m) => m !== nextMDS && m.segmentLabel === nextLabel
-          )
-        ) {
-          break;
-        }
-        nextMDS.segmentLabel = nextLabel;
-        currentMDS = nextMDS;
-        pointsOnPath.push(nextPt);
+
+        overlappingMDR.forEach((m) => {
+          m.segmentLabel = nextLabel;
+        });
+
+        currentMDR = overlappingMDR;
+        segsInPath.push(nextSeg);
       }
       // reverse the path again so we get back to a CCW winding order
-      pointsOnPath.reverse();
+      segsInPath.reverse();
     }
   }
-  return poly;
+  return segs;
 }
 
 // helper, determines sector size given start and stop in degrees
@@ -398,33 +470,33 @@ function sectorSize(start, stop) {
   return (stop - start + 360) % 360;
 }
 
-// Assign individual path labels to points in a polygon
-function assignPaths(poly) {
-  const pts = poly.points;
-  pts.forEach((p) => {
+// Assign individual path labels to segments
+function assignPaths(segs) {
+  segs.forEach((s) => {
     // TODO - properly implement graph-cut-based assignment
 
     // choose the path label with the largest MDS
-    const chosenMDS = p._fouraxis.machinability.MDR.reduce(
+    const chosenMDS = s.MDR.reduce(
       (mds1, mds2) =>
         sectorSize(mds1.start, mds1.stop) > sectorSize(mds2.start, mds2.stop)
           ? mds1
           : mds2,
       { start: 0, stop: 0, segmentLabel: null }
     );
-    p._fouraxis.segmentLabel = chosenMDS.segmentLabel;
-    p._fouraxis.chosenMDS = chosenMDS;
+    s.segmentLabel = chosenMDS.segmentLabel;
+    s.chosenMDS = chosenMDS;
   });
 
   const paths = {};
-  const visited = new Array(pts.length).fill(false);
+  const visited = new Array(segs.length).fill(false);
 
-  for (let i = 0; i < pts.length; i++) {
+  for (let i = 0; i < segs.length; i++) {
     if (visited[i]) {
       continue;
     }
+    const s  = segs[i];
 
-    const currentLabel = pts[i]._fouraxis.segmentLabel;
+    const currentLabel = s.segmentLabel;
     if (currentLabel === null) {
       visited[i] = true;
       continue;
@@ -434,10 +506,9 @@ function assignPaths(poly) {
     // First, find the absolute start of this segment by traversing backwards.
     let startIdx = i;
     while (
-      pts[(startIdx - 1 + pts.length) % pts.length]._fouraxis.segmentLabel ===
-      currentLabel
+      segs[(startIdx - 1 + segs.length) % segs.length].segmentLabel === currentLabel
     ) {
-      startIdx = (startIdx - 1 + pts.length) % pts.length;
+      startIdx = (startIdx - 1 + segs.length) % segs.length;
       if (startIdx === i) {
         // Full circle path, break to avoid infinite loop
         break;
@@ -445,14 +516,14 @@ function assignPaths(poly) {
     }
 
     // Now, we are at the start of the segment. Traverse forward and collect points.
-    const pathPoints = [];
+    const pathSegs = [];
     let currentIdx = startIdx;
     while (true) {
-      pathPoints.push(pts[currentIdx]);
+      pathSegs.push(segs[currentIdx]);
       visited[currentIdx] = true;
 
-      const nextIdx = (currentIdx + 1) % pts.length;
-      if (pts[nextIdx]._fouraxis.segmentLabel !== currentLabel) {
+      const nextIdx = (currentIdx + 1) % segs.length;
+      if (segs[nextIdx].segmentLabel !== currentLabel) {
         // The segment has ended.
         break;
       }
@@ -462,15 +533,10 @@ function assignPaths(poly) {
         break;
       }
     }
-    paths[currentLabel] = pathPoints;
+    paths[currentLabel] = pathSegs;
   }
 
-  if (!poly._fouraxis) {
-    poly._fouraxis = {};
-  }
-  poly._fouraxis.paths = paths;
-
-  return poly;
+  return {segments: segs, paths: paths};
 }
 
 function sanityCheckPoint(p, grid, toolObj) {
@@ -532,10 +598,6 @@ export async function generateFourAxis(params) {
 
     contours.forEach((poly) => poly.setCounterClockwise());
 
-    // add the start point to the end of the polygon's path, since what we
-    // really care about are path segments (not their endpoints)
-    contours.forEach((poly) => poly.points.push(poly.points[0]));
-
     // next, resample all of the contours into small segments.
     let resampledContours = contours
       .map((poly) => {
@@ -579,19 +641,25 @@ export async function generateFourAxis(params) {
       assignMDRs(poly, grid, angleStep, toolObj)
     );
 
-    // assign segment candidate labels
-    resampledContours.forEach((poly) => assignMDSLabels(poly));
+    // convert from points along the each contour into segments
+    let resampledSegments = resampledContours.map((poly) => 
+      poly.points.map((p, i, pts) => 
+        new Segment(p, pts[(i + 1 + pts.length) % pts.length])
+      ));
+
+    // assign point segment candidate labels
+    resampledSegments.forEach((seg) => assignMDSLabels(seg));
 
     // group points into paths by segment label
-    resampledContours.forEach((poly) => assignPaths(poly));
+    resampledSegments = resampledSegments.map((seg) => assignPaths(seg));
 
     // get all of the paths in the current slice and compute an ordering for
     // them
-    let allPaths = resampledContours
-      .map((poly) =>
-        Object.entries(poly._fouraxis.paths).map(([pathidx, path]) => {
+    let allPaths = resampledSegments
+      .map((seg, segi) =>
+        Object.entries(seg.paths).map(([pathidx, path]) => {
           return {
-            name: `${poly.id}-${pathidx}`,
+            name: `c${segi}-p${pathidx}`,
             points: path,
             start: path[0],
             end: path[path.length - 1],
