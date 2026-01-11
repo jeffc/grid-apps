@@ -1002,6 +1002,8 @@ export async function generateFourAxis(params) {
     // iterate over the toolpath and approximate the actual distance travelled
     // by the tool between the given points (taking into account the rotation).
     // If that distance is larger than 0.5 work units, interpolate steps
+
+    /*
     let interpolatedToolpath = [];
     let prevPoint = null;
     for (let i = 0; i < toolpath.length; i++) {
@@ -1052,46 +1054,64 @@ export async function generateFourAxis(params) {
       prevPoint = p;
     }
 
-    // re-calculate ccw and totalRotations for the final, interpolated toolpath
-    interpolatedToolpath.forEach((p, i, tp) => {
-      if (!p) {
+*/
+    let interpolatedToolpath = toolpath;
+    toolpath.forEach((seg, i, tp) => {
+      if (!seg) {
         return;
       }
-      if (i == 0) {
-        p._fouraxis.totalRotations = totalRotations;
+      if (!seg.start._fouraxis) seg.start._fouraxis = {};
+      if (!seg.end._fouraxis) seg.end._fouraxis = {};
+
+      if (i === 0) {
+        seg.start._fouraxis.totalRotations = totalRotations;
+        seg.end._fouraxis.totalRotations = totalRotations;
         return;
       }
-      let prevP = tp[i - 1];
-      if (!prevP) {
-        p._fouraxis.totalRotations = totalRotations;
+      let prevSeg = tp[i - 1];
+      if (!prevSeg) {
+        seg.start._fouraxis.totalRotations = totalRotations;
+        seg.end._fouraxis.totalRotations = totalRotations;
         return;
       }
 
-      let thisA = p._fouraxis.chosenAngle;
-      let prevA = prevP._fouraxis.chosenAngle;
+      let thisA = seg.chosenAngle;
+      let prevA = prevSeg.chosenAngle;
+      // ccw is calculated in a previous loop and stored on the start point
+      let use_ccw = seg.start._fouraxis.ccw;
 
-      // for interpolated points, we assume the shortest path is the correct one
-      // because the MDS validity check was done on the original points.
-      const ccw_arc_len = sectorSize(prevA, thisA);
-      p._fouraxis.ccw = ccw_arc_len <= 180;
-
-      if (prevA > thisA && p._fouraxis.ccw) {
+      if (prevA > thisA && use_ccw) {
         totalRotations++;
-      } else if (thisA > prevA && !p._fouraxis.ccw) {
+      } else if (thisA > prevA && !use_ccw) {
         totalRotations--;
       }
-      p._fouraxis.totalRotations = totalRotations;
+      seg.start._fouraxis.totalRotations = totalRotations;
+      seg.end._fouraxis.totalRotations = totalRotations;
+
+      seg.start._fouraxis.chosenAngle = seg.chosenAngle;
+      seg.end._fouraxis.chosenAngle = seg.chosenAngle;
     });
 
-    sanityCheckToolpath(interpolatedToolpath, grid, toolObj);
+    const finalToolpathPoints = [];
+    toolpath.forEach((seg) => {
+      if (seg) {
+        finalToolpathPoints.push(seg.start);
+        finalToolpathPoints.push(seg.end);
+      } else {
+        finalToolpathPoints.push(null);
+      }
+    });
 
-    let finalToolpath = interpolatedToolpath.map((p) => {
+    //sanityCheckToolpath(finalToolpathPoints, grid, toolObj);
+
+    let finalToolpath = finalToolpathPoints.map((p, i) => {
       if (!p) {
         return null;
       }
-      return newPoint(p.z, p.x, p.y)
+      let pp = newPoint(p.z, p.x, p.y)
         .rotateYZ(p._fouraxis.chosenAngle * DEG2RAD)
         .setA(-p._fouraxis.chosenAngle - p._fouraxis.totalRotations * 360);
+      return pp;
     });
 
     slice.camLines = [];
@@ -1152,23 +1172,23 @@ export async function generateFourAxis(params) {
         );
       }
 
-      if (slice_index % 10 == 0) {
-        toolpath.forEach((p) => {
-          if (!p) return;
-          const viz_p = newPoint(p.z, p.x, p.y);
-          const machiningAngle = p._fouraxis.chosenAngle * DEG2RAD;
-          const [vx, vy] = [
-            -Math.sin(-machiningAngle),
-            Math.cos(-machiningAngle),
-          ];
-          slice
-            .output()
-            .setLayer("machinability-angle", { line: 0x00ffff })
-            .addPoly(
-              newPolygon([viz_p, newPoint(viz_p.x, viz_p.y + vx, viz_p.z + vy)])
-            );
-        });
-      }
+      //if (slice_index % 10 == 0) {
+      //  toolpath.forEach((p) => {
+      //    if (!p) return;
+      //    const viz_p = newPoint(p.z, p.x, p.y);
+      //    const machiningAngle = p._fouraxis.chosenAngle * DEG2RAD;
+      //    const [vx, vy] = [
+      //      -Math.sin(-machiningAngle),
+      //      Math.cos(-machiningAngle),
+      //    ];
+      //    slice
+      //      .output()
+      //      .setLayer("machinability-angle", { line: 0x00ffff })
+      //      .addPoly(
+      //        newPolygon([viz_p, newPoint(viz_p.x, viz_p.y + vx, viz_p.z + vy)])
+      //      );
+      //  });
+      //}
 
       resampledContours.forEach((poly) =>
         poly.points.forEach((p, i) => {
@@ -1186,23 +1206,23 @@ export async function generateFourAxis(params) {
       );
     }
 
-    if (slice_index % 10 == 0) {
-      const colors = [0xff0000, 0x00ff00, 0x0000ff];
-      resampledContours.forEach((poly) => {
-        Object.entries(poly._fouraxis.paths).forEach(([pathi, path]) => {
-          let viz_path_pts = [];
-          path.forEach((p) => {
-            viz_path_pts.push(newPoint(p.z, p.x, p.y));
-          });
-          slice
-            .output()
-            .setLayer(`segments-${pathi % colors.length}`, {
-              line: colors[pathi % colors.length],
-            })
-            .addPoly(newPolygon(viz_path_pts).setOpen());
-        });
-      });
-    }
+    //if (slice_index % 10 == 0) {
+    //  const colors = [0xff0000, 0x00ff00, 0x0000ff];
+    //  resampledContours.forEach((poly) => {
+    //    Object.entries(poly._fouraxis.paths).forEach(([pathi, path]) => {
+    //      let viz_path_pts = [];
+    //      path.forEach((p) => {
+    //        viz_path_pts.push(newPoint(p.z, p.x, p.y));
+    //      });
+    //      slice
+    //        .output()
+    //        .setLayer(`segments-${pathi % colors.length}`, {
+    //          line: colors[pathi % colors.length],
+    //        })
+    //        .addPoly(newPolygon(viz_path_pts).setOpen());
+    //    });
+    //  });
+    //}
   }
   return sliced;
 }
