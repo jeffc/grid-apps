@@ -25,14 +25,14 @@ function intersectMDRs(mdr1, mdr2) {
   const processMDR = (mdr) => {
     for (const seg of mdr) {
       if (seg.start <= seg.stop) {
-        events.push({ type: 'start', val: seg.start });
-        events.push({ type: 'end', val: seg.stop });
+        events.push({ type: "start", val: seg.start });
+        events.push({ type: "end", val: seg.stop });
       } else {
         // Wrap-around case: split into two segments
-        events.push({ type: 'start', val: seg.start });
-        events.push({ type: 'end', val: 360 });
-        events.push({ type: 'start', val: 0 });
-        events.push({ type: 'end', val: seg.stop });
+        events.push({ type: "start", val: seg.start });
+        events.push({ type: "end", val: 360 });
+        events.push({ type: "start", val: 0 });
+        events.push({ type: "end", val: seg.stop });
       }
     }
   };
@@ -42,20 +42,21 @@ function intersectMDRs(mdr1, mdr2) {
 
   // Sort events by value. If values are equal, process 'start' before 'end'
   // to correctly handle adjacent segments.
-  events.sort((a, b) => a.val - b.val || (a.type === 'start' ? -1 : 1));
+  events.sort((a, b) => a.val - b.val || (a.type === "start" ? -1 : 1));
 
   const result = [];
   let count = 0;
   let intersectionStart = null;
 
   for (const event of events) {
-    if (event.type === 'start') {
+    if (event.type === "start") {
       if (count === 1) {
         // Transitioning from 1 to 2 active segments means an intersection starts
         intersectionStart = event.val;
       }
       count++;
-    } else { // event.type === 'end'
+    } else {
+      // event.type === 'end'
       if (count === 2) {
         // Transitioning from 2 to 1 active segments means an intersection ends
         if (intersectionStart !== null && intersectionStart < event.val) {
@@ -82,7 +83,9 @@ function intersectMDRs(mdr1, mdr2) {
     }
   }
 
-  return result.map((s) => {return {start: s[0], stop: s[1], segmentLabel: null}});
+  return result.map((s) => {
+    return { start: s[0], stop: s[1], segmentLabel: null };
+  });
 }
 
 // Represents a path segment
@@ -93,10 +96,12 @@ class Segment {
     this.end = end;
 
     // compute the MDR that's the intersection of the two endpoint MDRs
-    this.MDR = intersectMDRs(this.start._fouraxis.machinability.MDR, this.end._fouraxis.machinability.MDR);
+    this.MDR = intersectMDRs(
+      this.start._fouraxis.machinability.MDR,
+      this.end._fouraxis.machinability.MDR
+    );
   }
 }
-
 
 // translates (x, y, z) contours in a polygon to (y, z, x) contours so that all processing
 // can happen in the XY plane.
@@ -244,10 +249,7 @@ function isMachinable(point, normal, angle, grid, toolObj, tool_offset = 0.1) {
     debugger;
   }
   const upAxis = newPoint(0, 1).rotate(-angle * DEG2RAD);
-  return (
-    !grid.rayCast(toolEdge1, upAxis) &&
-    !grid.rayCast(toolEdge2, upAxis)
-  );
+  return !grid.rayCast(toolEdge1, upAxis) && !grid.rayCast(toolEdge2, upAxis);
 }
 
 // Resample a contour (set of points) into segments no longer than the given
@@ -494,7 +496,7 @@ function assignPaths(segs) {
     if (visited[i]) {
       continue;
     }
-    const s  = segs[i];
+    const s = segs[i];
 
     const currentLabel = s.segmentLabel;
     if (currentLabel === null) {
@@ -506,7 +508,8 @@ function assignPaths(segs) {
     // First, find the absolute start of this segment by traversing backwards.
     let startIdx = i;
     while (
-      segs[(startIdx - 1 + segs.length) % segs.length].segmentLabel === currentLabel
+      segs[(startIdx - 1 + segs.length) % segs.length].segmentLabel ===
+      currentLabel
     ) {
       startIdx = (startIdx - 1 + segs.length) % segs.length;
       if (startIdx === i) {
@@ -536,7 +539,7 @@ function assignPaths(segs) {
     paths[currentLabel] = pathSegs;
   }
 
-  return {segments: segs, paths: paths};
+  return { segments: segs, paths: paths };
 }
 
 function sanityCheckPoint(p, grid, toolObj) {
@@ -642,10 +645,11 @@ export async function generateFourAxis(params) {
     );
 
     // convert from points along the each contour into segments
-    let resampledSegments = resampledContours.map((poly) => 
-      poly.points.map((p, i, pts) => 
-        new Segment(p, pts[(i + 1 + pts.length) % pts.length])
-      ));
+    let resampledSegments = resampledContours.map((poly) =>
+      poly.points.map(
+        (p, i, pts) => new Segment(p, pts[(i + 1 + pts.length) % pts.length])
+      )
+    );
 
     // assign point segment candidate labels
     resampledSegments.forEach((seg) => assignMDSLabels(seg));
@@ -678,13 +682,13 @@ export async function generateFourAxis(params) {
         name: `${path.name}-start`,
         path: path,
         start: true,
-        point: path.start,
+        segment: path.start,
       },
       {
         name: `${path.name}-end`,
         path: path,
         start: false,
-        point: path.end,
+        segment: path.end,
       },
     ]);
     const toolpathNodes = toolpathPairs.flat();
@@ -693,7 +697,7 @@ export async function generateFourAxis(params) {
       name: "retract",
       path: null,
       start: null,
-      point: null,
+      segment: null,
     });
 
     toolpathNodes.forEach((node) => {
@@ -706,8 +710,8 @@ export async function generateFourAxis(params) {
       if (!n1 || !n2) {
         return null;
       }
-      let p1 = n1.point;
-      let p2 = n2.point;
+      let p1 = n1.segment.end;
+      let p2 = n2.segment.start;
 
       let displacement = newPoint(p2.x - p1.x, p2.y - p1.y);
       let distance = displacement.magnitude();
@@ -779,34 +783,62 @@ export async function generateFourAxis(params) {
           // traversing the path the first time is 0-weight because it's
           // something we have to do, but the "re-traversal cost" is the length
           // of the path.
-          const pathLength = n1.path.points.map((pt, i, pts) => {
-            if (i == 0) {
-              return 0;
-            }
-            return base.util.dist2D(pt, pts[i-1]);
-          }).reduce((a, b) => a+b, 0);
+          const pathLength = n1.path.points
+            .map((pt, i, pts) => {
+              if (i == 0) {
+                return 0;
+              }
+              return base.util.dist2D(pt, pts[i - 1]);
+            })
+            .reduce((a, b) => a + b, 0);
 
           if (n1.start) {
-            toolpathGraph.addEdge(n1.name, n2.name, 0, { path: pathBetween }, pathLength);
-            toolpathGraph.addEdge(n2.name, n1.name, 0, {
-              path: pathBetweenRev,
-            }, pathLength);
+            toolpathGraph.addEdge(
+              n1.name,
+              n2.name,
+              0,
+              { path: pathBetween },
+              pathLength
+            );
+            toolpathGraph.addEdge(
+              n2.name,
+              n1.name,
+              0,
+              {
+                path: pathBetweenRev,
+              },
+              pathLength
+            );
           } else {
-            toolpathGraph.addEdge(n1.name, n2.name, 0, {
-              path: pathBetweenRev,
-            }, pathLength);
-            toolpathGraph.addEdge(n2.name, n1.name, 0, { path: pathBetween }, pathLength);
+            toolpathGraph.addEdge(
+              n1.name,
+              n2.name,
+              0,
+              {
+                path: pathBetweenRev,
+              },
+              pathLength
+            );
+            toolpathGraph.addEdge(
+              n2.name,
+              n1.name,
+              0,
+              { path: pathBetween },
+              pathLength
+            );
           }
         } else {
           // check if there's a safe machinable path between n1 and n2
           const forwardPath = findConnectingPath(n1, n2);
           if (forwardPath) {
-            const forwardPathLength = n1.path.points.map((pt, i, pts) => {
-              if (i == 0) {
-                return 0;
-              }
-              return base.util.dist2D(pt, pts[i-1]);
-            }).reduce((a, b) => a+b, 0);
+            const forwardPathLength = n1.path.points
+              .map((pt, i, pts) => {
+                if (i == 0) {
+                  return 0;
+                }
+                return base.util.dist2D(pt, pts[i - 1]);
+              })
+              .reduce((a, b) => a + b, 0);
             toolpathGraph.addEdge(
               n1.name,
               n2.name,
@@ -820,12 +852,14 @@ export async function generateFourAxis(params) {
 
           const reversePath = findConnectingPath(n2, n1);
           if (reversePath) {
-            const reversePathLength = n1.path.points.map((pt, i, pts) => {
-              if (i == 0) {
-                return 0;
-              }
-              return base.util.dist2D(pt, pts[i-1]);
-            }).reduce((a, b) => a+b, 0);
+            const reversePathLength = n1.path.points
+              .map((pt, i, pts) => {
+                if (i == 0) {
+                  return 0;
+                }
+                return base.util.dist2D(pt, pts[i - 1]);
+              })
+              .reduce((a, b) => a + b, 0);
             toolpathGraph.addEdge(
               n2.name,
               n1.name,
@@ -856,18 +890,16 @@ export async function generateFourAxis(params) {
       })
       .flat();
 
-
     // compute the actual machining angles along the toolpath. start by choosing
-    // the middle of each point's MDS, then do laplacian smoothing until the
+    // the middle of each segment's MDS, then do laplacian smoothing until the
     // total angle variance converges within 1 degree.
-    toolpath.forEach((p) => {
-      if (!p) {
-        // this is a retract point
+    toolpath.forEach((seg) => {
+      if (!seg) {
+        // this is a retract
         return;
       }
-      const mds = p._fouraxis.chosenMDS;
-      p._fouraxis.chosenAngle =
-        (mds.start + sectorSize(mds.start, mds.stop) / 2) % 360;
+      const mds = seg.chosenMDS;
+      seg.chosenAngle = (mds.start + sectorSize(mds.start, mds.stop) / 2) % 360;
     });
 
     const angleInMDS = (mds, a) => {
@@ -878,19 +910,21 @@ export async function generateFourAxis(params) {
       }
     };
 
-    // compute whether we should move to each point with a clockwise or
+    // compute whether each segment should use a clockwise or
     // counterclockwise rotation of the A axis. this is needed for interpolation
-    toolpath.forEach((p, i, tp) => {
-      if (!p || i == 0) {
+    toolpath.forEach((seg, i, tp) => {
+      if (!seg || i == 0) {
         return;
       }
-      let prevP = tp[i - 1];
-      if (!prevP) {
+      let prevS = tp[i - 1];
+      if (!prevS) {
         return;
       }
+      let prevP = prevS.end;
+      let p = seg.start;
 
-      let thisA = p._fouraxis.chosenAngle;
-      let prevA = prevP._fouraxis.chosenAngle;
+      let thisA = seg.chosenAngle;
+      let prevA = prevS.chosenAngle;
 
       const ccw_arc_len = sectorSize(prevA, thisA);
       const is_ccw_short = ccw_arc_len <= 180;
@@ -898,8 +932,8 @@ export async function generateFourAxis(params) {
 
       // Check if the midpoint of the direct CCW arc is valid for both points
       const ccw_path_is_valid =
-        angleInMDS(p._fouraxis.chosenMDS, bisector) &&
-        angleInMDS(prevP._fouraxis.chosenMDS, bisector);
+        angleInMDS(seg.chosenMDS, bisector) &&
+        angleInMDS(prevS.chosenMDS, bisector);
 
       if (ccw_path_is_valid) {
         // The direct CCW path is clear, so choose the shorter of the two rotational paths.
@@ -963,7 +997,7 @@ export async function generateFourAxis(params) {
       });
     } while (angleDelta > 1);
     */
-    sanityCheckToolpath(toolpath, grid, toolObj);
+    //sanityCheckToolpath(toolpath, grid, toolObj);
 
     // iterate over the toolpath and approximate the actual distance travelled
     // by the tool between the given points (taking into account the rotation).
