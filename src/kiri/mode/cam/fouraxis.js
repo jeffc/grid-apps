@@ -8,6 +8,8 @@
 //  - Better toolpath-to-toolpath pathfinding
 //  - CAM generation improvements
 //  - General cleanup and removal of debugging
+//
+"use strict";
 
 import { base } from "../../../geo/base.js";
 import { newPoint } from "../../../geo/point.js";
@@ -605,7 +607,7 @@ export async function generateFourAxis(params) {
     let resampledContours = contours
       .map((poly) => {
         let p = poly.clone(true, [], ["_fouraxis"]);
-        p.points = resampleContour(p.points, 0.5);
+        p.points = resampleContour(p.points, /*0.5*/ 100);
         return p;
       })
       .filter((poly) => poly.points.length > 2);
@@ -664,7 +666,7 @@ export async function generateFourAxis(params) {
         Object.entries(seg.paths).map(([pathidx, path]) => {
           return {
             name: `c${segi}-p${pathidx}`,
-            points: path,
+            segments: path,
             start: path[0],
             end: path[path.length - 1],
           };
@@ -738,15 +740,13 @@ export async function generateFourAxis(params) {
 
       // now force the MDRs of our start and end points to only contain the
       // chosen MDS for those points
-      samplePoints[0]._fouraxis.machinability.MDR = [p1._fouraxis.chosenMDS];
-      samplePoints.last()._fouraxis.machinability.MDR = [
-        p2._fouraxis.chosenMDS,
-      ];
+      samplePoints[0]._fouraxis.machinability.MDR = [n1.segment.chosenMDS];
+      samplePoints.last()._fouraxis.machinability.MDR = [n2.segment.chosenMDS];
 
       // now do a traversal along the path. We can't re-use our existing
       // functions because we're looking to find one specific continuous path,
       // if it exists.
-      let currentMDS = p1._fouraxis.chosenMDS;
+      let currentMDS = n1.segment.chosenMDS;
       for (let i = 1; i < samplePoints.length; i++) {
         const p = samplePoints[i];
         const chosenMDS = p._fouraxis.machinability.MDR.filter((mds) => {
