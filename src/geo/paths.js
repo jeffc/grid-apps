@@ -6,7 +6,7 @@ import { newPoint } from './point.js';
 /**
  * Emit each element in array based on next closest endpoint
  * Uses greedy nearest-neighbor algorithm to minimize travel distance
- * Arrays contain elements with { first, last } points and may be open paths
+ * Arrays contain elements with { first, last } Point properties
  * Elements are marked with delete flag to avoid reprocessing
  * @param {Array} array - Array of elements with { first, last } Point properties
  * @param {Point} startPoint - Starting point for path ordering
@@ -14,31 +14,160 @@ import { newPoint } from './point.js';
  * @returns {Point} Final endpoint after processing all elements
  */
 export function tip2tipEmit(array, startPoint, emitter) {
-    let mindist, dist, found, count = 0;
+    if (array.length < 32) {
+        let mindist, dist, found, count = 0;
+        for (;;) {
+            found = null;
+            mindist = Infinity;
+            for (let i=0; i<array.length; i++) {
+                let el = array[i];
+                if (el.delete) continue;
+                dist = startPoint.distToSq2D(el.first);
+                if (dist < mindist) {
+                    found = { el: el, first: el.first, last: el.last };
+                    mindist = dist;
+                }
+                dist = startPoint.distToSq2D(el.last);
+                if (dist < mindist) {
+                    found = { el: el, first: el.last, last: el.first };
+                    mindist = dist;
+                }
+            }
+            if (found) {
+                found.el.delete = true;
+                startPoint = found.last;
+                emitter(found.el, found.first, ++count);
+            } else {
+                break;
+            }
+        }
+        return startPoint;
+    }
+
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    let items = [];
+    
+    // 1. Build Index and calculate bounds
+    for (let i = 0; i < array.length; i++) {
+        let el = array[i];
+        if (el.delete) continue;
+        
+        let p1 = el.first;
+        let p2 = el.last;
+        
+        if (p1.x < minx) minx = p1.x;
+        if (p1.x > maxx) maxx = p1.x;
+        if (p1.y < miny) miny = p1.y;
+        if (p1.y > maxy) maxy = p1.y;
+        
+        if (p2.x < minx) minx = p2.x;
+        if (p2.x > maxx) maxx = p2.x;
+        if (p2.y < miny) miny = p2.y;
+        if (p2.y > maxy) maxy = p2.y;
+
+        items.push({ el, point: p1, other: p2 });
+        items.push({ el, point: p2, other: p1 });
+    }
+    
+    let count = items.length;
+    if (count === 0) return startPoint;
+
+    let width = maxx - minx;
+    let height = maxy - miny;
+    if (width === 0) width = 1;
+    if (height === 0) height = 1;
+    
+    // Grid sizing heuristic: roughly one item per cell
+    let gridSize = Math.ceil(Math.sqrt(count));
+    let cellSize = Math.max(width, height) / gridSize;
+    if (cellSize === 0) cellSize = 1;
+
+    let gridWidth = Math.ceil(width / cellSize) + 1;
+    let gridHeight = Math.ceil(height / cellSize) + 1;
+    let grid = new Array(gridWidth * gridHeight);
+    
+    for (let i=0; i<items.length; i++) {
+        let item = items[i];
+        let cx = ((item.point.x - minx) / cellSize) | 0;
+        let cy = ((item.point.y - miny) / cellSize) | 0;
+        let idx = cy * gridWidth + cx;
+        if (!grid[idx]) grid[idx] = [item];
+        else grid[idx].push(item);
+    }
+    
+    let emitCount = 0;
+    
+    // 2. Query Loop
     for (;;) {
-        found = null;
-        mindist = Infinity;
-        array.forEach(function (el) {
-            if (el.delete) return;
-            dist = startPoint.distTo2D(el.first);
-            if (dist < mindist) {
-                found = { el: el, first: el.first, last: el.last };
-                mindist = dist;
+        let foundItem = null;
+        let mindistSq = Infinity;
+        
+        let cx = ((startPoint.x - minx) / cellSize) | 0;
+        let cy = ((startPoint.y - miny) / cellSize) | 0;
+        
+        // Spiral search max radius
+        let maxRad = Math.max(gridWidth, gridHeight) + 1;
+        
+        for (let r = 0; r < maxRad; r++) {
+            let minX = cx - r, maxX = cx + r;
+            let minY = cy - r, maxY = cy + r;
+
+            // Check cells in ring r
+            for (let x = minX; x <= maxX; x++) {
+                if (x < 0 || x >= gridWidth) continue;
+                for (let y = minY; y <= maxY; y++) {
+                    if (y < 0 || y >= gridHeight) continue;
+                    // only perimeter cells if r > 0
+                    if (r > 0 && x > minX && x < maxX && y > minY && y < maxY) {
+                        continue;
+                    }
+                    
+                    let idx = y * gridWidth + x;
+                    let bucket = grid[idx];
+                    if (!bucket) continue;
+                    
+                    for (let i=0; i<bucket.length; i++) {
+                        let item = bucket[i];
+                        if (item.el.delete) continue;
+                        
+                        let d2 = startPoint.distToSq2D(item.point);
+                        if (d2 < mindistSq) {
+                            mindistSq = d2;
+                            foundItem = item;
+                        }
+                    }
+                }
             }
-            dist = startPoint.distTo2D(el.last);
-            if (dist < mindist) {
-                found = { el: el, first: el.last, last: el.first };
-                mindist = dist;
+            
+            if (foundItem) {
+                let boxMinX = minx + (cx - r) * cellSize;
+                let boxMaxX = minx + (cx + r + 1) * cellSize;
+                let boxMinY = miny + (cy - r) * cellSize;
+                let boxMaxY = miny + (cy + r + 1) * cellSize;
+                
+                let dx = 0;
+                if (startPoint.x < boxMinX) dx = boxMinX - startPoint.x;
+                else if (startPoint.x > boxMaxX) dx = startPoint.x - boxMaxX;
+                
+                let dy = 0;
+                if (startPoint.y < boxMinY) dy = boxMinY - startPoint.y;
+                else if (startPoint.y > boxMaxY) dy = startPoint.y - boxMaxY;
+                
+                if (dx * dx + dy * dy >= mindistSq) {
+                    break;
+                }
             }
-        });
-        if (found) {
-            found.el.delete = true;
-            startPoint = found.last;
-            emitter(found.el, found.first, ++count);
+        }
+        
+        if (foundItem) {
+            foundItem.el.delete = true;
+            startPoint = foundItem.other;
+            emitter(foundItem.el, foundItem.point, ++emitCount);
         } else {
             break;
         }
     }
+    
     return startPoint;
 }
 

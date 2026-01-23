@@ -320,7 +320,7 @@ export function createPopOps() {
         axis: 'X'
     }).inputs = {
         tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
-        axis: UC.newSelect(LANG.cd_axis, {}, "xyaxis"),
+        axis: UC.newSelect(LANG.cd_axis, {}, [{name:"X"}, {name:"Y"}, {name:"Concentric"}]),
         sep: UC.newBlank({ class: "pop-sep" }),
         spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),
         rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),

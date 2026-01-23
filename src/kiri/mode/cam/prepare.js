@@ -27,6 +27,7 @@ export async function cam_prepare(widgets, settings, update) {
         .filter(w => w?.camops.length)
         ;
     const count = active.length;
+    console.log(`cam_prepare: active widgets=${count}`);
     const weight = 1 / count;
     const print = self.kiri_worker.current.print = newPrint(settings, active);
     const { origin } = settings;
@@ -46,6 +47,7 @@ export async function cam_prepare(widgets, settings, update) {
     let index = 0;
     let startPoint;
     for (let widget of active) {
+        console.log(`cam_prepare: preparing widget ${index}`);
         startPoint = await prepare_one(widget, settings, print, startPoint, (progress, msg) => {
             update((index * weight + progress * weight) * 0.75, msg || "prepare");
         });
@@ -53,9 +55,11 @@ export async function cam_prepare(widgets, settings, update) {
     }
 
     // prune empty levels
+    console.log(`cam_prepare: pruning levels`);
     const output = print.output.filter(level => Array.isArray(level));
 
     // compute path display
+    console.log(`cam_prepare: rendering paths`);
     return render.path(
         output,
         (progress, layer) => {
@@ -711,7 +715,12 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             points = poly.points;
         }
 
-        setNextIsMove();
+        // if the next point is close to the last point, don't force a move
+        if (printPoint.distTo2D(points[0]) < toolDiam / 2) {
+            nextIsMove = false;
+        } else {
+            setNextIsMove();
+        }
 
         // we skip ease-down logic in contouring mode or for open polys (traces .. maybe later)
         if (!contouring && camEaseDown && poly.isClosed()) {
@@ -890,6 +899,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         contouring = false;
         lasering = false;
         let cop = currentOp = op.op;
+        console.log(`prepare_one: op=${cop.type} weight=${op.weight()}`);
         isIndex = cop.type === 'index';
         isLathe = cop.type === 'lathe';
         let weight = op.weight();
@@ -912,6 +922,8 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             }
         }
     }
+
+    console.log(`prepare_one: completed ops`);
 
     // last layer/move is to zSafe
     // re-inject that point into the last layer generated

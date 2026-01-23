@@ -42,7 +42,7 @@ function createFilter(op, origin, axis) {
                                     );
                                 }
                             }
-                        } else {
+                        } else if (axis === 'y') {
                             let sx = slice.z - origin.x;
                             if (sx >= x[0] && sx <= x[1]) {
                                 ok = true;
@@ -53,6 +53,8 @@ function createFilter(op, origin, axis) {
                                     );
                                 }
                             }
+                        } else {
+                            ok = true;
                         }
                         if (ok) {
                             slice.camLines = slice.camLines.map(p => {
@@ -134,6 +136,8 @@ class OpContour extends CamOp {
 
         let printPoint = newPoint(bounds.min.x, bounds.min.y, zmax);
 
+        console.log(`prepare contour: sliceOut=${sliceOut.length}`);
+
         for (let slice of sliceOut) {
             // ignore debug slices
             if (!slice.camLines) {
@@ -141,20 +145,24 @@ class OpContour extends CamOp {
             }
             let polys = [], poly;
             slice.camLines.forEach((poly) => {
-                poly = poly.clone(true).annotate({ slice: slice.index + 1 });
+                poly.annotate({ slice: slice.index + 1 });
                 polys.push({ first: poly.first(), last: poly.last(), poly: poly });
             });
             depthData.appendAll(polys);
         }
 
-        tip2tipEmit(depthData, printPoint, (el, point) => {
+        console.log(`prepare contour: depthData=${depthData.length}`);
+
+        tip2tipEmit(depthData, printPoint, (el, point, count) => {
             let poly = el.poly;
             if (poly.last() === point) {
                 poly.reverse();
             }
             polyEmit(poly);
             newLayer();
+            if (count % 1000 === 0) console.log(`tip2tipEmit: count=${count}`);
         });
+      console.log(`Finished tip2tipEmit`);
     }
 }
 

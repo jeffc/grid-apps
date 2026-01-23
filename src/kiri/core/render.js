@@ -120,7 +120,10 @@ async function path(levels, update, opts = {}) {
         }
     }
 
+    console.log(`render.path: levels=${levels.length}`);
+
     levels.forEach((level, index) => {
+        if (index % 100 === 0) console.log(`render.path: level=${index}`);
         const prints = {};
         const moves = [];
         const heads = [];

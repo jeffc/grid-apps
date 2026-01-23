@@ -25,6 +25,7 @@ export class Topo {
             axis = contour.axis.toLowerCase(),
             contourX = axis === "x",
             contourY = axis === "y",
+            contourConcentric = axis === "concentric",
             bounds = widget.getBoundingBox().clone(),
             tolerance = contour.tolerance,
             flatness = contour.flatness || (tolerance / 100),
@@ -327,7 +328,8 @@ export class Topo {
             maxangle,
             flatness,
             bridge,
-            contourX
+            contourX,
+            contourConcentric
         });
 
         if (topo.raster) {
@@ -368,6 +370,7 @@ export class Topo {
             toolStep,
             contourX,
             contourY,
+            contourConcentric,
             density,
             clipTo,
             clipTab,
@@ -500,7 +503,7 @@ export class Topo {
         const concurrent = self.kiri_worker.minions.running;
 
         const { minX, maxX, minY, maxY, boundsX, boundsY, stepsX, stepsY } = params;
-        const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY } = params;
+        const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY, contourConcentric } = params;
         const { clipTo, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
 
         let stepsTaken = 0,
@@ -512,6 +515,14 @@ export class Topo {
 
         if (contourY) {
             stepsTotal += ((maxX - minX + partOff * 2) / toolStep) | 0;
+        }
+
+        if (contourConcentric) {
+            const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+            const dx = Math.max(Math.abs(center.x - minX), Math.abs(center.x - maxX));
+            const dy = Math.max(Math.abs(center.y - minY), Math.abs(center.y - maxY));
+            const maxR = Math.sqrt(dx*dx + dy*dy) + partOff;
+            stepsTotal += (maxR / toolStep) | 0;
         }
 
         if (stepsTotal === 0) {
@@ -603,6 +614,30 @@ export class Topo {
             }
         }
 
+        if (contourConcentric) {
+            onupdate(0, stepsTotal, "contour concentric");
+            const center = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+            const dx = Math.max(Math.abs(center.x - minX), Math.abs(center.x - maxX));
+            const dy = Math.max(Math.abs(center.y - minY), Math.abs(center.y - maxY));
+            const maxR = Math.sqrt(dx*dx + dy*dy) + partOff;
+
+            for (let r = 0; r <= maxR; r += toolStep) {
+                inc();
+                trace.concentric({
+                    center,
+                    radius: r,
+                }, segments => {
+                    if (segments.length > 0) {
+                        let slice = newSlice(0);
+                        slice.camLines = segments;
+                        slicesX.push(slice);
+                    }
+                    onupdate(++stepsTaken, stepsTotal, "contour concentric");
+                    dec();
+                });
+            }
+        }
+
         if (!concurrent) resolver();
 
         await promise;
@@ -675,7 +710,7 @@ export class Trace {
 
     constructor(probe, params) {
 
-        const { curvesOnly, maxangle, flatness, bridge, contourX, leave } = params;
+        const { curvesOnly, maxangle, flatness, bridge, contourX, leave, contourConcentric } = params;
 
         this.params = params;
         this.probe = probe;
@@ -729,12 +764,12 @@ export class Trace {
             const lastP = lastPP;
 
             if (lastP) {
-                const dl = (x - lastP.x) || (y - lastP.y);
+                const dl = Math.hypot(x - lastP.x, y - lastP.y);
                 const dz = z - lastP.z;
                 const slope = Math.atan2(dz, dl);
                 if (curvesOnly && Math.abs(dz) < flatness) {
                     end_poly(newP);
-                } else if (lastSlope !== undefined && Math.abs(lastSlope - slope) < flatness) {
+                } else if (!contourConcentric && lastSlope !== undefined && Math.abs(lastSlope - slope) < flatness) {
                     latent = newP;
                 } else {
                     if (latent) {
@@ -742,7 +777,7 @@ export class Trace {
                         latent = undefined;
                     }
                     if (curvesOnly) {
-                        const dv = contourX ? Math.abs(lastP.x - x) : Math.abs(lastP.y - y);
+                        const dv = contourConcentric ? dl : (contourX ? Math.abs(lastP.x - x) : Math.abs(lastP.y - y));
                         const angle = Math.atan2(Math.abs(dz), dv) * RAD2DEG;
                         if (angle > maxangle) {
                             end_poly();
@@ -911,6 +946,67 @@ export class Trace {
         end_poly();
         then(this.slice);
     }
+
+    concentric(params, then) {
+        this.concentric_sync(params, then);
+    }
+
+    concentric_sync(params, then) {
+        const { push_point, end_poly, newtrace, newslice, inClip } = this.object;
+        const { clipTab, tabHeight, clipTo, box, resolution, density, leave } = this.cross;
+        const { toolAtXY } = this.probe;
+
+        let { center, radius } = params;
+        
+        newslice();
+        newtrace();
+        
+        if (radius === 0) {
+             let z = toolAtXY(center.x, center.y);
+             push_point(center.x, center.y, z + leave);
+             end_poly();
+             then(this.slice);
+             return;
+        }
+        
+        let circumference = 2 * Math.PI * radius;
+        let steps = Math.ceil(circumference / (resolution * density));
+        let angleStep = (2 * Math.PI) / steps;
+        
+        const checkr = newPoint(0, 0);
+
+        console.log(`concentric steps=${steps} resolution=${resolution} density=${density}`);
+
+        for (let i = 0; i <= steps; i++) {
+            let theta = i * angleStep;
+            let x = center.x + radius * Math.cos(theta);
+            let y = center.y + radius * Math.sin(theta);
+            
+            if (x < box.min.x || x > box.max.x || y < box.min.y || y > box.max.y) {
+                end_poly();
+                continue;
+            }
+            
+            checkr.x = x;
+            checkr.y = y;
+
+            if (clipTo && !inClip(clipTo, undefined, checkr)) {
+                end_poly();
+                continue;
+            }
+            
+            let z = toolAtXY(x, y);
+
+            if (clipTab && clipTab.length && z < tabHeight && inClip(clipTab, z, checkr)) {
+                z = this.tabZ;
+            }
+            
+            push_point(x, y, z + leave);
+        }
+        end_poly();
+        then(this.slice);
+    }
+
 }
 
 export function raster_slice(inputs) {

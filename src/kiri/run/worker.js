@@ -492,7 +492,8 @@ const dispatch = {
 
         driver.prepare(widgets, settings, (progress, message, layer) => {
             const state = { zeros: [] };
-            const emit = { progress, message, layer: (layer ? layer.encode(state) : undefined) };
+            const encLayer = layer ? layer.encode(state) : undefined;
+            const emit = { progress, message, layer: encLayer };
             send.data(emit, state.zeros);
         }).then(() => {
             const unitScale = settings.controller.units === 'in' ? (1 / 25.4) : 1;

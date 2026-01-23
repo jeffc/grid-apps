@@ -361,6 +361,7 @@ export function cam_export(print, online) {
         // }
         append(nl.join(''));
         points++;
+        if (points % 1000 === 0) console.log(`cam_export: points=${points}`);
     }
 
     // look for SCALE header directive
@@ -464,7 +465,10 @@ export function cam_export(print, online) {
     filterEmit(gcodePre, consts);
 
     // emit all points in layer/point order
+    let layerCount = 0;
+    console.log(`cam_export: layers=${print.output.length}`);
     for (let layerout of print.output) {
+        if (++layerCount % 100 === 0) console.log(`cam_export: layer=${layerCount}`);
         const newmode = layerout.mode;
         if (newmode) {
             if (newmode.type === 'laser on') {
