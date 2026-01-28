@@ -158,11 +158,11 @@ export function rotateZAxisSliced(poly) {
   return poly;
 }
 
-// Calculate the normal vectors and "flatness" values at each point around a 2D
+// Calculate the normal vectors at each point around a 2D
 // contour. Assume counterclockwise winding and a closed polygon.
 //
 // returns updated points for chaining
-export function assignNormalsAndFlatness(points) {
+export function assignNormals(points) {
   if (!points || points.length < 2) {
     console.log("Asked to assign normals to zero or one points; aborting");
     return points;
@@ -211,12 +211,6 @@ export function assignNormalsAndFlatness(points) {
     ) {
       pt._INVALID = true;
     }
-    // compute the "flatness" as the absolute value of the dot product of the
-    // incoming and outgoing normal vectors.
-    const dotProduct = (a, b) => a.x * b.x + a.y * b.y;
-    pt._fouraxis.flatness = Math.abs(
-      dotProduct(incomingEdgeNormal, outgoingEdgeNormal)
-    );
   }
 
   return points.filter((p) => p._INVALID === false);

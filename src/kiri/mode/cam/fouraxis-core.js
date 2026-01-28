@@ -8,6 +8,7 @@ import {
   intersectMDRs,
   sectorsOverlap,
   sectorSize,
+  Segment,
 } from "./fouraxis-util.js";
 
 // Compute whether a point is machinable given the grid and tool information
@@ -121,100 +122,92 @@ export function assignMDSLabels(segs) {
   // segment labels are unique per contour
   let nextLabel = 0;
 
+  // initialize segmentLabels array for each MDS
+  for (const seg of segs) {
+    for (const mds of seg.MDR) {
+      mds.segmentLabels = [];
+      mds.segmentLabel = null; // also clear old property just in case
+    }
+  }
+
   for (let si = 0; si < segs.length; si++) {
     let seg = segs[si];
     for (let mdsi = 0; mdsi < seg.MDR.length; mdsi++) {
       let mds = seg.MDR[mdsi];
-      if (mds.segmentLabel != null) {
-        continue;
-      }
 
-      // get a fresh label
-      nextLabel++;
-      mds.segmentLabel = nextLabel;
-      let segsInPath = [seg];
+      // For each MDS, we start a new "path search" and assign a new label.
+      // This allows an MDS to be part of multiple potential paths.
+      const currentLabel = nextLabel++;
 
-      // traverse forward and assign the segment label to points which have
-      // overlapping MDSs. If we encounter a point that doesn't overlap, or one
-      // that already has a label (which shouldn't ever happen, unless we loop
-      // back around...) stop
-      // assigning.
-
-      let traverseidx = si;
-      let currentMDR = [mds];
-      while (true) {
-        traverseidx = (traverseidx + 1) % segs.length;
-        let nextSeg = segs[traverseidx];
-        let overlappingMDR = nextSeg.MDR.filter((m) =>
-          currentMDR.some((s) => sectorsOverlap(s, m))
-        );
-        if (overlappingMDR.length == 0) {
-          break;
+      const propagate = (start_si, start_mds) => {
+        let q = [{si: start_si, mds: start_mds}];
+        if (start_mds.segmentLabels.includes(currentLabel)) {
+            return;
         }
+        start_mds.segmentLabels.push(currentLabel);
 
-        if (overlappingMDR.some((m) => m.segmentLabel !== null)) {
-          debugger; // this shouldn't happen
-          break;
+        let head = 0;
+        while(head < q.length) {
+            const { si, mds } = q[head++];
+
+            // check neighbors (forward and backward)
+            for (const offset of [-1, 1]) {
+                const ni = (si + offset + segs.length) % segs.length;
+                const nextSeg = segs[ni];
+                for (const next_mds of nextSeg.MDR) {
+                    if (sectorsOverlap(mds, next_mds)) {
+                        if (!next_mds.segmentLabels.includes(currentLabel)) {
+                            next_mds.segmentLabels.push(currentLabel);
+                            q.push({si: ni, mds: next_mds});
+                        }
+                    }
+                }
+            }
         }
+      };
 
-        overlappingMDR.forEach((m) => {
-          m.segmentLabel = nextLabel;
-        });
-
-        currentMDR = overlappingMDR;
-        segsInPath.push(nextSeg);
-      }
-      traverseidx = si;
-      currentMDR = [mds];
-      // reverse the path so that we can push() the backwards traversal on the
-      // end
-      segsInPath.reverse();
-      while (true) {
-        traverseidx = (traverseidx - 1 + segs.length) % segs.length;
-        let nextSeg = segs[traverseidx];
-        let overlappingMDR = nextSeg.MDR.filter((m) =>
-          currentMDR.some((s) => sectorsOverlap(s, m))
-        );
-        if (overlappingMDR.length == 0) {
-          break;
-        }
-
-        if (overlappingMDR.some((m) => m.segmentLabel !== null)) {
-          debugger; // this shouldn't happen
-          break;
-        }
-
-        overlappingMDR.forEach((m) => {
-          m.segmentLabel = nextLabel;
-        });
-
-        currentMDR = overlappingMDR;
-        segsInPath.push(nextSeg);
-      }
-      // reverse the path again so we get back to a CCW winding order
-      segsInPath.reverse();
+      propagate(si, mds);
     }
   }
   return segs;
 }
 
+// given a set of segments with segmentLabels populated, select one for each segment
+export function selectPaths(segs) {
+    // TODO: implement graph-cut or other algorithm to select the best path
+    // from the candidates in segmentLabels.
+    // For now, use a simple heuristic: for each segment, find the label that
+    // appears most frequently in its MDSs, and assign that.
+    segs.forEach(seg => {
+        const allLabels = seg.MDR.flatMap(mds => mds.segmentLabels);
+        if (allLabels.length > 0) {
+            const counts = allLabels.reduce((acc, label) => {
+                acc[label] = (acc[label] || 0) + 1;
+                return acc;
+            }, {});
+            const bestLabel = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+            seg.segmentLabel = parseInt(bestLabel, 10);
+        } else {
+            seg.segmentLabel = null;
+        }
+
+        // also choose the best MDS for this segment, which will be needed later
+        const chosenMDS = seg.MDR.reduce(
+            (mds1, mds2) =>
+              sectorSize(mds1.start, mds1.stop) > sectorSize(mds2.start, mds2.stop)
+                ? mds1
+                : mds2,
+            { start: 0, stop: 0 }
+          );
+        seg.chosenMDS = chosenMDS;
+    });
+    return segs;
+}
+
 // Assign individual path labels to segments
 export function assignPaths(segs) {
-  segs.forEach((s) => {
-    // TODO - properly implement graph-cut-based assignment
-
-    // choose the path label with the largest MDS
-    const chosenMDS = s.MDR.reduce(
-      (mds1, mds2) =>
-        sectorSize(mds1.start, mds1.stop) > sectorSize(mds2.start, mds2.stop)
-          ? mds1
-          : mds2,
-      { start: 0, stop: 0, segmentLabel: null }
-    );
-    s.segmentLabel = chosenMDS.segmentLabel;
-    s.chosenMDS = chosenMDS;
-  });
-
+  // This function now just groups segments into paths based on the
+  // segmentLabel that was assigned in a previous step (e.g. selectPaths)
   const paths = {};
   const visited = new Array(segs.length).fill(false);
 
@@ -268,89 +261,80 @@ export function assignPaths(segs) {
   return { segments: segs, paths: paths };
 }
 
-export function sanityCheckPoint(p, grid, toolObj) {
-  if (
-    p &&
-    !isMachinable(
-      p,
-      p._fouraxis.vertex_normal,
-      p._fouraxis.chosenAngle,
-      grid,
-      toolObj
-    )
-  ) {
-    console.log("POINT NOT MACHINABLE AT CHOSEN ANGLE");
-    debugger;
-  }
-}
-
-export function sanityCheckToolpath(tp, grid, toolObj) {
-  tp.forEach((p) => {
-    sanityCheckPoint(p, grid, toolObj);
-  });
-}
-
 // find a safe path between two nodes, if one exists
 export const findConnectingPath = (n1, n2, grid, angleStep, toolObj) => {
-  if (!n1 || !n2) {
+  if (!n1 || !n2 || !n1.segment || !n2.segment) {
     return null;
   }
-  let p1 = n1.segment.end;
-  let p2 = n2.segment.start;
 
-  let displacement = newPoint(p2.x - p1.x, p2.y - p1.y);
-  let distance = displacement.magnitude();
-  let direction = displacement.clone().normalize();
+  const s1 = n1.segment;
+  const s2 = n2.segment;
+  const p1 = s1.end;
+  const p2 = s2.start;
 
-  // interpolate at least three points between the two
-  let nPoints = Math.round(Math.max(distance / 0.2, 3));
-  let samplePoints = [];
-  for (let i = 0; i < nPoints; i++) {
-    const newP = newPoint(
+  // if segments are already connected, return an empty path (zero-cost)
+  if (p1.x === p2.x && p1.y === p2.y && p1.z === p2.z) {
+    return [];
+  }
+
+  // find intersection of machinable angles for start and end segments
+  const commonMDS = intersectMDRs(s1.chosenMDS ? [s1.chosenMDS] : s1.MDR, s2.chosenMDS ? [s2.chosenMDS] : s2.MDR);
+
+  if (commonMDS.length === 0) {
+    return null;
+  }
+
+  const displacement = newPoint(p2.x - p1.x, p2.y - p1.y);
+  const distance = displacement.magnitude();
+  const direction = displacement.clone().normalize();
+  const normal = newPoint(-direction.y, direction.x);
+
+  // create a set of points to check for collisions along the path
+  const nPoints = Math.round(Math.max(distance / 0.2, 3));
+  const samplePoints = [];
+  for (let i = 1; i < nPoints - 1; i++) {
+    samplePoints.push(newPoint(
       p1.x + (i * displacement.x) / nPoints,
       p1.y + (i * displacement.y) / nPoints,
       p1.z
-    );
-    newP._fouraxis = {
-      // assign a normal along our path
-      vertex_normal: newPoint(-direction.y, direction.x),
-    };
-    samplePoints.push(newP);
+    ));
   }
-  // assign possible MDRs to our points
-  const candidatePath = newPolygon(samplePoints).setOpen();
-  assignMDRs(candidatePath, grid, angleStep, toolObj);
 
-  // now force the MDRs of our start and end points to only contain the
-  // chosen MDS for those points
-  samplePoints[0]._fouraxis.machinability.MDR = [p1._fouraxis.chosenMDS];
-  samplePoints.last()._fouraxis.machinability.MDR = [p2._fouraxis.chosenMDS];
+  // for each commonly machinable angle range, check if the path is clear
+  for (const mds of commonMDS) {
+    // check a few points within the shared angle range
+    for (let ang = mds.start; ang <= mds.stop; ang += angleStep) {
+      let pathIsClear = true;
+      for (const p of samplePoints) {
+        if (!isMachinable(p, normal, ang, grid, toolObj)) {
+          pathIsClear = false;
+          break;
+        }
+      }
+      // if we found a clear path, create segments and return them
+      if (pathIsClear) {
+        const connectingSegments = [];
+        const allPoints = [p1, ...samplePoints, p2];
 
-  // now do a traversal along the path. We can't re-use our existing
-  // functions because we're looking to find one specific continuous path,
-  // if it exists.
-  let currentMDS = p1._fouraxis.chosenMDS;
-  for (let i = 1; i < samplePoints.length; i++) {
-    const p = samplePoints[i];
-    const chosenMDS = p._fouraxis.machinability.MDR.filter((mds) => {
-      return sectorsOverlap(currentMDS, mds);
-    }).reduce((mds1, mds2) => {
-      if (!mds1) return mds2;
-      if (!mds2) return mds1;
+        // Give all points the machinability info they need for the Segment constructor.
+        allPoints.forEach(p => {
+            if (!p._fouraxis) p._fouraxis = {};
+            if (!p._fouraxis.machinability) p._fouraxis.machinability = {};
+            p._fouraxis.machinability.MDR = [mds];
+        });
 
-      return sectorSize(mds1.start, mds1.stop) >
-        sectorSize(mds2.start, mds2.stop)
-        ? mds1
-        : mds2;
-    }, null);
-
-    // if we got to the point where we can't find a continuous MDS, give up
-    // and say there's no path
-    if (!chosenMDS) {
-      return null;
+        for (let i = 0; i < allPoints.length - 1; i++) {
+            const pa = allPoints[i];
+            const pb = allPoints[i+1];
+            const seg = new Segment(pa, pb); // Now this should work.
+            seg.chosenMDS = mds;
+            seg.chosenAngle = ang;
+            connectingSegments.push(seg);
+        }
+        return connectingSegments;
+      }
     }
-    p._fouraxis.chosenMDS = chosenMDS;
-    currentMDS = chosenMDS;
   }
-  return samplePoints.slice(1, samplePoints.length - 1);
+
+  return null;
 };

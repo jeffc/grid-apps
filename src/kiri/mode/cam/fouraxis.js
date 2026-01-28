@@ -21,9 +21,9 @@ import {
 import {
   assignMDRs,
   assignMDSLabels,
+  selectPaths,
   assignPaths,
   findConnectingPath,
-  sanityCheckToolpath,
 } from "./fouraxis-core.js";
 
 // root function that performs the four-axis toolpath generation
@@ -118,6 +118,9 @@ export async function generateFourAxis(params) {
 
     // assign point segment candidate labels
     resampledSegments.forEach((seg) => assignMDSLabels(seg));
+
+    // from the candidate labels, select a single path for each segment
+    resampledSegments.forEach((seg) => selectPaths(seg));
 
     // group points into paths by segment label
     resampledSegments = resampledSegments.map((seg) => assignPaths(seg));
@@ -234,10 +237,10 @@ export async function generateFourAxis(params) {
             angleStep,
             toolObj
           );
-          if (forwardPath) {
-            const forwardPathLength = n1.path.points
+          if (forwardPath && forwardPath.length > 0) {
+            const forwardPathLength = forwardPath
               .map((pt, i, pts) => {
-                if (i == 0) {
+                if (i === 0) {
                   return 0;
                 }
                 return base.util.dist2D(pt, pts[i - 1]);
@@ -246,7 +249,7 @@ export async function generateFourAxis(params) {
             toolpathGraph.addEdge(
               n1.name,
               n2.name,
-              base.util.dist2D(n1.point, n2.point),
+              forwardPathLength,
               {
                 path: { points: forwardPath },
               },
@@ -261,10 +264,10 @@ export async function generateFourAxis(params) {
             angleStep,
             toolObj
           );
-          if (reversePath) {
-            const reversePathLength = n1.path.points
+          if (reversePath && reversePath.length > 0) {
+            const reversePathLength = reversePath
               .map((pt, i, pts) => {
-                if (i == 0) {
+                if (i === 0) {
                   return 0;
                 }
                 return base.util.dist2D(pt, pts[i - 1]);
@@ -273,7 +276,7 @@ export async function generateFourAxis(params) {
             toolpathGraph.addEdge(
               n2.name,
               n1.name,
-              base.util.dist2D(n2.point, n1.point),
+              reversePathLength,
               {
                 path: { points: reversePath },
               },
@@ -383,7 +386,9 @@ export async function generateFourAxis(params) {
         totalRotations--;
       }
       seg.start._fouraxis.totalRotations = totalRotations;
+      seg.start._fouraxis.chosenAngle = seg.chosenAngle;
       seg.end._fouraxis.totalRotations = totalRotations;
+      seg.end._fouraxis.chosenAngle = seg.chosenAngle;
     });
 
     const finalToolpathPoints = [];
@@ -395,8 +400,6 @@ export async function generateFourAxis(params) {
         finalToolpathPoints.push(null);
       }
     });
-
-    sanityCheckToolpath(finalToolpathPoints, grid, toolObj);
 
     let finalToolpath = finalToolpathPoints.map((p) => {
       if (!p) {
