@@ -473,6 +473,38 @@ export function createPopOps() {
         linear: UC.newBoolean(LANG.ci_line_s, undefined, { title: LANG.ci_line_l }),
     };
 
+    createPopOp('four-axis', {
+        tool: 'camFourAxisTool',
+        spindle: 'camFourAxisSpindle',
+        angle: 'camFourAxisAngle',
+        step: 'camFourAxisOver',
+        down: 'camFourAxisDown',
+        expand: 'camFourAxisExpand',
+        rate: 'camFourAxisSpeed',
+        tolerance: 'camTolerance',
+        filter: 'camContourFilter',
+        leave: 'camContourLeave',
+        offStart: 'camFourAxisOffStart',
+        offEnd: 'camFourAxisOffEnd',
+    }).inputs = {
+        tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),
+        rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        angle: UC.newInput(LANG.cc_sang_s, { title: LANG.cc_sang_l, convert: toFloat, bound: UC.bound(0.01, 180.0) }),
+        step: UC.newInput(LANG.cc_sovr_s, { title: LANG.cc_sovr_l, convert: toFloat, bound: UC.bound(0.01, 100.0) }),
+        sepDn: UC.newBlank({ class: "pop-sep", show: () => env.poppedRec.down > 0 }),
+        down: UC.newInput(LANG.cc_sdwn_s, { title: LANG.cc_sdwn_l, convert: toFloat, units, show: isWebGPU }),
+        expand: UC.newInput(LANG.cl_xpnd_s, { title: LANG.cl_xpnd_l, convert: toFloat, units, show: () => env.poppedRec.down > 0 }),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        offStart: UC.newInput(LANG.ci_laso_s, { title: LANG.ci_laso_l, convert: toFloat}),
+        offEnd: UC.newInput(LANG.ci_laeo_s, { title: LANG.ci_laeo_l, convert: toFloat}),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        tolerance: UC.newInput(LANG.ou_toll_s, { title: LANG.ou_toll_l, convert: toFloat, bound: UC.bound(0, 10.0), units, round: 4 }),
+        leave: UC.newInput(LANG.cf_leav_s, { title: LANG.cf_leav_l, convert: toFloat, bound: UC.bound(0, 100) }),
+    };
+
     createPopOp('trace', {
         mode: 'camTraceType',
         offset: 'camTraceOffset',

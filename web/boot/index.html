@@ -36,6 +36,10 @@
     <script type="module">
         import { version } from '/lib/moto/license.js';
         (async () => {
+            if (!navigator.serviceWorker) {
+                console.error('Service Worker not supported');
+                return;
+            }
             const reg = await navigator.serviceWorker.register('/boot/service.js', { scope: '/' });
             await reg.update();
             await navigator.serviceWorker.ready;

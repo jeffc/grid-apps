@@ -17,6 +17,7 @@ import { Slicer as cam_slicer } from '../mode/cam/work/slicer-cam.js';
 import { Slicer as topo_slicer } from '../mode/cam/work/slicer-topo.js';
 import { Probe, Trace, raster_slice } from '../mode/cam/work/topo3.js';
 import { Topo as Topo4, rotatePoints } from '../mode/cam/work/topo4.js';
+import { Topo as FourAxis } from '../mode/cam/work/four-axis.js';
 import { wasm_ctrl } from '../../geo/wasm.js';
 
 const clib = self.ClipperLib;
@@ -336,6 +337,23 @@ const funcs = self.minion = {
 
         const topo4 = Object.assign(new Topo4(), cache.lathe);
         const heights = topo4.lathePath(stmp, tool);
+        reply({ seq, heights });
+    },
+
+    "topo4_four-axis"(data, seq) {
+        const { angle } = data;
+        const { slices, tool } = cache['four-axis'];
+
+        const axis = new THREE.Vector3(1, 0, 0);
+        const mrot = new THREE.Matrix4().makeRotationAxis(axis, -angle);
+        const stmp = slices.map(s => {
+            const lines = s.lines.slice();
+            rotatePoints(lines, mrot);
+            return { z: s.z, lines }
+        });
+
+        const fourAxis = Object.assign(new FourAxis(), cache['four-axis']);
+        const heights = fourAxis.fourAxisPath(stmp, tool);
         reply({ seq, heights });
     },
 

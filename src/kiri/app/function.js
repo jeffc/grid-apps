@@ -258,7 +258,9 @@ function prepareSlices(callback, scale = 1, offset = 0) {
                 widget.stats.load_time = widget.xfer.start - reply.send_end;
             }
             if (reply.slice) {
-                widget.slices.push(codec.decode(reply.slice, {mesh:widget.mesh}));
+                const decoded = codec.decode(reply.slice, {mesh:widget.mesh});
+                console.log(`prepareSlices | decoded slice z=${decoded.z} layers=${Object.keys(decoded.layers?.layers || {})}`);
+                widget.slices.push(decoded);
             }
             if (reply.done) {
                 ondone(true);

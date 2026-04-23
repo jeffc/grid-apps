@@ -10,6 +10,7 @@ import { OpIndex } from '../work/op-index.js';
 import { OpLaserOff } from '../work/op-laser-off.js';
 import { OpLaserOn } from '../work/op-laser-on.js';
 import { OpLathe } from '../work/op-lathe.js';
+import { OpFourAxis } from '../work/op-four-axis.js';
 import { OpLevel } from '../work/op-level.js';
 import { OpLoop } from '../work/op-loop.js';
 import { OpOutline } from '../work/op-outline.js';
@@ -31,6 +32,7 @@ export const ops = {
     "laser off": OpLaserOff,
     "laser on":  OpLaserOn,
     "lathe":     OpLathe,
+    "four-axis": OpFourAxis,
     "level":     OpLevel,
     "loop":      OpLoop,
     "outline":   OpOutline,

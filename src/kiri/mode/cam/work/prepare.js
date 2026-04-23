@@ -122,6 +122,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         drillDwell = 0,
         feedRate,
         isLathe,
+        isFourAxis,
         isIndex,
         layerOut = [],
         lasering = false,
@@ -578,8 +579,8 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
                 newLayer();
             }
         } else
-        // when moving in lathe mode ...
-        if (isMove && isLathe) {
+        // when moving in lathe or four-axis mode ...
+        if (isMove && (isLathe || isFourAxis)) {
             if (point.z > printPoint.z) {
                 layerPush(printPoint.clone().setZ(point.z), 0, 0, tool);
                 newLayer();
@@ -1043,6 +1044,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         let cop = currentOp = op.op;
         isIndex = cop.type === 'index';
         isLathe = cop.type === 'lathe';
+        isFourAxis = cop.type === 'four-axis';
         let weight = op.weight();
         newLayer(cop);
         setTolerance(0);

@@ -141,6 +141,7 @@ function updateAxisMode(refresh) {
     const showNonIndexed = env.isIndexed ? 'none' : '';
     $('cam-index').style.display = showIndexed;
     $('cam-lathe').style.display = showIndexed;
+    $('cam-four-axis').style.display = showIndexed;
     $('cam-loop').style.display = showIndexed;
     $('cam-flip').style.display = showNonIndexed;
     $('cam-reg').style.display = showNonIndexed;
@@ -228,6 +229,12 @@ const opAddContour = (axis) => {
 
 const opAddLathe = (axis) => {
     let rec = env.popOp.lathe.new();
+    rec.axis = axis.toUpperCase();
+    opAdd(rec);
+};
+
+const opAddFourAxis = (axis) => {
+    let rec = env.popOp['four-axis'].new();
     rec.axis = axis.toUpperCase();
     opAdd(rec);
 };
@@ -834,6 +841,14 @@ export function init() {
                     }
                 }
                 return opAddLathe(laxis);
+            case "four-axis":
+                let faxis = "X";
+                for (let op of env.current.process.ops) {
+                    if (op.type === "four-axis" && op.axis === "X") {
+                        faxis = "Y";
+                    }
+                }
+                return opAddFourAxis(faxis);
             case "register": return opAddRegister('X', 2);
             case "drill": return opAddDrill();
             case "trace": return opAddTrace();
