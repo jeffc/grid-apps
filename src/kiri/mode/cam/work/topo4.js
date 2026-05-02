@@ -304,13 +304,19 @@ export class Topo {
                 .slice(resolution)
                 .map(rec => {
                     const slice = newSlice(rec.z);
+                    slice.index = rec.index;
+                    const polys = sliceConnect(rec.lines);
                     for (let line of rec.lines) {
                         const { p1, p2 } = line;
                         if (!p1.swapped) { p1.swapXZ(); p1.swapped = true }
                         if (!p2.swapped) { p2.swapXZ(); p2.swapped = true }
                     }
-                    slice.index = rec.index;
-                    slice.addTops(sliceConnect(rec.lines));
+                    for (let poly of polys) {
+                        for (let p of poly.points) {
+                            if (!p.swapped) { p.swapXZ(); p.swapped = true }
+                        }
+                    }
+                    slice.addTops(polys);
 
                     const points = codec.encodePointArray(rec.lines.map(l => [l.p1, l.p2]).flat());
                     const shared = new Float32Array(new SharedArrayBuffer(points.length * 4));

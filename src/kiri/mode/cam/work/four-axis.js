@@ -62,7 +62,7 @@ export class Topo {
 
         this.zBottom = state.zBottom ?? 0;
         this.resolution = resolution;
-        this.vertices = widget.getGeoVertices({ unroll: true, translate: true });
+        this.vertices = widget.getGeoVertices({ unroll: true, translate: true }).slice();
         this.tabverts = widget.getTabVertices();
         this.tool = tool.generateProfile(resolution).profile;
         this.maxo = tool.profileDim.maxo * resolution;
@@ -199,7 +199,12 @@ export class Topo {
         }
 
         // re-create shared vertex array for workers
-        this.vertices = [].appendAll(vertices).appendAll(tabverts).toFloat32().toShared();
+        const v2 = new Float32Array(vertices.length + tabverts.length);
+        v2.set(vertices);
+        if (tabverts.length > 0) {
+            v2.set(tabverts, vertices.length);
+        }
+        this.vertices = v2.toShared();
 
         // rp.rasterizeMesh(vertices, resolution).then(rpo => console.log({ rpo }));
         if (this.gpu) {
@@ -386,6 +391,11 @@ export class Topo {
                     const slice = newSlice(rec.z);
                     slice.index = rec.index;
                     const polys = sliceConnect(rec.lines);
+                    for (let line of rec.lines) {
+                        const { p1, p2 } = line;
+                        if (!p1.swapped) { p1.swapXZ(); p1.swapped = true }
+                        if (!p2.swapped) { p2.swapXZ(); p2.swapped = true }
+                    }
                     for (let poly of polys) {
                         for (let p of poly.points) {
                             if (!p.swapped) { p.swapXZ(); p.swapped = true }
@@ -850,22 +860,11 @@ class Machinability {
     }
 
     /**
-     * @param {Point} p Point in slice plane (YZ)
-     * @param {number} angle Rotation angle in degrees
-     * @returns {boolean} True if machinable
+     * @param {Point} origin
+     * @param {number} dz
+     * @param {number} dy
+     * @returns {boolean}
      */
-    isMachinable(p, angle) {
-        const rad = (angle * Math.PI) / 180;
-        const cos = Math.cos(rad);
-        const sin = Math.sin(rad);
-
-        // Ray direction in part space that corresponds to machine +Z (up)
-        // Part rotates around X axis. Machine UP at angle 0 is Model +Z.
-        // In the (Y, Z) plane, machine UP at angle 'a' (CCW) is:
-        // dZ = cos(a), dY = -sin(a)
-        const dz = cos;
-        const dy = -sin;
-
     castRay(origin, dz, dy) {
         const far = { x: origin.x + dz * 1000, y: origin.y + dy * 1000 };
         const rayMinX = Math.min(origin.x, far.x);

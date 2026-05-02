@@ -303,6 +303,7 @@ const funcs = self.minion = {
             .slice(resolution)
             .map(rec => {
                 const { z, index, lines } = rec;
+                const polys = sliceConnect(lines);
 
                 for (let line of lines) {
                     const { p1, p2 } = line;
@@ -314,9 +315,15 @@ const funcs = self.minion = {
                 const shared = new Float32Array(new SharedArrayBuffer(points.length * 4));
                 shared.set(points);
 
+                for (let poly of polys) {
+                    for (let p of poly.points) {
+                        if (!p.swapped) { p.swapXZ(); p.swapped = true }
+                    }
+                }
+
                 return {
                     z, index, shared,
-                    polys: codec.encode(sliceConnect(lines)),
+                    polys: codec.encode(polys),
                 };
             });
         // only pass back bounds of rasters to be merged
