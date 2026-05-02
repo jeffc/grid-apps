@@ -100,7 +100,7 @@ export class Topo {
 
         const machinabilityMap = slices.map(slice => {
             const polys = (slice.tops ? slice.tops.map(t => t.poly) : slice.camLines) || [];
-            return new Machinability(polys, resolution);
+            return new Machinability(polys, resolution, this.diam);
         });
 
         let sliceCount = 0;
@@ -777,7 +777,8 @@ function resamplePolygon(poly, dist) {
 }
 
 class Machinability {
-    constructor(polys, resolution) {
+    constructor(polys, resolution, toolWidth = 0) {
+        this.toolWidth = toolWidth;
         this.polys = polys.map(p => {
             if (p.id) return p;
             // handle decoded plain objects
@@ -865,10 +866,8 @@ class Machinability {
         const dz = cos;
         const dy = -sin;
 
-        // Use (Z, Y) as our 2D coordinates for base.util.intersect
-        const origin = { x: p.z, y: p.y };
-        const far = { x: p.z + dz * 1000, y: p.y + dy * 1000 };
-
+    castRay(origin, dz, dy) {
+        const far = { x: origin.x + dz * 1000, y: origin.y + dy * 1000 };
         const rayMinX = Math.min(origin.x, far.x);
         const rayMaxX = Math.max(origin.x, far.x);
         const rayMinY = Math.min(origin.y, far.y);
@@ -906,8 +905,6 @@ class Machinability {
                         continue;
                     }
 
-                    // We need to pass 2D points to base.util.intersect.
-                    // It uses .x and .y. We map Model Z to .x and Model Y to .y.
                     const s1 = { x: seg.p1.z, y: seg.p1.y };
                     const s2 = { x: seg.p2.z, y: seg.p2.y };
                     const int = base.util.intersect(origin, far, s1, s2, keys.SEGINT);
@@ -915,6 +912,47 @@ class Machinability {
                         return false;
                     }
                 }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param {Point} p Point in slice plane (YZ)
+     * @param {number} angle Rotation angle in degrees
+     * @returns {boolean} True if machinable
+     */
+    isMachinable(p, angle) {
+        const rad = (angle * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        // Ray direction in part space that corresponds to machine +Z (up)
+        // Part rotates around X axis. Machine UP at angle 0 is Model +Z.
+        // In the (Y, Z) plane, machine UP at angle 'a' (CCW) is:
+        // dZ = cos(a), dY = -sin(a)
+        const dz = cos;
+        const dy = -sin;
+
+        // Tool width offset (perpendicular to ray)
+        const perpZ = -dy; // perpendicular Z
+        const perpY = dz;  // perpendicular Y
+        const halfW = (this.toolWidth || 0) / 2;
+
+        const origins = [];
+        if (halfW > 0) {
+            origins.push({ x: p.z + perpZ * halfW, y: p.y + perpY * halfW });
+            origins.push({ x: p.z - perpZ * halfW, y: p.y - perpY * halfW });
+            origins.push({ x: p.z, y: p.y }); // Center ray
+        } else {
+            origins.push({ x: p.z, y: p.y });
+        }
+
+        // Ray casting for each origin
+        for (let origin of origins) {
+            if (!this.castRay(origin, dz, dy)) {
+                return false;
             }
         }
 
