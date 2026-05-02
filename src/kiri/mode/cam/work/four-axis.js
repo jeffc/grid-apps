@@ -863,9 +863,10 @@ class Machinability {
      * @param {Point} origin
      * @param {number} dz
      * @param {number} dy
+     * @param {number} startOff
      * @returns {boolean}
      */
-    castRay(origin, dz, dy) {
+    castRay(origin, dz, dy, startOff = 0) {
         const far = { x: origin.x + dz * 1000, y: origin.y + dy * 1000 };
         const rayMinX = Math.min(origin.x, far.x);
         const rayMaxX = Math.max(origin.x, far.x);
@@ -881,8 +882,9 @@ class Machinability {
         const steps = Math.ceil(distToEdge / (gridRes / 5));
         
         for (let i = 0; i <= steps; i++) {
-            const tx = origin.x + dz * (i * gridRes / 5);
-            const ty = origin.y + dy * (i * gridRes / 5);
+            const dist = i * gridRes / 5;
+            const tx = origin.x + dz * dist;
+            const ty = origin.y + dy * dist;
             
             if (tx < bounds.min.x && dz < 0) break;
             if (tx > bounds.max.x && dz > 0) break;
@@ -907,7 +909,7 @@ class Machinability {
                     const s1 = { x: seg.p1.z, y: seg.p1.y };
                     const s2 = { x: seg.p2.z, y: seg.p2.y };
                     const int = base.util.intersect(origin, far, s1, s2, keys.SEGINT);
-                    if (int && (int.dist * 1000) > 0.001) {
+                    if (int && (int.dist * 1000) > (0.001 + startOff)) {
                         return false;
                     }
                 }
@@ -939,22 +941,17 @@ class Machinability {
         const perpY = dz;  // perpendicular Y
         const halfW = (this.toolWidth || 0) / 2;
 
-        const origins = [];
         if (halfW > 0) {
-            origins.push({ x: p.z + perpZ * halfW, y: p.y + perpY * halfW });
-            origins.push({ x: p.z - perpZ * halfW, y: p.y - perpY * halfW });
-            origins.push({ x: p.z, y: p.y }); // Center ray
-        } else {
-            origins.push({ x: p.z, y: p.y });
+            const o1 = { x: p.z + perpZ * halfW, y: p.y + perpY * halfW };
+            const o2 = { x: p.z - perpZ * halfW, y: p.y - perpY * halfW };
+            // For tool edges, we use a larger startOff because we expect the
+            // tool tip itself to be in contact with the model, but the edges
+            // might "brush" against the surface.
+            if (!this.castRay(o1, dz, dy, 0.1)) return false;
+            if (!this.castRay(o2, dz, dy, 0.1)) return false;
         }
 
-        // Ray casting for each origin
-        for (let origin of origins) {
-            if (!this.castRay(origin, dz, dy)) {
-                return false;
-            }
-        }
-
-        return true;
+        // Center ray
+        return this.castRay({ x: p.z, y: p.y }, dz, dy, 0);
     }
 }
