@@ -7,6 +7,7 @@ import { sliceConnect } from '../../../../geo/slicer.js';
 import { newSlice } from '../../../core/slice.js';
 import { Tool } from '../core/tool.js';
 import { Slicer as topo_slicer } from './slicer-topo.js';
+import { THREE } from '../../../../ext/three.js';
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -72,7 +73,8 @@ export class Topo {
         this.bounds  = bounds;
         this.gpu = webGPU ?? false;
 
-        onupdate(0, "lathe");
+        const label = op.type === 'lathe' ? 'lathe' : 'four-axis';
+        onupdate(0, label);
 
         const parts = webGPU ? [ 0.8, 0.2 ] : [ 0.25, 0.75 ];
         const range = this.range = { min: Infinity, max: -Infinity };
@@ -83,13 +85,16 @@ export class Topo {
             range.max = Math.max(range.max, slice.z);
         }
 
-        const lathe = await this.lathe(scale(onupdate, parts[1], parts[0]));
+        const result = await this.generatePath(scale(onupdate, parts[1], parts[0]));
 
-        onupdate(1, "lathe");
-        ondone(lathe);
-        // ondone([...slices, ...lathe]);
+        onupdate(1, label);
+        ondone(result);
 
         return this;
+    }
+
+    async generatePath(onupdate) {
+        return await this.lathe(onupdate);
     }
 
     async slice(onupdate) {
@@ -121,7 +126,12 @@ export class Topo {
         }
 
         // re-create shared vertex array for workers
-        this.vertices = [].appendAll(vertices).appendAll(tabverts).toFloat32().toShared();
+        const v2 = new Float32Array(vertices.length + tabverts.length);
+        v2.set(vertices);
+        if (tabverts.length > 0) {
+            v2.set(tabverts, vertices.length);
+        }
+        this.vertices = v2.toShared();
 
         // rp.rasterizeMesh(vertices, resolution).then(rpo => console.log({ rpo }));
         if (this.gpu) {

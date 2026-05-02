@@ -25,79 +25,15 @@ export class FourAxis extends Topo {
         super();
     }
 
-    async generate(opt = {}) {
-        let { state, op, onupdate, ondone } = opt;
-        let { widget, settings, tabs, color } = state;
-        let { controller, process } = settings;
-        let { webGPU } = controller;
-
+    async generatePath(onupdate) {
+        const { resolution, tool, sliced: slices } = this;
         /**
-         * ALGORITHM STEP 1: Slicing Normal to the Rotation Axis
-         * The model is oriented along the machine's rotation axis (X).
-         * Intersect the model with a series of planes perpendicular to X.
+         * ALGORITHM STEP 2: Accessibility Analysis (C-Space Mapping)
+         * For each point on the slice contours, determine the 'feasible orientation interval'.
+         * 1. Build a machinability map for each slice from original contours.
+         * 2. For each resampled point, sample 360 degrees in 5-degree increments.
+         * 3. Check for upward (machine +Z) collisions after rotation.
          */
-        let axis = op.axis.toLowerCase(),
-            tool = new Tool(settings, op.tool),
-            bounds = widget.getBoundingBox().clone(),
-            density = parseInt(controller.animesh || 100) * 2500,
-            { min, max } = bounds,
-            span = {
-                x: max.x - min.x,
-                y: max.y - min.y
-            },
-            contour = {
-                x: axis === "x",
-                y: axis === "y"
-            },
-            tolerance = op.tolerance,
-            resolution = (tolerance ? tolerance : 1 / Math.sqrt(density / (span.x * span.y))).round(5),
-            step = this.step = (tool.traceOffset() * 2) * op.step,
-            angle = this.angle = op.angle || 1,
-            down = this.down = op.down,
-            expand = this.expand = op.expand;
-
-        if (tool.isTaperMill() && step === 0) {
-            step = this.step = op.step * tool.unitScale();
-        }
-
-        if (tolerance === 0) {
-            console.log(widget.id, 'topo4 auto tolerance', resolution.round(4));
-        }
-
-        this.zBottom = state.zBottom ?? 0;
-        this.resolution = resolution;
-        this.vertices = widget.getGeoVertices({ unroll: true, translate: true }).slice();
-        this.tabverts = widget.getTabVertices();
-        this.tool = tool.generateProfile(resolution).profile;
-        this.maxo = tool.profileDim.maxo * resolution;
-        this.diam = tool.fluteDiameter();
-        this.unit = tool.unitScale();
-        this.units = controller.units === 'in' ? 25.4 : 1
-        this.zoff = widget.track.top || 0;
-        this.leave = op.leave || 0;
-        this.linear = false;
-        this.lineColor = color;//controller.dark ? 0xffff00 : 0x555500;
-        this.offStart = op.offStart ?? 0;
-        this.offEnd = op.offEnd ?? 0;
-        this.bounds  = bounds;
-        this.gpu = webGPU ?? false;
-
-        onupdate(0, "four-axis");
-
-        const parts = webGPU ? [ 0.8, 0.2 ] : [ 0.25, 0.75 ];
-        const range = this.range = { min: Infinity, max: -Infinity };
-        const slices = this.sliced = await this.slice(scale(onupdate, parts[0], 0));
-
-        for (let slice of slices) {
-            range.min = Math.min(range.min, slice.z);
-            range.max = Math.max(range.max, slice.z);
-        }
-
-        // ALGORITHM STEP 2: Accessibility Analysis (C-Space Mapping)
-        // For each point on the slice contours, determine the 'feasible orientation interval'.
-        // 1. Build a machinability map for each slice from original contours.
-        // 2. For each resampled point, sample 360 degrees in 5-degree increments.
-        // 3. Check for upward (machine +Z) collisions after rotation.
         const resampleDist = resolution * 2; // N units
         const resampledSlices = this.slices = [];
         console.log(`topo4 generate | slices=${slices.length} resampleDist=${resampleDist}`);
@@ -172,10 +108,39 @@ export class FourAxis extends Topo {
         }
         console.log(`topo4 generate | resampledSlices=${resampledSlices.length}`);
 
-        onupdate(1, "four-axis");
-        ondone(resampledSlices);
+        return resampledSlices;
+    }
 
-        return this;
+    async sliceGPU(onupdate) {
+        const slices = await super.sliceGPU(onupdate);
+        for (let slice of slices) {
+            slice.output()
+                .setLayer("four-axis", { line: this.lineColor })
+                .addPoly(slice.camLines[0].clone().applyRotations());
+        }
+        return slices;
+    }
+
+    async fourAxisWorker(onupdate) {
+        const paths = await this.latheWorker(onupdate);
+        for (let slice of paths) {
+            const poly = slice.camLines[0];
+            slice.output()
+                .setLayer("four-axis", { line: this.lineColor })
+                .addPoly(poly.clone().applyRotations().move({ z: -this.zoff, x: 0, y: 0 }));
+        }
+        return paths;
+    }
+
+    async fourAxisMinions(onupdate) {
+        const paths = await this.latheMinions(onupdate);
+        for (let slice of paths) {
+            const poly = slice.camLines[0];
+            slice.output()
+                .setLayer("four-axis", { line: this.lineColor })
+                .addPoly(poly.clone().applyRotations().move({ z: -this.zoff, x: 0, y: 0 }));
+        }
+        return paths;
     }
 
     getRadius(d) {
