@@ -17,7 +17,7 @@ import { Slicer as cam_slicer } from '../mode/cam/work/slicer-cam.js';
 import { Slicer as topo_slicer } from '../mode/cam/work/slicer-topo.js';
 import { Probe, Trace, raster_slice } from '../mode/cam/work/topo3.js';
 import { Topo as Topo4, rotatePoints } from '../mode/cam/work/topo4.js';
-import { Topo as FourAxis } from '../mode/cam/work/four-axis.js';
+import { FourAxis } from '../mode/cam/work/four-axis.js';
 import { wasm_ctrl } from '../../geo/wasm.js';
 
 const clib = self.ClipperLib;

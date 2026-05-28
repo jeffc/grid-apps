@@ -26,7 +26,7 @@ export class FourAxis extends Topo {
     }
 
     async generatePath(onupdate) {
-        const { resolution, tool, sliced: slices } = this;
+        const { resolution, toolInstance, sliced: slices } = this;
         /**
          * ALGORITHM STEP 2: Accessibility Analysis (C-Space Mapping)
          * For each point on the slice contours, determine the 'feasible orientation interval'.
@@ -40,7 +40,7 @@ export class FourAxis extends Topo {
 
         const machinabilityMap = slices.map(slice => {
             const polys = (slice.tops ? slice.tops.map(t => t.poly) : slice.camLines) || [];
-            return new Machinability(polys, resolution, tool);
+            return new Machinability(polys, resolution, toolInstance);
         });
 
         let sliceCount = 0;
@@ -142,7 +142,130 @@ export class FourAxis extends Topo {
         }
         return paths;
     }
+}
 
+function resamplePolygon(poly, dist) {
+    if (!poly) return undefined;
+    const points = poly.points || (poly.id ? undefined : poly.array); // handle different point formats
+    if (!points || (points.length < 2 && !Array.isArray(points))) return undefined;
+
+    // convert to proper point array if it's a flat float array from decoder
+    let pts = points;
+    if (points instanceof Float32Array || (Array.isArray(points) && typeof points[0] === 'number')) {
+        pts = [];
+        for (let i=0; i<points.length; i += 3) {
+            pts.push(newPoint(points[i], points[i+1], points[i+2]));
+        }
+    }
+
+    if (pts.length < 2) return undefined;
+
+    const newPoints = [];
+    const len = pts.length;
+    const isOpen = poly.open || (poly.isOpen ? poly.isOpen() : false);
+
+    for (let i = 0; i < len; i++) {
+        const p1 = pts[i];
+        const p2 = pts[(i + 1) % len];
+        newPoints.push(p1);
+        if (isOpen && i === len - 1) continue;
+        const d = p1.distTo3D(p2);
+        if (d > dist) {
+            const steps = Math.floor(d / dist);
+            for (let j = 1; j <= steps; j++) {
+                const ratio = j / (steps + 1);
+                newPoints.push(newPoint(
+                    p1.x + (p2.x - p1.x) * ratio,
+                    p1.y + (p2.y - p1.y) * ratio,
+                    p1.z + (p2.z - p1.z) * ratio
+                ));
+            }
+        }
+    }
+    return newPolygon(newPoints).setOpen(isOpen);
+}
+
+class Machinability {
+    /**
+     * @param {Polygon[]} polys Slice contours
+     * @param {number} resolution Machine resolution (mm)
+     * @param {Tool} tool Kiri tool instance
+     */
+    constructor(polys, resolution, tool) {
+        this.resolution = resolution;
+
+        // 1. Analytical Tool Parameters
+        // We extract the physical dimensions to perform exact collision tests.
+        const isBall = tool.isBallMill();
+        const isTaper = tool.isTaperMill();
+        const isTaperBall = tool.isTaperBall();
+        const isDrill = tool.isDrill();
+
+        this.tool = {
+            isBall, isTaper, isTaperBall, isDrill,
+            fluteRad: tool.fluteDiameter() / 2,
+            tipRad: tool.tipDiameter() / 2,
+            fluteLen: tool.fluteLength() || 100,
+            taperAngle: tool.getTaperAngle(),
+        };
+
+        // For tapered ball mills, find the transition point from sphere to cone
+        if (isTaperBall) {
+            const { r, b } = tool.getBallTaperParams();
+            this.tool.ballR = r;
+            this.tool.ballB = b;
+        }
+
+        // 2. Coordinate System Synchronization
+        // Kiri:Moto slices normal to the X axis by swapping X and Z before slicing.
+        // Post-slice Point state:
+        // p.x = Original Model X (the rotation axis, constant for the slice)
+        // p.y = Original Model Y
+        // p.z = Original Model Z + offset (the depth/height coordinate)
+        // Our analysis happens in the (p.z, p.y) plane (Model Z, Model Y).
+        this.polys = polys.map(p => {
+            if (p.id) return p;
+            const points = p.points || p.array;
+            if (points instanceof Float32Array || (Array.isArray(points) && typeof points[0] === 'number')) {
+                const pts = [];
+                for (let i=0; i<points.length; i += 3) {
+                    pts.push(newPoint(points[i], points[i+1], points[i+2]));
+                }
+                return newPolygon(pts).setOpen(p.open);
+            }
+            return p;
+        });
+
+        // 3. Segment Flattening
+        // Store segments as (z, y) pairs for rapid analytical testing.
+        const segments = this.segments = [];
+        for (let poly of this.polys) {
+            poly.forEachSegment((p1, p2) => {
+                segments.push({ p1, p2 });
+            });
+        }
+    }
+
+    /**
+     * @param {Point} p Point in slice plane (YZ)
+     * @param {Point} n Normal in slice plane (YZ)
+     * @returns {number[]} Array of angles (0-355) that are machinable
+     */
+    getMDRs(p, n) {
+        const mdrs = [];
+        for (let a = 0; a < 360; a += 5) {
+            if (this.isMachinable(p, n, a)) {
+                mdrs.push(a);
+            }
+        }
+        return mdrs;
+    }
+
+    /**
+     * Computes tool radius at a given depth above the tip center.
+     * @param {number} d Depth (mm)
+     * @returns {number} Radius (mm)
+     */
     getRadius(d) {
         const t = this.tool;
         if (d <= 0) return 0;
@@ -168,7 +291,7 @@ export class FourAxis extends Topo {
 
     /**
      * Analytical collision check for a given rotation angle.
-     * 
+     *
      * @param {Point} p Contact Center (CC) in (z, y)
      * @param {Point} n Outward Normal in (z, y). n.x is the Z-component, n.y is the Y-component.
      * @param {number} angle Machine rotation (degrees). 0 is home, positive is CCW rotation around X.
@@ -209,7 +332,7 @@ export class FourAxis extends Topo {
         const eps = 0.01;
         const chordEps = 0.1; // Tolerance for model's piecewise-linear approximation
         const Rsq = (R - chordEps) * (R - chordEps);
-        
+
         // 5. Local Surface Skipping
         // To prevent the tool tip from colliding with the segments it is actively machining
         // (chord-gouging), we skip segments within a small radius of the contact point.
@@ -278,7 +401,7 @@ function computeNormals(poly) {
     const points = poly.points;
     const len = points.length;
     if (len < 2) return points.map(() => { return { x: 0, y: 1 } });
-    
+
     // Compute signed area in (Z, Y) plane to determine winding
     // In our swapped points: p.z = Model Z, p.y = Model Y
     let area2 = 0;
@@ -330,4 +453,4 @@ function computeNormals(poly) {
 
 export async function generate(opt) {
     return new FourAxis().generate(opt);
-};
+}

@@ -60,6 +60,7 @@ export class Topo {
         this.vertices = widget.getGeoVertices({ unroll: true, translate: true });
         this.tabverts = widget.getTabVertices();
         this.tool = tool.generateProfile(resolution).profile;
+        this.toolInstance = tool;
         this.maxo = tool.profileDim.maxo * resolution;
         this.diam = tool.fluteDiameter();
         this.unit = tool.unitScale();
