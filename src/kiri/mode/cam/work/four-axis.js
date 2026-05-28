@@ -63,11 +63,32 @@ export class FourAxis extends Topo {
                 if (resampled) {
                     resampledPolys.push(resampled);
                     const normals = computeNormals(resampled);
-                    for (let i = 0; i < resampled.points.length; i++) {
-                        const p = resampled.points[i];
-                        const n = normals[i];
-                        p.mdr = mach.getMDRs(p, n);
-                    }
+                     for (let i = 0; i < resampled.points.length; i++) {
+                         const p = resampled.points[i];
+                         const n = normals[i];
+                         p.mdr = mach.getMDRs(p, n);
+
+                         // Assign the chosen machining angle 'p.a'
+                         if (p.mdr && p.mdr.length > 0) {
+                             let target = Math.atan2(-n.y, n.z) * RAD2DEG;
+                             if (target < 0) target += 360;
+
+                             // Find the angle in p.mdr closest to target
+                             let bestAngle = p.mdr[0];
+                             let minDiff = Infinity;
+                             for (let angle of p.mdr) {
+                                 let diff = Math.abs(angle - target) % 360;
+                                 if (diff > 180) diff = 360 - diff;
+                                 if (diff < minDiff) {
+                                     minDiff = diff;
+                                     bestAngle = angle;
+                                 }
+                             }
+                             p.a = bestAngle;
+                         } else {
+                             p.a = 0; // fallback
+                         }
+                     }
                     pOut += resampled.points.length;
                 }
             }
@@ -81,30 +102,46 @@ export class FourAxis extends Topo {
                     layers.setLayer("fouraxis-contours", { line: 0x00ff00 })
                         .addPolys(shiftedContours, { thin: true });
 
-                    const mdrPolys = [];
-                    let pCount = 0;
-                    for (let p of resampledPolys.map(poly => poly.points).flat()) {
-                        if (pCount++ % 10 !== 0) continue;
-                        if (p.mdr) {
-                            for (let angle of p.mdr) {
-                                const rad = angle * DEG2RAD;
-                                // Machine UP in part space for CCW rotation 'a' around X:
-                                // dY = -sin(a), dZ = cos(a) (CW rotation of tool ray in part space)
-                                const dy = -Math.sin(rad) * 0.3;
-                                const dz = Math.cos(rad) * 0.3;
-                                // Un-swap for visualization: p.x is original X, p.y is Y, p.z is original Z
-                                mdrPolys.push(newPolygon([
-                                    newPoint(p.x, p.y, p.z - this.zoff),
-                                    newPoint(p.x, p.y + dy, p.z + dz - this.zoff)
-                                ]).setOpen());
-                            }
-                        }
-                    }
-                    if (mdrPolys.length > 0) {
-                        layers.setLayer("fouraxis-machinable", { line: 0xff0000 })
-                            .addPolys(mdrPolys, { thin: true });
-                    }
-                }
+                     const mdrPolys = [];
+                     const chosenPolys = [];
+                     let pCount = 0;
+                     for (let p of resampledPolys.map(poly => poly.points).flat()) {
+                         if (pCount++ % 10 !== 0) continue;
+                         if (p.mdr) {
+                             for (let angle of p.mdr) {
+                                 const rad = angle * DEG2RAD;
+                                 // Machine UP in part space for CCW rotation 'a' around X:
+                                 // dY = -sin(a), dZ = cos(a) (CW rotation of tool ray in part space)
+                                 const dy = -Math.sin(rad) * 0.3;
+                                 const dz = Math.cos(rad) * 0.3;
+                                 // Un-swap for visualization: p.x is original X, p.y is Y, p.z is original Z
+                                 mdrPolys.push(newPolygon([
+                                     newPoint(p.x, p.y, p.z - this.zoff),
+                                     newPoint(p.x, p.y + dy, p.z + dz - this.zoff)
+                                 ]).setOpen());
+                             }
+                         }
+                         if (p.a !== undefined) {
+                             const rad = p.a * DEG2RAD;
+                             // Make the chosen ray slightly longer (e.g. 0.5) to stand out
+                             const dy = -Math.sin(rad) * 0.5;
+                             const dz = Math.cos(rad) * 0.5;
+                             chosenPolys.push(newPolygon([
+                                 newPoint(p.x, p.y, p.z - this.zoff),
+                                 newPoint(p.x, p.y + dy, p.z + dz - this.zoff)
+                             ]).setOpen());
+                         }
+                     }
+
+                     if (mdrPolys.length > 0) {
+                         layers.setLayer("fouraxis-machinable", { line: 0xff0000 })
+                             .addPolys(mdrPolys, { thin: true });
+                     }
+                     if (chosenPolys.length > 0) {
+                         layers.setLayer("fouraxis-chosen", { line: 0x0000ff })
+                              .addPolys(chosenPolys, { thin: true });
+                      }
+                 }
                 resampledSlices.push(resampledSlice);
             }
         }
