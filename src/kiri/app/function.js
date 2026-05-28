@@ -259,7 +259,6 @@ function prepareSlices(callback, scale = 1, offset = 0) {
             }
             if (reply.slice) {
                 const decoded = codec.decode(reply.slice, {mesh:widget.mesh});
-                console.log(`prepareSlices | decoded slice z=${decoded.z} layers=${Object.keys(decoded.layers?.layers || {})}`);
                 widget.slices.push(decoded);
             }
             if (reply.done) {

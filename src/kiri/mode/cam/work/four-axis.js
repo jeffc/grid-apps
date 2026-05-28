@@ -1,5 +1,3 @@
-/** Copyright Stewart Allen <sa@grid.space> -- All Rights Reserved */
-
 import { base } from '../../../../geo/base.js';
 import { codec } from '../../../core/codec.js';
 import { newPoint } from '../../../../geo/point.js';
@@ -26,6 +24,9 @@ export class FourAxis extends Topo {
     }
 
     async generatePath(onupdate) {
+        if (this.gpu) {
+            return this.gpu_slices;
+        }
         const { resolution, toolInstance, sliced: slices } = this;
         /**
          * ALGORITHM STEP 2: Accessibility Analysis (C-Space Mapping)
@@ -76,8 +77,9 @@ export class FourAxis extends Topo {
                 resampledSlice.camLines = resampledPolys;
                 if (isEvery100) {
                     const layers = resampledSlice.output();
+                    const shiftedContours = resampledPolys.map(poly => poly.clone().move({ z: -this.zoff, x: 0, y: 0 }));
                     layers.setLayer("fouraxis-contours", { line: 0x00ff00 })
-                        .addPolys(resampledPolys, { thin: true });
+                        .addPolys(shiftedContours, { thin: true });
 
                     const mdrPolys = [];
                     let pCount = 0;
@@ -87,13 +89,13 @@ export class FourAxis extends Topo {
                             for (let angle of p.mdr) {
                                 const rad = angle * DEG2RAD;
                                 // Machine UP in part space for CCW rotation 'a' around X:
-                                // dY = sin(a), dZ = cos(a)
-                                const dy = Math.sin(rad);
-                                const dz = Math.cos(rad);
+                                // dY = -sin(a), dZ = cos(a) (CW rotation of tool ray in part space)
+                                const dy = -Math.sin(rad) * 0.3;
+                                const dz = Math.cos(rad) * 0.3;
                                 // Un-swap for visualization: p.x is original X, p.y is Y, p.z is original Z
                                 mdrPolys.push(newPolygon([
-                                    newPoint(p.x, p.y, p.z),
-                                    newPoint(p.x, p.y + dy, p.z + dz)
+                                    newPoint(p.x, p.y, p.z - this.zoff),
+                                    newPoint(p.x, p.y + dy, p.z + dz - this.zoff)
                                 ]).setOpen());
                             }
                         }
@@ -144,7 +146,7 @@ export class FourAxis extends Topo {
     }
 }
 
-function resamplePolygon(poly, dist) {
+export function resamplePolygon(poly, dist) {
     if (!poly) return undefined;
     const points = poly.points || (poly.id ? undefined : poly.array); // handle different point formats
     if (!points || (points.length < 2 && !Array.isArray(points))) return undefined;
@@ -185,7 +187,7 @@ function resamplePolygon(poly, dist) {
     return newPolygon(newPoints).setOpen(isOpen);
 }
 
-class Machinability {
+export class Machinability {
     /**
      * @param {Polygon[]} polys Slice contours
      * @param {number} resolution Machine resolution (mm)
@@ -201,10 +203,18 @@ class Machinability {
         const isTaperBall = tool.isTaperBall();
         const isDrill = tool.isDrill();
 
+        let tipRad = tool.tipDiameter() / 2;
+        if (isBall) {
+            tipRad = tool.fluteDiameter() / 2;
+        } else if (isTaperBall) {
+            const { r } = tool.getBallTaperParams();
+            tipRad = r;
+        }
+
         this.tool = {
             isBall, isTaper, isTaperBall, isDrill,
             fluteRad: tool.fluteDiameter() / 2,
-            tipRad: tool.tipDiameter() / 2,
+            tipRad,
             fluteLen: tool.fluteLength() || 100,
             taperAngle: tool.getTaperAngle(),
         };
@@ -293,7 +303,7 @@ class Machinability {
      * Analytical collision check for a given rotation angle.
      *
      * @param {Point} p Contact Center (CC) in (z, y)
-     * @param {Point} n Outward Normal in (z, y). n.x is the Z-component, n.y is the Y-component.
+     * @param {Point} n Outward Normal in (z, y). n.z is the Z-component, n.y is the Y-component.
      * @param {number} angle Machine rotation (degrees). 0 is home, positive is CCW rotation around X.
      * @returns {boolean} True if orientation is collision-free
      */
@@ -305,24 +315,24 @@ class Machinability {
         // 1. Tool Ray Direction (d_l) in Part Space
         // In the (Z, Y) slice plane, a machine "UP" ray (which is constant in machine space)
         // rotates with the part. For a part rotation of 'a' degrees CCW:
-        // The ray direction in part space is (cos a, sin a)
-        // dZ_model = cos(a), dY_model = sin(a)
+        // The ray direction in part space is (cos a, -sin a) due to CW relative rotation.
+        // dZ_model = cos(a), dY_model = -sin(a)
         const dz = cos;
-        const dy = sin;
+        const dy = -sin;
 
         const R = this.tool.tipRad;
 
         // 2. Surface Feasibility Check (Back-face Culling)
         // The tool axis must point "away" from the material.
-        // We check the dot product between the tool ray (dz, dy) and the surface normal (n.x, n.y).
-        const dot = dz * n.x + dy * n.y;
+        // We check the dot product between the tool ray (dz, dy) and the surface normal (n.z, n.y).
+        const dot = dz * n.z + dy * n.y;
         if (dot < -0.001) return false;
 
         // 3. Cutter Location (CL) calculation
         // For ball-end mills, the "Cutter Location" is the center of the tip sphere.
         // The spherical tip is tangent to the part at the Contact Center (CC).
         // CL = CC + R * n
-        const CL = { z: p.z + n.x * R, y: p.y + n.y * R };
+        const CL = { z: p.z + n.z * R, y: p.y + n.y * R };
 
         // 4. Lateral Axis (Perpendicular to tool ray)
         // A vector perpendicular to (dz, dy) is (-dy, dz).
@@ -333,19 +343,10 @@ class Machinability {
         const chordEps = 0.1; // Tolerance for model's piecewise-linear approximation
         const Rsq = (R - chordEps) * (R - chordEps);
 
-        // 5. Local Surface Skipping
-        // To prevent the tool tip from colliding with the segments it is actively machining
-        // (chord-gouging), we skip segments within a small radius of the contact point.
-        const skipDistSq = (this.resolution * 10) ** 2;
-
         for (let seg of this.segments) {
             // Segment endpoints in the analysis plane (Model Z, Model Y)
             const s1 = { z: seg.p1.z, y: seg.p1.y };
             const s2 = { z: seg.p2.z, y: seg.p2.y };
-
-            const d1sq = (s1.z - p.z)**2 + (s1.y - p.y)**2;
-            const d2sq = (s2.z - p.z)**2 + (s2.y - p.y)**2;
-            if (d1sq < skipDistSq || d2sq < skipDistSq) continue;
 
             // 6. Ball Volume Collision Test
             // We check the distance from the tip center (CL) to the segment.
@@ -397,10 +398,10 @@ class Machinability {
     }
 }
 
-function computeNormals(poly) {
+export function computeNormals(poly) {
     const points = poly.points;
     const len = points.length;
-    if (len < 2) return points.map(() => { return { x: 0, y: 1 } });
+    if (len < 2) return points.map(() => { return { z: 0, y: 1 } });
 
     // Compute signed area in (Z, Y) plane to determine winding
     // In our swapped points: p.z = Model Z, p.y = Model Y
@@ -421,8 +422,8 @@ function computeNormals(poly) {
         const p3 = points[(i + 1) % len];
 
         // Segment vectors in transformed plane (p.z is Model Z, p.y is Model Y)
-        let v1 = { x: p2.z - p1.z, y: p2.y - p1.y };
-        let v2 = { x: p3.z - p2.z, y: p3.y - p2.y };
+        let v1 = { z: p2.z - p1.z, y: p2.y - p1.y };
+        let v2 = { z: p3.z - p2.z, y: p3.y - p2.y };
 
         if (isOpen) {
             if (i === 0) v1 = v2;
@@ -431,22 +432,22 @@ function computeNormals(poly) {
 
         let n1, n2;
         if (isCW) {
-            n1 = { x: -v1.y, y: v1.x };
-            n2 = { x: -v2.y, y: v2.x };
+            n1 = { z: -v1.y, y: v1.z };
+            n2 = { z: -v2.y, y: v2.z };
         } else {
-            n1 = { x: v1.y, y: -v1.x };
-            n2 = { x: v2.y, y: -v2.x };
+            n1 = { z: v1.y, y: -v1.z };
+            n2 = { z: v2.y, y: -v2.z };
         }
 
-        const l1 = Math.sqrt(n1.x * n1.x + n1.y * n1.y);
-        const l2 = Math.sqrt(n2.x * n2.x + n2.y * n2.y);
+        const l1 = Math.sqrt(n1.z * n1.z + n1.y * n1.y);
+        const l2 = Math.sqrt(n2.z * n2.z + n2.y * n2.y);
 
         const n = {
-            x: (n1.x / (l1 || 1) + n2.x / (l2 || 1)),
+            z: (n1.z / (l1 || 1) + n2.z / (l2 || 1)),
             y: (n1.y / (l1 || 1) + n2.y / (l2 || 1))
         };
-        const ln = Math.sqrt(n.x * n.x + n.y * n.y);
-        normals.push({ x: n.x / (ln || 1), y: n.y / (ln || 1) });
+        const ln = Math.sqrt(n.z * n.z + n.y * n.y);
+        normals.push({ z: n.z / (ln || 1), y: n.y / (ln || 1) });
     }
     return normals;
 }
