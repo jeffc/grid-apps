@@ -75,15 +75,21 @@ export class Topo {
             tabsOn = tabs,
             tabHeight = Math.max(process.camTabsHeight + zBottom, tabsMax),
             clipTab = tabsOn ? [] : null,
-            clipTo = inside ? shadow.base : POLY.expand(shadow.base, toolDiameter / 2 + resolution * 3),
+            clipTo = inside ? shadow.base : POLY.expand(shadow.base, toolDiameter / 2 + (contourR ? toolStep : 0) + resolution * 3),
             partOff = inside ? 0 : toolDiameter / 2 + resolution,
             gridDelta = Math.floor(partOff / resolution),
             debug_clips = true;
 
+        let clipStock = undefined;
         if (contour.clipto) {
             let { stock } = settings;
             let { center, x, y } = stock;
-            clipTo.push(newPolygon().centerRectangle(center, x, y));
+            let stockPoly = newPolygon().centerRectangle(center, x, y);
+            if (webGPU && !contour.nogpu && !contourR) {
+                clipTo.push(stockPoly);
+            } else {
+                clipStock = [ stockPoly ];
+            }
         }
 
         if (tolerance === 0 && !topoCache) {
@@ -108,6 +114,7 @@ export class Topo {
             const output = debug.output();
             if (clipTab) output.setLayer("clip.tab", { line: 0xff0000 }).addPolys(clipTab);
             if (clipTo) output.setLayer("clip.to", { line: 0x00dd00 }).addPolys(clipTo);
+            if (clipStock) output.setLayer("clip.stock", { line: 0xdd00dd }).addPolys(clipStock);
             newslices.push(debug);
         }
 
@@ -402,6 +409,7 @@ export class Topo {
             contourR,
             density,
             clipTo,
+            clipStock,
             clipTab,
             clipTabZ: clipTab ? clipTab.map(t => t.z) : undefined,
             tabHeight,
@@ -533,7 +541,7 @@ export class Topo {
 
         const { minX, maxX, minY, maxY, boundsX, boundsY, stepsX, stepsY } = params;
         const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY, contourR } = params;
-        const { clipTo, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
+        const { clipTo, clipStock, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
 
         let stepsTaken = 0,
             stepsTotal = 0;
@@ -569,6 +577,7 @@ export class Topo {
             box,
             leave,
             clipTo,
+            clipStock,
             clipTab,
             clipTabZ,
             tabHeight,
@@ -793,6 +802,9 @@ export class Trace {
             const newP = newPoint(x, y, z);
             const lastP = lastPP;
 
+            // Bypass linear slope-based point simplification in radial mode.
+            // On flat horizontal faces (dz = 0), a constant slope calculation of 0
+            // would otherwise collapse the spiral path into a single straight line.
             if (contourR) {
                 trace.push(newP);
                 lastPP = newP;
@@ -908,7 +920,7 @@ export class Trace {
 
     crossY_sync(params, then) {
         const { push_point, end_poly, newtrace, newslice, inClip } = this.object;
-        const { clipTab, tabHeight, clipTo, box, resolution, density, leave } = this.cross;
+        const { clipTab, tabHeight, clipTo, clipStock, box, resolution, density, leave } = this.cross;
         const { toolAtZ } = this.probe;
 
         let { from, to, x, gridx, gridy } = params;
@@ -931,9 +943,10 @@ export class Trace {
             if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
                 tv = this.tabZ;
             }
-            // if the value is on the floor and inside the clip
-            // poly (usually shadow), end the segment
-            if (clipTo && !inClip(clipTo, undefined, checkr)) {
+            // clip to stock AND shadow (intersection)
+            const inStock = !clipStock || inClip(clipStock, undefined, checkr);
+            const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
+            if (!inStock || !inShadow) {
                 end_poly();
                 gridy += density;
                 continue;
@@ -947,7 +960,7 @@ export class Trace {
 
     crossX_sync(params, then) {
         const { push_point, end_poly, newtrace, newslice, inClip } = this.object;
-        const { clipTab, tabHeight, clipTo, box, resolution, density, leave } = this.cross;
+        const { clipTab, tabHeight, clipTo, clipStock, box, resolution, density, leave } = this.cross;
         const { toolAtZ } = this.probe;
         let { from, to, y, gridx, gridy } = params;
 
@@ -969,9 +982,10 @@ export class Trace {
             if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
                 tv = this.tabZ;
             }
-            // if the value is on the floor and inside the clip
-            // poly (usually shadow), end the segment
-            if (clipTo && !inClip(clipTo, undefined, checkr)) {
+            // clip to stock AND shadow (intersection)
+            const inStock = !clipStock || inClip(clipStock, undefined, checkr);
+            const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
+            if (!inStock || !inShadow) {
                 end_poly();
                 gridx += density;
                 continue;
@@ -989,12 +1003,14 @@ export class Trace {
 
     crossRadial_sync(params, then) {
         const { push_point, end_poly, newtrace, newslice, inClip } = this.object;
-        const { clipTab, tabHeight, clipTo, box, resolution, density, leave } = this.cross;
+        const { clipTab, tabHeight, clipTo, clipStock, box, resolution, density, leave } = this.cross;
         const { toolAtXY } = this.probe;
 
         let { centerX, centerY, maxR, toolStep } = params;
 
+        // Step resolution along the spiral curve
         const step = resolution * density;
+        // Growth coefficient for Archimedean spiral (expansion of toolStep per 2pi radians)
         const b = toolStep / (2 * Math.PI);
         const checkr = newPoint(0, 0);
 
@@ -1005,16 +1021,24 @@ export class Trace {
         let r = 0;
 
         while (r <= maxR) {
+            // Convert polar coordinates to Cartesian workspace coordinates
             const x = centerX + r * Math.cos(theta);
             const y = centerY + r * Math.sin(theta);
             checkr.x = x;
             checkr.y = y;
 
-            if (clipTo && !inClip(clipTo, undefined, checkr)) {
+            // Restrict toolpath within stock AND expanded part silhouette boundaries (intersection check)
+            const inStock = !clipStock || inClip(clipStock, undefined, checkr);
+            const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
+
+            if (!inStock || !inShadow) {
+                // Terminate path if we exit the allowed stock or shadow regions
                 end_poly();
             } else {
+                // Probe topography height map at (x, y) coordinates
                 let tv = toolAtXY(x, y);
 
+                // Override height if tool is within tab boundary to prevent milling tabs
                 if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
                     tv = this.tabZ;
                 }
@@ -1022,6 +1046,8 @@ export class Trace {
                 push_point(x, y, tv + leave);
             }
 
+            // Stepping formula: dtheta = ds / sqrt(b^2 + r^2) to maintain a constant 
+            // linear feed resolution (step size) as the spiral radius expands.
             const dtheta = step / Math.sqrt(b * b + r * r);
             theta += dtheta;
             r = b * theta;

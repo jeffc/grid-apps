@@ -261,6 +261,7 @@ const funcs = self.minion = {
     trace_init(data) {
         data.cross.clipTo = codec.decode(data.cross.clipTo);
         data.cross.clipTab = codec.decode(data.cross.clipTab);
+        data.cross.clipStock = codec.decode(data.cross.clipStock);
         const probe = new Probe(data.probe);
         const trace = new Trace(probe, data.trace);
         cache.trace = {
