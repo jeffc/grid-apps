@@ -1,0 +1,69 @@
+import './setup-global-three.js';
+import { newPoint } from './src/geo/point.js';
+import { newPolygon } from './src/geo/polygon.js';
+import { Machinability, computeNormals, resamplePolygon } from './src/kiri/mode/cam/work/four-axis.js';
+
+// Construct 25mm square centered on (0, 0) in the Z-Y plane.
+// Vertices are at Z = ±12.5, Y = ±12.5
+// We create it CW (clockwise) in the Z-Y plane:
+// Z = -12.5, Y = -12.5 (bottom-left)
+// Z = -12.5, Y =  12.5 (top-left)
+// Z =  12.5, Y =  12.5 (top-right)
+// Z =  12.5, Y = -12.5 (bottom-right)
+const v1 = newPoint(0, -12.5, -12.5); // (x, y, z)
+const v2 = newPoint(0, 12.5, -12.5);
+const v3 = newPoint(0, 12.5, 12.5);
+const v4 = newPoint(0, -12.5, 12.5);
+
+const poly = newPolygon([v1, v2, v3, v4]);
+
+console.log("Constructed square polygon vertices:");
+console.log(poly.points.map(p => `(y=${p.y.toFixed(2)}, z=${p.z.toFixed(2)})`));
+
+const resampleDist = 0.5; // mm
+const resampled = resamplePolygon(poly, resampleDist);
+console.log(`Resampled polygon into ${resampled.points.length} points.`);
+
+const normals = computeNormals(resampled);
+
+const mockTool = {
+    isBallMill: () => false,
+    isTaperMill: () => false,
+    isTaperBall: () => false,
+    isDrill: () => false,
+    fluteDiameter: () => 3.0,
+    tipDiameter: () => 3.0,
+    fluteLength: () => 15.0,
+    getTaperAngle: () => 0
+};
+
+const resolution = 0.1;
+const mach = new Machinability([poly], resolution, mockTool);
+
+console.log("\nRunning Machinability Analysis on key points:");
+
+let checkedCount = 0;
+for (let i = 0; i < resampled.points.length; i++) {
+    const p = resampled.points[i];
+    const n = normals[i];
+    
+    // Check points closest to the axes
+    const isYNearZero = Math.abs(p.y) < 0.3;
+    const isZNearZero = Math.abs(p.z) < 0.3;
+    
+    if (isYNearZero || isZNearZero) {
+        checkedCount++;
+        const mdrs = mach.getMDRs(p, n);
+        console.log(`Point: (y=${p.y.toFixed(2)}, z=${p.z.toFixed(2)}) | Normal: (dy=${n.y.toFixed(4)}, dz=${n.z.toFixed(4)}) | Machinable angles count: ${mdrs.length}`);
+        if (mdrs.length > 0) {
+            console.log(`  Angles (subset): [${mdrs.slice(0, 10).join(", ")}${mdrs.length > 10 ? ", ..." : ""}]`);
+        } else {
+            console.log(`  ❌ NO MACHINABLE ANGLES FOUND`);
+        }
+    }
+}
+
+console.log(`\nChecked ${checkedCount} key points on the axes.`);
+
+// Force process exit to release active event handles (e.g. from loaded libs/three)
+process.exit(0);
