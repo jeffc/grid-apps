@@ -59,7 +59,6 @@ class OpFourAxis extends CamOp {
 
         // start top center, X = 0, Y = 0 closest to 4th axis chuck
         camOut(newPoint(0, 0, zSafe).setA(0), 0);
-        setContouring(true);
         setNextIsMove();
 
         for (let slice of slices) {
@@ -68,13 +67,7 @@ class OpFourAxis extends CamOp {
                 continue;
             }
 
-            for (let path of slice.camLines) {
-                for (let point of path.points) {
-                    camOut(point);
-                }
-            }
-
-            newLayer();
+            ops.emitTraces(slice.camLines);
         }
 
         // move to safe height and reset A axis

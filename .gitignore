@@ -21,3 +21,6 @@ src/void/solver
 tmp
 tmp_*/
 web/boot/bundle*
+fouraxis-debug/
+.antigravitycli/
+

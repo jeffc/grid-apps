@@ -803,7 +803,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
      * @returns {Point} - the last point emitted (in widget coordinates)
      */
     function polyEmit(poly, index, engage = false) {
-        let arcing = camArcEnabled && !contouring;
+        let arcing = camArcEnabled && !contouring && !isLathe && !isFourAxis;
         let points = poly.points;
 
         if (poly.isClosed()) {
@@ -834,7 +834,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         setNextIsMove();
 
         // we skip ease-down logic in contouring mode or for open polys (traces .. maybe later)
-        if (!contouring && camEaseDown && poly.isClosed()) {
+        if (!contouring && camEaseDown && poly.isClosed() && !isLathe && !isFourAxis) {
             let point0 = points[0];
 
             // perform "up and over" and get a new printPoint without "emit"

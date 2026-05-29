@@ -58,7 +58,7 @@ class Print {
         if (lastPoint && point && !arc && type !== 'lerp') {
             // nested due to uglify confusing browser
             const { x, y, z, a } = lastPoint;
-            if (point.x == x && point.y == y && point.z == z && point.a == z && lastEmit == emit) {
+            if (point.x == x && point.y == y && point.z == z && point.a == a && lastEmit == emit) {
                 return lastOut;
             }
         }
