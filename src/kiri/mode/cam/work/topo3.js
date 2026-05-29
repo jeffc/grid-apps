@@ -1007,23 +1007,19 @@ export class Trace {
         while (r <= maxR) {
             const x = centerX + r * Math.cos(theta);
             const y = centerY + r * Math.sin(theta);
+            checkr.x = x;
+            checkr.y = y;
 
-            if (x >= box.min.x && x <= box.max.x && y >= box.min.y && y <= box.max.y) {
+            if (clipTo && !inClip(clipTo, undefined, checkr)) {
+                end_poly();
+            } else {
                 let tv = toolAtXY(x, y);
-                checkr.x = x;
-                checkr.y = y;
 
                 if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
                     tv = this.tabZ;
                 }
 
-                if (clipTo && !inClip(clipTo, undefined, checkr)) {
-                    end_poly();
-                } else {
-                    push_point(x, y, tv + leave);
-                }
-            } else {
-                end_poly();
+                push_point(x, y, tv + leave);
             }
 
             const dtheta = step / Math.sqrt(b * b + r * r);
