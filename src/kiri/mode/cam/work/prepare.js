@@ -190,7 +190,8 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
     function setContouring(bool, step, coast) {
         coastline = coast;
         contouring = bool;
-        toolDiamMove = step ?? tool.getStepSize(currentOp.step) * 2;
+        let baseStep = step ?? tool.getStepSize(currentOp.step) * 2;
+        toolDiamMove = Math.max(baseStep, tool.fluteDiameter());
         if (bool) setTravelBoundary();
     }
 
@@ -542,10 +543,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
 
         // contouring logic
         if (isMove && contouring) {
-            const isRadial = currentOp && (currentOp.axis || '').toLowerCase() === 'radial';
-            if (isRadial) {
-                upAndOver = true;
-            } else if (coastline && deltaXY < 5 && coastlineMove(point)) {
+            if (coastline && deltaXY < 5 && coastlineMove(point)) {
                 // console.log('coastline move');
             } else if (deltaXY > toolDiamMove) {
                 upAndOver = true;

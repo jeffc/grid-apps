@@ -47,6 +47,7 @@ export class Topo {
             leave = contour.leave || 0,
             maxangle = contour.angle,
             curvesOnly = contour.curves,
+            curvesDist = (contour.curvesDist !== undefined) ? contour.curvesDist : 3.0,
             bridge = contour.bridging || 0,
             stepsX = Math.ceil(boundsX / resolution),
             stepsY = Math.ceil(boundsY / resolution),
@@ -362,6 +363,7 @@ export class Topo {
 
         const trace = this.trace = new Trace(probe, {
             curvesOnly,
+            curvesDist,
             maxangle,
             flatness,
             bridge,
@@ -775,7 +777,7 @@ export class Trace {
 
     constructor(probe, params) {
 
-        const { curvesOnly, maxangle, flatness, bridge, contourX, contourR, leave, resolution } = params;
+        const { curvesOnly, curvesDist, maxangle, flatness, bridge, contourX, contourR, leave, resolution } = params;
 
         this.params = params;
         this.probe = probe;
@@ -784,7 +786,10 @@ export class Trace {
             slice,
             latent,
             lastPP,
-            lastSlope;
+            lastSlope,
+            flatBuffer = [],
+            flatDist = 0,
+            splitDone = false;
 
         const newslice = this.newslice = () => {
             this.slice = slice = [];
@@ -795,6 +800,16 @@ export class Trace {
         }
 
         const end_poly = this.end_poly = function (point) {
+            if (flatBuffer.length > 0) {
+                if (!splitDone) {
+                    for (let p of flatBuffer) {
+                        trace.push(p);
+                    }
+                }
+                flatBuffer = [];
+                flatDist = 0;
+                splitDone = false;
+            }
             if (latent) {
                 trace.push(latent);
             }
@@ -830,33 +845,87 @@ export class Trace {
             const newP = newPoint(x, y, z);
             const lastP = lastPP;
 
-            // Bypass linear slope-based point simplification in radial mode.
-            // On flat horizontal faces (dz = 0), a constant slope calculation of 0
-            // would otherwise collapse the spiral path into a single straight line.
-            if (contourR) {
-                if (lastP) {
-                    const dl = (x - lastP.x) || (y - lastP.y);
-                    const dz = z - lastP.z;
-                    let isSurfaceSloped = false;
-                    if (curvesOnly) {
+            if (lastP) {
+                const dl = (x - lastP.x) || (y - lastP.y);
+                const dz = z - lastP.z;
+
+                let isFlat = false;
+                if (curvesOnly) {
+                    if (contourR) {
                         const delta = Math.max(resolution * 3, 0.5);
                         const z0 = z - leave;
                         const zX1 = probe.toolAtXY(x + delta, y);
                         const zX2 = probe.toolAtXY(x - delta, y);
                         const zY1 = probe.toolAtXY(x, y + delta);
                         const zY2 = probe.toolAtXY(x, y - delta);
-                        isSurfaceSloped = 
+                        const isSurfaceSloped = 
                             Math.abs(zX1 - z0) >= flatness || 
                             Math.abs(zX2 - z0) >= flatness || 
                             Math.abs(zY1 - z0) >= flatness || 
                             Math.abs(zY2 - z0) >= flatness;
-                    }
-                    if (curvesOnly && Math.abs(dz) < flatness && !isSurfaceSloped) {
-                        trace.setOpen();
-                        end_poly(newP);
+                        isFlat = Math.abs(dz) < flatness && !isSurfaceSloped;
                     } else {
+                        isFlat = Math.abs(dz) < flatness;
+                    }
+                }
+
+                if (isFlat) {
+                    if (flatBuffer.length === 0) {
+                        flatBuffer.push(newP);
+                        flatDist = lastP.distTo2D(newP);
+                        splitDone = false;
+                    } else {
+                        flatDist += flatBuffer[flatBuffer.length - 1].distTo2D(newP);
+                        flatBuffer.push(newP);
+                    }
+
+                    if (flatDist > curvesDist) {
+                        if (!splitDone) {
+                            trace.setOpen();
+                            end_poly();
+                            splitDone = true;
+                        }
+                        flatBuffer = [newP];
+                    }
+                    lastPP = newP;
+                    return;
+                }
+
+                // If we were in a flat region, flush it now before handling the sloped/steep point
+                if (flatBuffer.length > 0) {
+                    if (splitDone) {
+                        trace.push(flatBuffer[flatBuffer.length - 1]);
+                    } else {
+                        for (let p of flatBuffer) {
+                            trace.push(p);
+                        }
+                    }
+                    flatBuffer = [];
+                    flatDist = 0;
+                    splitDone = false;
+                }
+
+                if (contourR) {
+                    if (curvesOnly) {
+                        const dv = lastP.distTo2D(newP);
+                        const angle = Math.atan2(Math.abs(dz), dv) * RAD2DEG;
+                        if (angle > maxangle) {
+                            trace.setOpen();
+                            end_poly();
+                        }
+                    }
+                    trace.push(newP);
+                } else {
+                    const slope = Math.atan2(dz, dl);
+                    if (lastSlope !== undefined && Math.abs(lastSlope - slope) < flatness) {
+                        latent = newP;
+                    } else {
+                        if (latent) {
+                            trace.push(latent);
+                            latent = undefined;
+                        }
                         if (curvesOnly) {
-                            const dv = lastP.distTo2D(newP);
+                            const dv = contourX ? Math.abs(lastP.x - x) : Math.abs(lastP.y - y);
                             const angle = Math.atan2(Math.abs(dz), dv) * RAD2DEG;
                             if (angle > maxangle) {
                                 trace.setOpen();
@@ -865,36 +934,8 @@ export class Trace {
                         }
                         trace.push(newP);
                     }
-                } else {
-                    trace.push(newP);
+                    lastSlope = slope;
                 }
-                lastPP = newP;
-                return;
-            }
-
-            if (lastP) {
-                const dl = (x - lastP.x) || (y - lastP.y);
-                const dz = z - lastP.z;
-                const slope = Math.atan2(dz, dl);
-                if (curvesOnly && Math.abs(dz) < flatness) {
-                    end_poly(newP);
-                } else if (lastSlope !== undefined && Math.abs(lastSlope - slope) < flatness) {
-                    latent = newP;
-                } else {
-                    if (latent) {
-                        trace.push(latent);
-                        latent = undefined;
-                    }
-                    if (curvesOnly) {
-                        const dv = contourX ? Math.abs(lastP.x - x) : Math.abs(lastP.y - y);
-                        const angle = Math.atan2(Math.abs(dz), dv) * RAD2DEG;
-                        if (angle > maxangle) {
-                            end_poly();
-                        }
-                    }
-                    trace.push(newP);
-                }
-                lastSlope = slope;
             } else {
                 trace.push(newP);
             }

@@ -143,7 +143,7 @@ class OpContour extends CamOp {
         let { settings } = state;
         let { process } = settings;
 
-        let { polyEmit, setContouring, setTolerance, setTool } = ops;
+        let { polyEmit, setContouring, setTolerance, setTool, setTravelBoundary } = ops;
         let { widget, newLayer, zmax } = ops;
 
         let bounds = widget.getBoundingBox();
@@ -151,6 +151,9 @@ class OpContour extends CamOp {
 
         setTool(op.tool, op.rate, process.camFastFeedZ);
         setContouring(true, toolStep * 1.5, topo.coastline);
+        if (state.shadow && state.shadow.base) {
+            setTravelBoundary(state.shadow.base);
+        }
         setTolerance(this.tolerance);
 
         let printPoint = newPoint(bounds.min.x, bounds.min.y, zmax);
