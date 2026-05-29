@@ -75,7 +75,8 @@ export class Topo {
             tabsOn = tabs,
             tabHeight = Math.max(process.camTabsHeight + zBottom, tabsMax),
             clipTab = tabsOn ? [] : null,
-            clipTo = inside ? shadow.base : POLY.expand(shadow.base, toolDiameter / 2 + (contourR ? toolStep : 0) + resolution * 3),
+            shadowBase = (contour.omitthru && shadow.holes) ? omitMatching(shadow.base, shadow.holes) : shadow.base,
+            clipTo = inside ? shadowBase : POLY.expand(shadowBase, toolDiameter / 2 + (contourR ? toolStep : 0) + resolution * 3),
             partOff = inside ? 0 : toolDiameter / 2 + resolution,
             gridDelta = Math.floor(partOff / resolution),
             debug_clips = true;
@@ -337,7 +338,7 @@ export class Topo {
                     onupdate(i, numScanlines);
                 }
             }
-            ondone(slices);
+            ondone(slices, this);
             return this;
         }
 
@@ -420,7 +421,7 @@ export class Topo {
             onupdate(l / 2 + i / 2, l, p);
         });
 
-        ondone(newslices);
+        ondone(newslices, this);
 
         return this;
     }
@@ -670,9 +671,30 @@ export class Topo {
                 shape: (shape || 'Spiral').toLowerCase()
             }, segments => {
                 if (segments.length > 0) {
-                    let slice = newSlice(0);
-                    slice.camLines = segments;
-                    slicesR.push(slice);
+                    if ((shape || 'Spiral').toLowerCase() === 'perimeter') {
+                        // Export each loop as a separate slice
+                        let grouped = [];
+                        for (let seg of segments) {
+                            let lidx = seg.loopIndex ?? 0;
+                            if (!grouped[lidx]) {
+                                grouped[lidx] = [];
+                            }
+                            grouped[lidx].push(seg);
+                        }
+                        let sliceIdx = 0;
+                        for (let g of grouped) {
+                            if (g && g.length > 0) {
+                                let slice = newSlice(sliceIdx++);
+                                slice.camLines = g;
+                                slicesR.push(slice);
+                            }
+                        }
+                    } else {
+                        // Spiral mode: single slice
+                        let slice = newSlice(0);
+                        slice.camLines = segments;
+                        slicesR.push(slice);
+                    }
                 }
                 onupdate(stepsTotal, stepsTotal, "contour radial");
                 dec();
@@ -1029,15 +1051,17 @@ export class Trace {
                 // Reversing outs gives: [innermost, ..., second offset, first offset]
                 let loops = [];
                 for (let i = outs.length - 1; i >= 0; i--) {
-                    loops.push(outs[i]);
+                    loops.push(outs[i].clone(true));
                 }
                 // Finally, append the original boundary (clipTo) at the end so we do a final pass around the perimeter
                 for (let poly of clipTo) {
-                    loops.push(poly);
+                    loops.push(poly.clone(true));
                 }
+                loops = POLY.flatten(loops, [], true);
 
                 const self_trace = this;
 
+                let loopIdx = 0;
                 for (let poly of loops) {
                     const points = poly.points;
                     const numPoints = points.length;
@@ -1100,6 +1124,7 @@ export class Trace {
                                 if (!tracing) {
                                     newtrace();
                                     tracing = true;
+                                    self_trace.trace.loopIndex = loopIdx;
                                 }
                                 push_point(pt.x, pt.y, pt.z + leave);
                             } else {
@@ -1116,11 +1141,13 @@ export class Trace {
                         // No clipping at all: emit as a single closed polygon
                         newtrace();
                         self_trace.trace.open = false;
+                        self_trace.trace.loopIndex = loopIdx;
                         for (let pt of evaluated) {
                             push_point(pt.x, pt.y, pt.z + leave);
                         }
                         end_poly();
                     }
+                    loopIdx++;
                 }
             }
         } else {
@@ -1261,6 +1288,21 @@ export function raster_slice(inputs) {
 
     return points;
 };
+
+function omitMatching(target, matches) {
+    target = target.clone(true);
+    for (let poly of target.filter(p => p.inner)) {
+        poly.inner = poly.inner.filter(inner => {
+            for (let ho of matches) {
+                if (inner.isEquivalent(ho)) {
+                    return false;
+                }
+            }
+            return true;
+        });
+    }
+    return target;
+}
 
 export async function generate(opt) {
     return new Topo().generate(opt);

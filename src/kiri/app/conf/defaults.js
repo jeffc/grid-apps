@@ -456,6 +456,7 @@ export const conf = {
                 camContourCurves: false,
                 camContourIn: false,
                 camContourLeave: 0,
+                camContourOmitThru: false,
                 camContourOver: 0.5,
                 camContourReduce: 2,
                 camContourShape: "Spiral",

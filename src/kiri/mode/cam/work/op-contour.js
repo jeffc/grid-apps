@@ -109,7 +109,10 @@ class OpContour extends CamOp {
             onupdate: (index, total, msg) => {
                 progress(index / total, msg);
             },
-            ondone: (slices) => {
+            ondone: (slices, topo) => {
+                if (op.omitthru && state.shadow && state.shadow.holes && state.shadow.holes.length) {
+                    slices = cleanupContourSlices(slices, state.shadow.holes, topo, op);
+                }
                 slices = filter(slices);
                 this.sliceOut = slices;
                 addSlices(slices);
@@ -152,28 +155,169 @@ class OpContour extends CamOp {
 
         let printPoint = newPoint(bounds.min.x, bounds.min.y, zmax);
 
-        for (let slice of sliceOut) {
-            // ignore debug slices
-            if (!slice.camLines) {
-                continue;
-            }
-            let polys = [], poly;
-            slice.camLines.forEach((poly) => {
-                poly = poly.clone(true).annotate({ slice: slice.index + 1 });
-                polys.push({ first: poly.first(), last: poly.last(), poly: poly });
-            });
-            depthData.appendAll(polys);
-        }
+        const isRadial = op.axis.toLowerCase() === 'radial';
 
-        tip2tipEmit(depthData, printPoint, (el, point) => {
-            let poly = el.poly;
-            if (poly.last() === point) {
-                poly.reverse();
+        if (isRadial) {
+            for (let slice of sliceOut) {
+                // ignore debug slices
+                if (!slice.camLines) {
+                    continue;
+                }
+                let polys = [];
+                slice.camLines.forEach((poly) => {
+                    poly = poly.clone(true).annotate({ slice: slice.index + 1 });
+                    polys.push({ first: poly.first(), last: poly.last(), poly: poly });
+                });
+                printPoint = tip2tipEmit(polys, printPoint, (el, point) => {
+                    let poly = el.poly;
+                    if (poly.isClosed()) {
+                        poly.setCounterClockwise();
+                        polyEmit(poly, -999);
+                    } else {
+                        if (poly.last() === point) {
+                            poly.reverse();
+                        }
+                        polyEmit(poly);
+                    }
+                    newLayer();
+                });
             }
-            polyEmit(poly);
-            newLayer();
-        });
+        } else {
+            for (let slice of sliceOut) {
+                // ignore debug slices
+                if (!slice.camLines) {
+                    continue;
+                }
+                let polys = [], poly;
+                slice.camLines.forEach((poly) => {
+                    poly = poly.clone(true).annotate({ slice: slice.index + 1 });
+                    polys.push({ first: poly.first(), last: poly.last(), poly: poly });
+                });
+                depthData.appendAll(polys);
+            }
+
+            tip2tipEmit(depthData, printPoint, (el, point) => {
+                let poly = el.poly;
+                if (poly.isClosed()) {
+                    poly.setCounterClockwise();
+                    polyEmit(poly, -999);
+                } else {
+                    if (poly.last() === point) {
+                        poly.reverse();
+                    }
+                    polyEmit(poly);
+                }
+                newLayer();
+            });
+        }
     }
+}
+
+function closestPointOnSegment(p, a, b) {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let ab2 = abx * abx + aby * aby;
+    if (ab2 === 0) return a;
+    let t = (apx * abx + apy * aby) / ab2;
+    t = Math.max(0, Math.min(1, t));
+    return newPoint(a.x + t * abx, a.y + t * aby);
+}
+
+function closestPointOnPolygon(pt, poly) {
+    let points = poly.points;
+    let len = points.length;
+    let minD = Infinity;
+    let closest = null;
+    for (let i = 0; i < len; i++) {
+        let p1 = points[i];
+        let p2 = points[(i + 1) % len];
+        let cp = closestPointOnSegment(pt, p1, p2);
+        let d = pt.distTo2D(cp);
+        if (d < minD) {
+            minD = d;
+            closest = cp;
+        }
+    }
+    return closest;
+}
+
+function cleanupContourSlices(slices, holes, topo, op) {
+    let holeBoxes = [];
+    for (let hole of holes) {
+        let min_x = Infinity, max_x = -Infinity, min_y = Infinity, max_y = -Infinity;
+        for (let p of hole.points) {
+            if (p.x < min_x) min_x = p.x;
+            if (p.x > max_x) max_x = p.x;
+            if (p.y < min_y) min_y = p.y;
+            if (p.y > max_y) max_y = p.y;
+        }
+        holeBoxes.push({ min_x, max_x, min_y, max_y, hole });
+    }
+
+    for (let slice of slices) {
+        if (!slice.camLines) continue;
+        let newPolys = [];
+        for (let poly of slice.camLines) {
+            let newPoints = [];
+            let inHolePolygon = null;
+            let inHoleStart = null;
+            let inHoleLast = null;
+
+            const emitHole = () => {
+                if (inHolePolygon) {
+                    if (inHoleStart) {
+                        newPoints.push(inHoleStart);
+                    }
+                    if (inHoleLast && inHoleLast !== inHoleStart) {
+                        newPoints.push(inHoleLast);
+                    }
+                    inHolePolygon = null;
+                    inHoleStart = null;
+                    inHoleLast = null;
+                }
+            };
+
+            for (let pt of poly.points) {
+                let currentHole = null;
+                for (let hb of holeBoxes) {
+                    if (pt.x >= hb.min_x && pt.x <= hb.max_x && pt.y >= hb.min_y && pt.y <= hb.max_y) {
+                        if (pt.isInPolygon(hb.hole)) {
+                            currentHole = hb.hole;
+                            break;
+                        }
+                    }
+                }
+
+                if (currentHole) {
+                    let edgePt = closestPointOnPolygon(pt, currentHole);
+                    let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
+                    let projectedPt = newPoint(edgePt.x, edgePt.y, z);
+
+                    if (inHolePolygon === currentHole) {
+                        inHoleLast = projectedPt;
+                    } else {
+                        emitHole();
+                        inHolePolygon = currentHole;
+                        inHoleStart = projectedPt;
+                        inHoleLast = projectedPt;
+                    }
+                } else {
+                    emitHole();
+                    newPoints.push(pt);
+                }
+            }
+            emitHole();
+
+            if (newPoints.length > 1) {
+                poly.points = newPoints;
+                newPolys.push(poly);
+            }
+        }
+        slice.camLines = newPolys;
+    }
+    return slices;
 }
 
 export { OpContour };

@@ -413,6 +413,7 @@ export function createPopOps() {
         curves: 'camContourCurves',
         inside: 'camContourIn',
         clipto: 'camStockClipTo',
+        omitthru: 'camContourOmitThru',
         filter: 'camContourFilter',
         axis: 'X',
         shape: 'camContourShape'
@@ -437,6 +438,7 @@ export function createPopOps() {
         inside: UC.newBoolean(LANG.cf_olin_s, undefined, { title: LANG.cf_olin_l }),
         bottom: UC.newBoolean(LANG.cf_botm_s, undefined, { title: LANG.cf_botm_l, show: (op, conf) => conf ? conf.process.camZBottom : 0 }),
         clipto: UC.newBoolean(LANG.cf_clip_s, undefined, { title:LANG.cf_clip_l, show: () => !isWebGPU() }),
+        omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l }),
         filter: UC.newRow([UC.newButton(LANG.filter, contourFilter)], { class: "ext-buttons f-row" })
     };
 
