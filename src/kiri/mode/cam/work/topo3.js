@@ -671,7 +671,7 @@ export class Topo {
                 shape: (shape || 'Spiral').toLowerCase()
             }, segments => {
                 if (segments.length > 0) {
-                    if ((shape || 'Spiral').toLowerCase() === 'perimeter') {
+                    if ((shape || 'Spiral').toLowerCase() === 'concentric') {
                         // Export each loop as a separate slice
                         let grouped = [];
                         for (let seg of segments) {
@@ -1038,7 +1038,7 @@ export class Trace {
 
         newslice();
 
-        if (shape === 'perimeter') {
+        if (shape === 'concentric') {
             if (clipTo && clipTo.length) {
                 let outs = [];
                 // Generate concentric loop offsets using POLY.offset.

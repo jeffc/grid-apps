@@ -99,7 +99,7 @@ const LISTS = {
     ],
     crshape: [
         { name: "Spiral" },
-        { name: "Perimeter" }
+        { name: "Concentric" }
     ],
     regaxis: [
         { name: "X" },
