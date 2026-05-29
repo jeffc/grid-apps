@@ -43,7 +43,7 @@ function createFilter(op, origin, axis) {
                                     );
                                 }
                             }
-                        } else {
+                        } else if (axis === 'y') {
                             let sx = slice.z - origin.x;
                             if (sx >= x[0] && sx <= x[1]) {
                                 ok = true;
@@ -53,6 +53,15 @@ function createFilter(op, origin, axis) {
                                         p.z - origin.z >= z[0] && p.z - origin.z <= z[1]
                                     );
                                 }
+                            }
+                        } else if (axis === 'radial') {
+                            ok = true;
+                            for (let p of slice.camLines) {
+                                p.points = p.points.filter(p =>
+                                    p.x - origin.x >= x[0] && p.x - origin.x <= x[1] &&
+                                    p.y - origin.y >= y[0] && p.y - origin.y <= y[1] &&
+                                    p.z - origin.z >= z[0] && p.z - origin.z <= z[1]
+                                );
                             }
                         }
                         if (ok) {

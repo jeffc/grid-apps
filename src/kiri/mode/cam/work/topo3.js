@@ -25,6 +25,7 @@ export class Topo {
             axis = contour.axis.toLowerCase(),
             contourX = axis === "x",
             contourY = axis === "y",
+            contourR = axis === "radial",
             bounds = widget.getBoundingBox().clone(),
             tolerance = contour.tolerance,
             flatness = contour.flatness || (tolerance / 100),
@@ -110,7 +111,7 @@ export class Topo {
             newslices.push(debug);
         }
 
-        if (webGPU && !contour.nogpu) {
+        if (webGPU && !contour.nogpu && !contourR) {
             // invert tool Z offset for gpu code
             let toolBounds = new THREE.Box3()
                 .expandByPoint({ x: -toolDiameter/2, y: -toolDiameter/2, z: 0 })
@@ -356,7 +357,8 @@ export class Topo {
             maxangle,
             flatness,
             bridge,
-            contourX
+            contourX,
+            contourR
         });
 
         if (topo.raster) {
@@ -397,6 +399,7 @@ export class Topo {
             toolStep,
             contourX,
             contourY,
+            contourR,
             density,
             clipTo,
             clipTab,
@@ -529,7 +532,7 @@ export class Topo {
         const concurrent = self.kiri_worker.minions.running;
 
         const { minX, maxX, minY, maxY, boundsX, boundsY, stepsX, stepsY } = params;
-        const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY } = params;
+        const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY, contourR } = params;
         const { clipTo, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
 
         let stepsTaken = 0,
@@ -541,6 +544,17 @@ export class Topo {
 
         if (contourY) {
             stepsTotal += ((maxX - minX + partOff * 2) / toolStep) | 0;
+        }
+
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+        const dx = maxX - centerX + partOff;
+        const dy = maxY - centerY + partOff;
+        const maxR = Math.sqrt(dx * dx + dy * dy);
+        const totalTurns = maxR / toolStep;
+
+        if (contourR) {
+            stepsTotal += Math.ceil(totalTurns);
         }
 
         if (stepsTotal === 0) {
@@ -559,7 +573,7 @@ export class Topo {
             clipTabZ,
             tabHeight,
             resolution,
-            concurrent,
+            concurrent: contourR ? false : concurrent,
             density
         });
 
@@ -567,13 +581,16 @@ export class Topo {
         let pcount = 0;
         let slicesY = [];
         let slicesX = [];
+        let slicesR = [];
         let promise = new Promise(resolve => {
             resolver = () => {
                 // sort output slices (required for async)
                 slicesY.sort((a, b) => a.z - b.z);
                 slicesX.sort((a, b) => a.z - b.z);
+                slicesR.sort((a, b) => a.z - b.z);
                 newslices.appendAll(slicesY);
                 newslices.appendAll(slicesX);
+                newslices.appendAll(slicesR);
                 resolve();
             }
         });
@@ -630,6 +647,25 @@ export class Topo {
                     dec();
                 });
             }
+        }
+
+        if (contourR) {
+            onupdate(0, stepsTotal, "contour radial");
+            inc();
+            trace.crossRadial({
+                centerX,
+                centerY,
+                maxR,
+                toolStep
+            }, segments => {
+                if (segments.length > 0) {
+                    let slice = newSlice(0);
+                    slice.camLines = segments;
+                    slicesR.push(slice);
+                }
+                onupdate(stepsTotal, stepsTotal, "contour radial");
+                dec();
+            });
         }
 
         if (!concurrent) resolver();
@@ -704,7 +740,7 @@ export class Trace {
 
     constructor(probe, params) {
 
-        const { curvesOnly, maxangle, flatness, bridge, contourX, leave } = params;
+        const { curvesOnly, maxangle, flatness, bridge, contourX, contourR, leave } = params;
 
         this.params = params;
         this.probe = probe;
@@ -756,6 +792,12 @@ export class Trace {
         this.push_point = function (x, y, z) {
             const newP = newPoint(x, y, z);
             const lastP = lastPP;
+
+            if (contourR) {
+                trace.push(newP);
+                lastPP = newP;
+                return;
+            }
 
             if (lastP) {
                 const dl = (x - lastP.x) || (y - lastP.y);
@@ -936,6 +978,57 @@ export class Trace {
             }
             push_point(x, y, tv + leave);
             gridx += density;
+        }
+        end_poly();
+        then(this.slice);
+    }
+
+    crossRadial(params, then) {
+        this.crossRadial_sync(params, then);
+    }
+
+    crossRadial_sync(params, then) {
+        const { push_point, end_poly, newtrace, newslice, inClip } = this.object;
+        const { clipTab, tabHeight, clipTo, box, resolution, density, leave } = this.cross;
+        const { toolAtXY } = this.probe;
+
+        let { centerX, centerY, maxR, toolStep } = params;
+
+        const step = resolution * density;
+        const b = toolStep / (2 * Math.PI);
+        const checkr = newPoint(0, 0);
+
+        newslice();
+        newtrace();
+
+        let theta = 0;
+        let r = 0;
+
+        while (r <= maxR) {
+            const x = centerX + r * Math.cos(theta);
+            const y = centerY + r * Math.sin(theta);
+
+            if (x >= box.min.x && x <= box.max.x && y >= box.min.y && y <= box.max.y) {
+                let tv = toolAtXY(x, y);
+                checkr.x = x;
+                checkr.y = y;
+
+                if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
+                    tv = this.tabZ;
+                }
+
+                if (clipTo && !inClip(clipTo, undefined, checkr)) {
+                    end_poly();
+                } else {
+                    push_point(x, y, tv + leave);
+                }
+            } else {
+                end_poly();
+            }
+
+            const dtheta = step / Math.sqrt(b * b + r * r);
+            theta += dtheta;
+            r = b * theta;
         }
         end_poly();
         then(this.slice);
