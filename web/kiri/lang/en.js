@@ -600,6 +600,8 @@ self.lang['en-us'] = {
     cf_liny_l:      "linear x-axis finishing",
     cf_clip_s:      "clip to stock",
     cf_clip_l:      ["contour op only","clip cutting paths","to defined stock"],
+    cf_shpe_s:      "shape",
+    cf_shpe_l:      "contour shape mode",
 
     // CNC TRACE
     cu_menu:        "trace",

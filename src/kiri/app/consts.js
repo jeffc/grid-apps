@@ -97,6 +97,10 @@ const LISTS = {
         { name: "Y" },
         { name: "Radial" }
     ],
+    crshape: [
+        { name: "Spiral" },
+        { name: "Perimeter" }
+    ],
     regaxis: [
         { name: "X" },
         { name: "Y" },

@@ -414,10 +414,12 @@ export function createPopOps() {
         inside: 'camContourIn',
         clipto: 'camStockClipTo',
         filter: 'camContourFilter',
-        axis: 'X'
+        axis: 'X',
+        shape: 'camContourShape'
     }).inputs = {
         tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
-        axis: UC.newSelect(LANG.cd_axis, {}, "xyaxis"),
+        axis: UC.newSelect(LANG.cd_axis, { trigger: true }, "xyaxis"),
+        shape: UC.newSelect(LANG.cf_shpe_s, { title: LANG.cf_shpe_l, show: () => env.poppedRec.axis === 'Radial' }, "crshape"),
         sep: UC.newBlank({ class: "pop-sep" }),
         spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),
         rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),

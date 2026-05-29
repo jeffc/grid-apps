@@ -816,7 +816,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             }
         }
 
-        if (!contouring && poly.isClosed()) {
+        if (poly.isClosed()) {
             points.push(points[0].clone());
         }
 

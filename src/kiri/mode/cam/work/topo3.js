@@ -414,7 +414,8 @@ export class Topo {
             clipTabZ: clipTab ? clipTab.map(t => t.z) : undefined,
             tabHeight,
             newslices,
-            leave
+            leave,
+            shape: contour.shape
         }, (i, l, p) => {
             onupdate(l / 2 + i / 2, l, p);
         });
@@ -541,7 +542,7 @@ export class Topo {
 
         const { minX, maxX, minY, maxY, boundsX, boundsY, stepsX, stepsY } = params;
         const { gridDelta, resolution, density, partOff, toolStep, contourX, contourY, contourR } = params;
-        const { clipTo, clipStock, clipTab, clipTabZ, tabHeight, newslices, leave } = params;
+        const { clipTo, clipStock, clipTab, clipTabZ, tabHeight, newslices, leave, shape } = params;
 
         let stepsTaken = 0,
             stepsTotal = 0;
@@ -665,7 +666,8 @@ export class Topo {
                 centerX,
                 centerY,
                 maxR,
-                toolStep
+                toolStep,
+                shape: (shape || 'Spiral').toLowerCase()
             }, segments => {
                 if (segments.length > 0) {
                     let slice = newSlice(0);
@@ -765,7 +767,7 @@ export class Trace {
         }
 
         const newtrace = this.newtrace = function () {
-            trace = newPolygon().setOpen();
+            trace = object.trace = newPolygon().setOpen();
         }
 
         const end_poly = this.end_poly = function (point) {
@@ -1006,53 +1008,165 @@ export class Trace {
         const { clipTab, tabHeight, clipTo, clipStock, box, resolution, density, leave } = this.cross;
         const { toolAtXY } = this.probe;
 
-        let { centerX, centerY, maxR, toolStep } = params;
+        let { centerX, centerY, maxR, toolStep, shape } = params;
 
-        // Step resolution along the spiral curve
+        // Step resolution along the curve/polygon
         const step = resolution * density;
-        // Growth coefficient for Archimedean spiral (expansion of toolStep per 2pi radians)
-        const b = toolStep / (2 * Math.PI);
         const checkr = newPoint(0, 0);
 
         newslice();
-        newtrace();
 
-        let theta = 0;
-        let r = 0;
+        if (shape === 'perimeter') {
+            if (clipTo && clipTo.length) {
+                let outs = [];
+                // Generate concentric loop offsets using POLY.offset.
+                // -toolStep is used to offset inwards.
+                // z: 0 is used because we offset on the 2D plane and then probe 3D topography.
+                POLY.offset(clipTo, -toolStep, { count: 999, outs: outs, flat: true, z: 0, minArea: 0.01 });
 
-        while (r <= maxR) {
-            // Convert polar coordinates to Cartesian workspace coordinates
-            const x = centerX + r * Math.cos(theta);
-            const y = centerY + r * Math.sin(theta);
-            checkr.x = x;
-            checkr.y = y;
-
-            // Restrict toolpath within stock AND expanded part silhouette boundaries (intersection check)
-            const inStock = !clipStock || inClip(clipStock, undefined, checkr);
-            const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
-
-            if (!inStock || !inShadow) {
-                // Terminate path if we exit the allowed stock or shadow regions
-                end_poly();
-            } else {
-                // Probe topography height map at (x, y) coordinates
-                let tv = toolAtXY(x, y);
-
-                // Override height if tool is within tab boundary to prevent milling tabs
-                if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
-                    tv = this.tabZ;
+                // We want to cut from the inside out.
+                // outs is generated from outside-in: [first offset, second offset, ..., innermost]
+                // Reversing outs gives: [innermost, ..., second offset, first offset]
+                let loops = [];
+                for (let i = outs.length - 1; i >= 0; i--) {
+                    loops.push(outs[i]);
+                }
+                // Finally, append the original boundary (clipTo) at the end so we do a final pass around the perimeter
+                for (let poly of clipTo) {
+                    loops.push(poly);
                 }
 
-                push_point(x, y, tv + leave);
-            }
+                const self_trace = this;
 
-            // Stepping formula: dtheta = ds / sqrt(b^2 + r^2) to maintain a constant 
-            // linear feed resolution (step size) as the spiral radius expands.
-            const dtheta = step / Math.sqrt(b * b + r * r);
-            theta += dtheta;
-            r = b * theta;
+                for (let poly of loops) {
+                    const points = poly.points;
+                    const numPoints = points.length;
+                    if (numPoints < 2) continue;
+
+                    // 1. Generate subdivided points along the loop to preserve original vertices
+                    let subPoints = [];
+                    for (let i = 0; i < numPoints; i++) {
+                        const p1 = points[i];
+                        const p2 = points[(i + 1) % numPoints];
+                        const len = p1.distTo2D(p2);
+
+                        if (len > step) {
+                            const divisions = Math.ceil(len / step);
+                            for (let j = 0; j < divisions; j++) {
+                                const pct = j / divisions;
+                                const x = p1.x + (p2.x - p1.x) * pct;
+                                const y = p1.y + (p2.y - p1.y) * pct;
+                                subPoints.push({ x, y });
+                            }
+                        } else {
+                            subPoints.push({ x: p1.x, y: p1.y });
+                        }
+                    }
+
+                    // 2. Evaluate clipping and probe Z height for each point
+                    let evaluated = [];
+                    let hasOut = false;
+
+                    for (let pt of subPoints) {
+                        checkr.x = pt.x;
+                        checkr.y = pt.y;
+
+                        const inStock = !clipStock || inClip(clipStock, undefined, checkr);
+                        const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
+                        const inClipPos = inStock && inShadow;
+
+                        if (!inClipPos) {
+                            hasOut = true;
+                            evaluated.push({ x: pt.x, y: pt.y, z: 0, inClip: false });
+                        } else {
+                            let tv = toolAtXY(pt.x, pt.y);
+                            if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
+                                tv = this.tabZ;
+                            }
+                            evaluated.push({ x: pt.x, y: pt.y, z: tv, inClip: true });
+                        }
+                    }
+
+                    // 3. Emit points using state machine
+                    if (hasOut) {
+                        // Find first out-of-clip point to start rotation
+                        let firstOutIdx = evaluated.findIndex(p => !p.inClip);
+                        // Rotate array so it starts with an out-of-clip point
+                        let rotated = [...evaluated.slice(firstOutIdx), ...evaluated.slice(0, firstOutIdx)];
+
+                        let tracing = false;
+                        for (let pt of rotated) {
+                            if (pt.inClip) {
+                                if (!tracing) {
+                                    newtrace();
+                                    tracing = true;
+                                }
+                                push_point(pt.x, pt.y, pt.z + leave);
+                            } else {
+                                if (tracing) {
+                                    end_poly();
+                                    tracing = false;
+                                }
+                            }
+                        }
+                        if (tracing) {
+                            end_poly();
+                        }
+                    } else {
+                        // No clipping at all: emit as a single closed polygon
+                        newtrace();
+                        self_trace.trace.open = false;
+                        for (let pt of evaluated) {
+                            push_point(pt.x, pt.y, pt.z + leave);
+                        }
+                        end_poly();
+                    }
+                }
+            }
+        } else {
+            // Default Spiral Mode (Archimedean spiral from center outwards)
+            newtrace();
+
+            // Growth coefficient for Archimedean spiral (expansion of toolStep per 2pi radians)
+            const b = toolStep / (2 * Math.PI);
+            let theta = 0;
+            let r = 0;
+
+            while (r <= maxR) {
+                // Convert polar coordinates to Cartesian workspace coordinates
+                const x = centerX + r * Math.cos(theta);
+                const y = centerY + r * Math.sin(theta);
+                checkr.x = x;
+                checkr.y = y;
+
+                // Restrict toolpath within stock AND expanded part silhouette boundaries (intersection check)
+                const inStock = !clipStock || inClip(clipStock, undefined, checkr);
+                const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
+
+                if (!inStock || !inShadow) {
+                    // Terminate path if we exit the allowed stock or shadow regions
+                    end_poly();
+                } else {
+                    // Probe topography height map at (x, y) coordinates
+                    let tv = toolAtXY(x, y);
+
+                    // Override height if tool is within tab boundary to prevent milling tabs
+                    if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
+                        tv = this.tabZ;
+                    }
+
+                    push_point(x, y, tv + leave);
+                }
+
+                // Stepping formula: dtheta = ds / sqrt(b^2 + r^2) to maintain a constant 
+                // linear feed resolution (step size) as the spiral radius expands.
+                const dtheta = step / Math.sqrt(b * b + r * r);
+                theta += dtheta;
+                r = b * theta;
+            }
+            end_poly();
         }
-        end_poly();
+
         then(this.slice);
     }
 }
