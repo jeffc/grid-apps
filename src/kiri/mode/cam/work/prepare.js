@@ -542,7 +542,10 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
 
         // contouring logic
         if (isMove && contouring) {
-            if (coastline && deltaXY < 5 && coastlineMove(point)) {
+            const isRadial = currentOp && (currentOp.axis || '').toLowerCase() === 'radial';
+            if (isRadial) {
+                upAndOver = true;
+            } else if (coastline && deltaXY < 5 && coastlineMove(point)) {
                 // console.log('coastline move');
             } else if (deltaXY > toolDiamMove) {
                 upAndOver = true;
@@ -554,7 +557,7 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
                 layerPush(printPoint.clone().move({ z: 0.1 }), 0, 0, tool);
                 layerPush(point.clone().move({ z: 0.1 }), 0, 0, tool);
             }
-        } else
+        }
         // when rapid pluge could cut thru stock:
         //  * rapid to just above stock
         //  * continue plunge as cut

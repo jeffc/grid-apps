@@ -366,7 +366,9 @@ export class Topo {
             flatness,
             bridge,
             contourX,
-            contourR
+            contourR,
+            resolution,
+            leave
         });
 
         if (topo.raster) {
@@ -773,7 +775,7 @@ export class Trace {
 
     constructor(probe, params) {
 
-        const { curvesOnly, maxangle, flatness, bridge, contourX, contourR, leave } = params;
+        const { curvesOnly, maxangle, flatness, bridge, contourX, contourR, leave, resolution } = params;
 
         this.params = params;
         this.probe = probe;
@@ -801,7 +803,9 @@ export class Trace {
                 if (trace.length > 1) {
                     slice.push(trace);
                 }
+                const oldIdx = trace.loopIndex;
                 newtrace();
+                trace.loopIndex = oldIdx;
             }
             lastPP = undefined;
             latent = undefined;
@@ -830,7 +834,40 @@ export class Trace {
             // On flat horizontal faces (dz = 0), a constant slope calculation of 0
             // would otherwise collapse the spiral path into a single straight line.
             if (contourR) {
-                trace.push(newP);
+                if (lastP) {
+                    const dl = (x - lastP.x) || (y - lastP.y);
+                    const dz = z - lastP.z;
+                    let isSurfaceSloped = false;
+                    if (curvesOnly) {
+                        const delta = Math.max(resolution * 3, 0.5);
+                        const z0 = z - leave;
+                        const zX1 = probe.toolAtXY(x + delta, y);
+                        const zX2 = probe.toolAtXY(x - delta, y);
+                        const zY1 = probe.toolAtXY(x, y + delta);
+                        const zY2 = probe.toolAtXY(x, y - delta);
+                        isSurfaceSloped = 
+                            Math.abs(zX1 - z0) >= flatness || 
+                            Math.abs(zX2 - z0) >= flatness || 
+                            Math.abs(zY1 - z0) >= flatness || 
+                            Math.abs(zY2 - z0) >= flatness;
+                    }
+                    if (curvesOnly && Math.abs(dz) < flatness && !isSurfaceSloped) {
+                        trace.setOpen();
+                        end_poly(newP);
+                    } else {
+                        if (curvesOnly) {
+                            const dv = lastP.distTo2D(newP);
+                            const angle = Math.atan2(Math.abs(dz), dv) * RAD2DEG;
+                            if (angle > maxangle) {
+                                trace.setOpen();
+                                end_poly();
+                            }
+                        }
+                        trace.push(newP);
+                    }
+                } else {
+                    trace.push(newP);
+                }
                 lastPP = newP;
                 return;
             }
