@@ -275,7 +275,16 @@ function cleanupContourSlices(slices, holes, topo, op) {
 
                 if (currentHole) {
                     // Point is inside a through-hole: snap it to the closest point on the hole perimeter
-                    let edgePt = currentHole.findClosestPointOnPerimeter(pt);
+                    let edgePt = null;
+                    let axis = op.axis ? op.axis.toLowerCase() : '';
+                    if (axis === 'x') {
+                        edgePt = currentHole.snapToIntersectionX(pt);
+                    } else if (axis === 'y') {
+                        edgePt = currentHole.snapToIntersectionY(pt);
+                    }
+                    if (!edgePt) {
+                        edgePt = currentHole.findClosestPointOnPerimeter(pt);
+                    }
                     // Sample Z height at the perimeter edge so the tool remains at the correct part height
                     let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
                     let projectedPt = newPoint(edgePt.x, edgePt.y, z);

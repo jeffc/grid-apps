@@ -428,7 +428,15 @@ export class Topo {
                             const pt = newPoint(px, py);
                             if (pt.isInPolygon(expHole)) {
                                 // Find the closest boundary point on the original unexpanded hole perimeter
-                                const edgePt = hole.findClosestPointOnPerimeter(pt);
+                                let edgePt = null;
+                                if (axis === 'x') {
+                                    edgePt = hole.snapToIntersectionX(pt);
+                                } else if (axis === 'y') {
+                                    edgePt = hole.snapToIntersectionY(pt);
+                                }
+                                if (!edgePt) {
+                                    edgePt = hole.findClosestPointOnPerimeter(pt);
+                                }
                                 let outsidePt = edgePt;
                                 const d = pt.distTo2D(edgePt);
                                 if (d > 0.00001) {
@@ -956,6 +964,34 @@ export class Trace {
             const lastP = lastPP;
 
             if (lastP) {
+                // If "Curves Only" is active, check if the point is inside a through-hole.
+                // If inside a hole, we split the toolpath immediately at the boundary and skip the point.
+                let inHole = false;
+                if (curvesOnly && params.holes) {
+                    for (let hole of params.holes) {
+                        const hb = hole.bounds;
+                        if (newP.x >= hb.minx && newP.x <= hb.maxx && newP.y >= hb.miny && newP.y <= hb.maxy) {
+                            if (newP.isInPolygon(hole)) {
+                                inHole = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (inHole) {
+                    if (!splitDone) {
+                        trace.setOpen();
+                        flatBuffer = [];
+                        end_poly();
+                        splitDone = true;
+                    }
+                    flatBuffer = [];
+                    flatDist = 0;
+                    lastPP = newP;
+                    return;
+                }
+
                 const dl = (x - lastP.x) || (y - lastP.y);
                 const dz = z - lastP.z;
 
@@ -1007,27 +1043,12 @@ export class Trace {
                 }
 
                 if (isFlat) {
-                    let inHole = false;
-                    if (params.holes) {
-                        for (let hole of params.holes) {
-                            const hb = hole.bounds;
-                            if (newP.x >= hb.minx && newP.x <= hb.maxx && newP.y >= hb.miny && newP.y <= hb.maxy) {
-                                if (newP.isInPolygon(hole)) {
-                                    inHole = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
                     if (flatBuffer.length === 0) {
                         flatBuffer.push(newP);
-                        flatDist = inHole ? 0 : lastP.distTo2D(newP);
+                        flatDist = lastP.distTo2D(newP);
                         splitDone = false;
                     } else {
-                        if (!inHole) {
-                            flatDist += flatBuffer[flatBuffer.length - 1].distTo2D(newP);
-                        }
+                        flatDist += flatBuffer[flatBuffer.length - 1].distTo2D(newP);
                         flatBuffer.push(newP);
                     }
 
