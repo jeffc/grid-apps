@@ -290,6 +290,14 @@ const funcs = self.minion = {
         });
     },
 
+    trace_radial(data, seq) {
+        const { trace } = cache.trace;
+        trace.crossRadial_sync(data.params, slice => {
+            slice = codec.encode(slice);
+            reply({ seq, slice });
+        });
+    },
+
     trace_cleanup() {
         delete cache.trace;
     },
