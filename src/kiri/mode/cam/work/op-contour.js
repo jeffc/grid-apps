@@ -110,6 +110,8 @@ class OpContour extends CamOp {
                 progress(index / total, msg);
             },
             ondone: (slices, topo) => {
+                // If 'Omit Through' is enabled, post-process the generated toolpath slices
+                // to cleanly snap coordinates crossing any through-hole onto the hole perimeter.
                 if (op.omitthru && state.shadow && state.shadow.holes && state.shadow.holes.length) {
                     slices = cleanupContourSlices(slices, state.shadow.holes, topo, op);
                 }
@@ -161,6 +163,11 @@ class OpContour extends CamOp {
         const isRadial = op.axis.toLowerCase() === 'radial';
 
         if (isRadial) {
+            // RADIAL FINISHING TOOLPATH EMISSION:
+            // Radial axis mode finishes the surface concentric-loop by concentric-loop or turns of a spiral.
+            // Unlike linear X/Y parallel finishing passes where all segments are accumulated together
+            // and ordered globally, in Radial Concentric mode we emit loops slice-by-slice (from innermost
+            // out) and run tip-to-tip path ordering per loop to minimize travel and prevent collisions.
             for (let slice of sliceOut) {
                 // ignore debug slices
                 if (!slice.camLines) {
@@ -171,12 +178,15 @@ class OpContour extends CamOp {
                     poly = poly.clone(true).annotate({ slice: slice.index + 1 });
                     polys.push({ first: poly.first(), last: poly.last(), poly: poly });
                 });
+                // Find optimized path routing (tip2tip) on the loops within this slice
                 printPoint = tip2tipEmit(polys, printPoint, (el, point) => {
                     let poly = el.poly;
                     if (poly.isClosed()) {
+                        // Closed concentric loops are set to CounterClockwise for standard milling direction
                         poly.setCounterClockwise();
                         polyEmit(poly, -999);
                     } else {
+                        // Open concentric arcs: reverse traversal direction if the end point is closer
                         if (poly.last() === point) {
                             poly.reverse();
                         }
@@ -186,6 +196,8 @@ class OpContour extends CamOp {
                 });
             }
         } else {
+            // STANDARD LINEAR X/Y FINISHING EMISSION:
+            // Accumulate all segments across all slices first, then run a single global tip-to-tip path optimizer.
             for (let slice of sliceOut) {
                 // ignore debug slices
                 if (!slice.camLines) {
@@ -216,6 +228,7 @@ class OpContour extends CamOp {
     }
 }
 
+// Finds the closest point on segment AB to point P. Used to project points onto boundaries.
 function closestPointOnSegment(p, a, b) {
     let abx = b.x - a.x;
     let aby = b.y - a.y;
@@ -228,6 +241,7 @@ function closestPointOnSegment(p, a, b) {
     return newPoint(a.x + t * abx, a.y + t * aby);
 }
 
+// Finds the closest point on the entire polygon perimeter to pt.
 function closestPointOnPolygon(pt, poly) {
     let points = poly.points;
     let len = points.length;
@@ -246,8 +260,15 @@ function closestPointOnPolygon(pt, poly) {
     return closest;
 }
 
+// SLICE POST-PROCESSING SNAP-TO-HOLE (OMIT THROUGH option):
+// Post-processes contour slice lines to snap segments that cross through-holes onto the hole boundary.
+// When 'Omit Through' is active, the toolpath should not run inside the holes. For segments crossing
+// the holes, we project points inside the hole onto the nearest point on the hole's perimeter,
+// and sample the correct Z height at that edge. This creates clean, continuous contours wrapping
+// around the through-holes rather than leaving jagged/broken segments.
 function cleanupContourSlices(slices, holes, topo, op) {
     let holeBoxes = [];
+    // Compute bounding boxes for each through-hole to accelerate polygon containment tests
     for (let hole of holes) {
         let min_x = Infinity, max_x = -Infinity, min_y = Infinity, max_y = -Infinity;
         for (let p of hole.points) {
@@ -268,6 +289,7 @@ function cleanupContourSlices(slices, holes, topo, op) {
             let inHoleStart = null;
             let inHoleLast = null;
 
+            // Helper to emit the snapped boundary segment once we exit the through-hole area
             const emitHole = () => {
                 if (inHolePolygon) {
                     if (inHoleStart) {
@@ -294,7 +316,9 @@ function cleanupContourSlices(slices, holes, topo, op) {
                 }
 
                 if (currentHole) {
+                    // Point is inside a through-hole: snap it to the closest point on the hole perimeter
                     let edgePt = closestPointOnPolygon(pt, currentHole);
+                    // Sample Z height at the perimeter edge so the tool remains at the correct part height
                     let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
                     let projectedPt = newPoint(edgePt.x, edgePt.y, z);
 
@@ -307,6 +331,7 @@ function cleanupContourSlices(slices, holes, topo, op) {
                         inHoleLast = projectedPt;
                     }
                 } else {
+                    // Point is on solid part: emit normally
                     emitHole();
                     newPoints.push(pt);
                 }

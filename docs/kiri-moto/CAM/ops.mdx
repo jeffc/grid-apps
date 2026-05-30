@@ -11,7 +11,7 @@ Ops—not to be confused with [opps](https://knowyourmeme.com/memes/opp-opps)—
 applied to a model to remove material. The Operations tab also contains meta-operations
 that represent parts of the manufacturing process but do not necessarily generate toolpaths.
 
-Each operation has parameters which can be hovered over to reveal their description.  
+Each operation has parameters which can be hovered over to reveal their description.
 ![](/img/CAM/paramDetails.png)
 
 When an operation's settings are changed, they update the defaults for that operation
@@ -74,7 +74,7 @@ The Rough op removes large volumes of material quickly using a stepped-down tool
 
 <ImageCarousel base="/img/CAM/example/contour/" images="contour" />
 
-The Contour op generates detailed finishing toolpaths for complex organic surface geometries.  
+The Contour op generates detailed finishing toolpaths for complex organic surface geometries.
 It can trace along the X or Y axes, or in **Radial** mode, with configurable precision. It is useful for:
 
 - Carving 3D shapes with organic, curved, or spherical profiles
@@ -96,21 +96,21 @@ It can trace along the X or Y axes, or in **Radial** mode, with configurable pre
 
 <ImageCarousel base="/img/CAM/example/register/" images="register" />
 
-The Register operation drills holes in the sides of a part,  
-helping keep the part in the same place when it is flipped onto its opposite face.  
+The Register operation drills holes in the sides of a part,
+helping keep the part in the same place when it is flipped onto its opposite face.
 The operation has options to drill on different sides and can even generate a puzzle-piece-like pattern for registration.
 
 ## Specific Operations
 
-Specific operations require selection of individual part features to apply operations to.  
+Specific operations require selection of individual part features to apply operations to.
 These may overlap with Global operations but are generally more configurable.
 
 ### Drill
 
 <ImageCarousel base="/img/CAM/example/drill/" images="drill" />
 
-The Drill op creates pecking toolpaths for a drill tool to follow.  
-It can also drill holes of other diameters and even mark holes instead of drilling.  
+The Drill op creates pecking toolpaths for a drill tool to follow.
+It can also drill holes of other diameters and even mark holes instead of drilling.
 It is useful for:
 
 - Generating a toolpath for a drill tool
@@ -121,10 +121,10 @@ It is useful for:
 
 <ImageCarousel base="/img/CAM/example/trace/" images="trace" />
 
-The Trace operation is likely the most configurable, allowing for generation of toolpaths following loops or lines.  
-It can trace on, inside, or outside a line and can take multiple passes to step down to the desired position.  
-When the type parameter is set to "clear," it can even act like a [Pocket](#pocket),  
-clearing the area above the shape created by the selected lines or loop.  
+The Trace operation is likely the most configurable, allowing for generation of toolpaths following loops or lines.
+It can trace on, inside, or outside a line and can take multiple passes to step down to the desired position.
+When the type parameter is set to "clear," it can even act like a [Pocket](#pocket),
+clearing the area above the shape created by the selected lines or loop.
 While the Trace op can do a lot, some specific use cases include:
 
 - Engraving lettering or other text
@@ -136,8 +136,8 @@ While the Trace op can do a lot, some specific use cases include:
 
 <ImageCarousel base="/img/CAM/example/pocket/" images="pocket" />
 
-The Pocket operation takes a selection of polygon faces and generates a pocket toolpath that cuts down to them.  
-The operation has options to expand and smooth the pocket selection, and the contour option even allows  
+The Pocket operation takes a selection of polygon faces and generates a pocket toolpath that cuts down to them.
+The operation has options to expand and smooth the pocket selection, and the contour option even allows
 for an approximation of a v-bit carve. Some use cases specific to the Pocket op include:
 
 - Creating one pocket in a part with multiple
@@ -148,9 +148,9 @@ for an approximation of a v-bit carve. Some use cases specific to the Pocket op 
 
 <ImageCarousel base="/img/CAM/example/gcode/" images="gcode" />
 
-The Gcode operation does not generate a toolpath but instead adds a line or lines of G-code to the output  
-of the file. The Gcode operation is different from [Gcode Macros](/kiri-moto/gcode-macros),  
-as it is not tied to any event  
+The Gcode operation does not generate a toolpath but instead adds a line or lines of G-code to the output
+of the file. The Gcode operation is different from [Gcode Macros](/kiri-moto/gcode-macros),
+as it is not tied to any event
 but is output in the order it is included in the operations array.
 
 ## Laser Operations

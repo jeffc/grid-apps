@@ -397,14 +397,23 @@ export class Topo {
             topo.raster = false;
         }
 
+        // THROUGH-HOLE CAPPING LOGIC (OMIT THROUGH option):
+        // If the user wants to omit milling through-holes, we find all grid cells that fall inside
+        // any through-hole polygon. Since a through-hole has a depth of 'zMin' (air/empty space), we
+        // "cap" the grid cell by copying the height of the nearest solid wall/boundary. This fools
+        // the z-height probe into believing the hole is filled at solid part height, preventing
+        // the tool from plunging down or generating toolpaths inside the hole.
         if (contour.omitthru && shadow.holes && shadow.holes.length) {
             console.warn("[CAM DEBUGLOG] capping through holes, count:", shadow.holes.length);
             let cappedCount = 0;
-            const rx = stepsX / boundsX;
+            const rx = stepsX / boundsX; // Coordinate scaling factor
             for (let hole of shadow.holes) {
+                // Expand the boundary check slightly (by 1.5 * resolution) to capture boundary cells
+                // that may be slightly on the edge of the polygon due to grid discretization.
                 const expHole = POLY.expand([hole], resolution * 1.5)[0];
                 if (!expHole) continue;
                 const hbounds = expHole.bounds;
+                // Crop search range to the hole's bounding box to keep loop iterations fast
                 const min_ix = Math.max(0, Math.floor(rx * (hbounds.minx - minX)));
                 const max_ix = Math.min(stepsX - 1, Math.ceil(rx * (hbounds.maxx - minX)));
                 const min_iy = Math.max(0, Math.floor(rx * (hbounds.miny - minY)));
@@ -413,21 +422,28 @@ export class Topo {
                 for (let ix = min_ix; ix <= max_ix; ix++) {
                     for (let iy = min_iy; iy <= max_iy; iy++) {
                         const idx = ix * stepsY + iy;
+                        // Only cap empty cells (having a height near zMin) to avoid overwriting solid geometry
                         if (data[idx] < zMin + 0.1) {
                             const px = minX + ix / rx;
                             const py = minY + iy / rx;
                             const pt = newPoint(px, py);
                             if (pt.isInPolygon(expHole)) {
+                                // Find the closest boundary point on the original unexpanded hole perimeter
                                 const edgePt = closestPointOnPolygon(pt, hole);
                                 let outsidePt = edgePt;
                                 const d = pt.distTo2D(edgePt);
                                 if (d > 0.00001) {
+                                    // Project the coordinate slightly outward (by half a grid step) into the solid part
+                                    // to ensure we sample a clean height from the solid part instead of a transitional edge.
                                     const dx = (edgePt.x - pt.x) / d;
                                     const dy = (edgePt.y - pt.y) / d;
                                     outsidePt = newPoint(edgePt.x + dx * (resolution * 0.5), edgePt.y + dy * (resolution * 0.5));
                                 }
                                 let edge_ix = Math.max(0, Math.min(stepsX - 1, Math.round(rx * (outsidePt.x - minX))));
                                 let edge_iy = Math.max(0, Math.min(stepsY - 1, Math.round(rx * (outsidePt.y - minY))));
+
+                                // Fallback: if the outward projection still maps to the same grid cell ix/iy,
+                                // step one grid cell away in the direction of the boundary to guarantee we fetch solid height.
                                 if (edge_ix === ix && edge_iy === iy) {
                                     const step_x = Math.sign(outsidePt.x - pt.x) || 0;
                                     const step_y = Math.sign(outsidePt.y - pt.y) || 0;
@@ -438,6 +454,7 @@ export class Topo {
                                         edge_iy = ny;
                                     }
                                 }
+                                // Copy the height from the solid part edge cell onto the hole cell
                                 data[idx] = data[edge_ix * stepsY + edge_iy];
                                 cappedCount++;
                             }
@@ -876,7 +893,7 @@ export class Trace {
             this.slice = slice = [];
         }
 
-        // Expose helper methods on the Trace class instance to cleanly forward parameters 
+        // Expose helper methods on the Trace class instance to cleanly forward parameters
         // to the active polygon being generated, or to set initial/previous tracing state.
         const setClosed = this.setClosed = function () {
             if (trace) trace.open = false;
@@ -947,8 +964,17 @@ export class Trace {
                 let isFlat = false;
                 if (curvesOnly) {
                     if (contourR) {
+                        // RADIAL LOCAL SURFACE SLOPE DETECTION (Curves Only mode):
+                        // Radial/Concentric toolpaths move along a curved path. We cannot check flatness
+                        // purely by comparing adjacent toolpath points (Math.abs(dz)) because height changes
+                        // along concentric arcs on sloped/spherical profiles can be tiny.
+                        // Instead, we probe the terrain height in orthogonal directions (+/- delta) around (x, y).
                         const delta = Math.max(resolution * 2, 0.05);
                         const z0 = probe.zAtXY(x, y);
+
+                        // Mask through-holes: if a probed coordinates falls inside a through-hole, we return
+                        // the height of the center point (z0). This prevents cliff-edges around through-holes
+                        // from registering as "sloped" and generating stray finishing toolpaths near hole boundaries.
                         const getSlopeZ = (px, py) => {
                             if (params.holes) {
                                 for (let hole of params.holes) {
@@ -966,12 +992,16 @@ export class Trace {
                         const zX2 = getSlopeZ(x - delta, y);
                         const zY1 = getSlopeZ(x, y + delta);
                         const zY2 = getSlopeZ(x, y - delta);
+
+                        // Scale slopeFlatness with delta to maintain a consistent angle threshold (~3 degrees)
                         const slopeFlatness = Math.max(delta * 0.05, 0.002);
-                        const isSurfaceSloped = 
-                            Math.abs(zX1 - z0) >= slopeFlatness || 
-                            Math.abs(zX2 - z0) >= slopeFlatness || 
-                            Math.abs(zY1 - z0) >= slopeFlatness || 
+                        const isSurfaceSloped =
+                            Math.abs(zX1 - z0) >= slopeFlatness ||
+                            Math.abs(zX2 - z0) >= slopeFlatness ||
+                            Math.abs(zY1 - z0) >= slopeFlatness ||
                             Math.abs(zY2 - z0) >= slopeFlatness;
+
+                        // The point is flat if the toolpath height change is minimal AND the surrounding surface has no slope
                         isFlat = Math.abs(dz) < slopeFlatness && !isSurfaceSloped;
                     } else {
                         isFlat = Math.abs(dz) < flatness;
@@ -1008,7 +1038,7 @@ export class Trace {
                     if (flatDist > curvesDist) {
                         if (!splitDone) {
                             trace.setOpen();
-                            // Empty flatBuffer before calling end_poly to ensure we discard the flat segment 
+                            // Empty flatBuffer before calling end_poly to ensure we discard the flat segment
                             // we are splitting at, rather than flushing the flat points into the ended segment.
                             flatBuffer = [];
                             end_poly();
@@ -1246,21 +1276,22 @@ export class Trace {
         newslice();
 
         if (shape === 'concentric') {
+            // CONCENTRIC SHAPE GENERATION:
+            // Generates closed concentric loop paths from the innermost region to the outer perimeter.
             if (clipTo && clipTo.length) {
                 let outs = [];
-                // Generate concentric loop offsets using POLY.offset.
-                // -toolStep is used to offset inwards.
-                // z: 0 is used because we offset on the 2D plane and then probe 3D topography.
+                // Use POLY.offset to generate concentric toolpath offsets (step-over) from the boundary.
+                // -toolStep is used to offset inwards. We offset on the 2D plane (z: 0) and then probe Z height.
                 POLY.offset(clipTo, -toolStep, { count: 999, outs: outs, flat: true, z: 0, minArea: 0.01 });
 
-                // We want to cut from the inside out.
-                // outs is generated from outside-in: [first offset, second offset, ..., innermost]
-                // Reversing outs gives: [innermost, ..., second offset, first offset]
+                // We want to cut from the inside out to minimize tool deflection and vibration.
+                // POLY.offset generates paths from outside-in: [first offset, second offset, ..., innermost]
+                // We reverse the array to cut from [innermost, ..., second offset, first offset].
                 let loops = [];
                 for (let i = outs.length - 1; i >= 0; i--) {
                     loops.push(outs[i].clone(true));
                 }
-                // Finally, append the original boundary (clipTo) at the end so we do a final pass around the perimeter
+                // Append the original boundary (clipTo) at the end so we perform a final perimeter pass.
                 for (let poly of clipTo) {
                     loops.push(poly.clone(true));
                 }
@@ -1274,7 +1305,9 @@ export class Trace {
                     const numPoints = points.length;
                     if (numPoints < 2) continue;
 
-                    // 1. Generate subdivided points along the loop to preserve original vertices
+                    // 1. Subdivide loop segments:
+                    // Subdivides long segments into smaller points spaced by 'step'. This guarantees
+                    // we have enough point density to accurately sample the 3D surface heights.
                     let subPoints = [];
                     for (let i = 0; i < numPoints; i++) {
                         const p1 = points[i];
@@ -1294,7 +1327,8 @@ export class Trace {
                         }
                     }
 
-                    // 2. Evaluate clipping and probe Z height for each point
+                    // 2. Evaluate clipping and probe Z height for each point:
+                    // Checks if each point is inside the stock and shadow bounds, then probes the topography.
                     let evaluated = [];
                     let hasOut = false;
 
@@ -1318,11 +1352,12 @@ export class Trace {
                         }
                     }
 
-                    // 3. Emit points using state machine
+                    // 3. Emit points using state machine:
                     if (hasOut) {
-                        // Find first out-of-clip point to start rotation
+                        // PARTIAL CLIPPING: If the concentric loop intersects the boundaries (i.e. goes out of stock),
+                        // we must split it into open segments. We find the first out-of-clip point and rotate the array
+                        // so it starts outside. This allows us to cleanly start/stop tracing when entering/exiting bounds.
                         let firstOutIdx = evaluated.findIndex(p => !p.inClip);
-                        // Rotate array so it starts with an out-of-clip point
                         let rotated = [...evaluated.slice(firstOutIdx), ...evaluated.slice(0, firstOutIdx)];
 
                         let tracing = false;
@@ -1345,11 +1380,11 @@ export class Trace {
                             end_poly();
                         }
                     } else {
-                        // No clipping at all: emit as a single closed polygon
+                        // NO CLIPPING: If the loop is fully within stock and boundaries, emit as a single closed loop.
                         newtrace();
                         self_trace.setClosed();
                         self_trace.setLoopIndex(loopIdx);
-                        
+
                         // Seed the starting lastPP with the final point of the loop.
                         // This maintains circular continuity, so the first point is checked for flatness
                         // against the last point of the loop, preventing CW vs. CCW starting point asymmetry.
@@ -1366,7 +1401,8 @@ export class Trace {
                 }
             }
         } else {
-            // Default Spiral Mode (Archimedean spiral from center outwards)
+            // DEFAULT SPIRAL MODE:
+            // Generates a continuous Archimedean spiral from the center outwards.
             newtrace();
 
             // Growth coefficient for Archimedean spiral (expansion of toolStep per 2pi radians)
@@ -1375,18 +1411,18 @@ export class Trace {
             let r = 0;
 
             while (r <= maxR) {
-                // Convert polar coordinates to Cartesian workspace coordinates
+                // Convert polar coordinates (r, theta) to Cartesian workspace coordinates (x, y)
                 const x = centerX + r * Math.cos(theta);
                 const y = centerY + r * Math.sin(theta);
                 checkr.x = x;
                 checkr.y = y;
 
-                // Restrict toolpath within stock AND expanded part silhouette boundaries (intersection check)
+                // Restrict toolpath within stock AND expanded part boundaries (intersection check)
                 const inStock = !clipStock || inClip(clipStock, undefined, checkr);
                 const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
 
                 if (!inStock || !inShadow) {
-                    // Terminate path if we exit the allowed stock or shadow regions
+                    // Terminate path segment if we exit allowed regions
                     end_poly();
                 } else {
                     // Probe topography height map at (x, y) coordinates
@@ -1400,8 +1436,9 @@ export class Trace {
                     push_point(x, y, tv + leave);
                 }
 
-                // Stepping formula: dtheta = ds / sqrt(b^2 + r^2) to maintain a constant 
-                // linear feed resolution (step size) as the spiral radius expands.
+                // STEPPING FORMULA:
+                // We use dtheta = ds / sqrt(b^2 + r^2) to maintain a constant linear feed resolution
+                // (linear step size 'step') as the spiral radius expands outwards.
                 const dtheta = step / Math.sqrt(b * b + r * r);
                 theta += dtheta;
                 r = b * theta;
