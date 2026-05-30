@@ -835,6 +835,9 @@ export class Trace {
         this.params = params;
         this.probe = probe;
 
+        // Structured cloning to parallel workers strips getters/prototypes from Polygon objects.
+        // We guarantee that all through-hole boundary polygons have their bounds defined with a
+        // containsXY(x, y) check so that subsequent slope-masking tests on the worker don't crash.
         if (params.holes) {
             for (let hole of params.holes) {
                 if (!hole.bounds) {
@@ -873,6 +876,8 @@ export class Trace {
             this.slice = slice = [];
         }
 
+        // Expose helper methods on the Trace class instance to cleanly forward parameters 
+        // to the active polygon being generated, or to set initial/previous tracing state.
         const setClosed = this.setClosed = function () {
             if (trace) trace.open = false;
         };
@@ -1003,6 +1008,8 @@ export class Trace {
                     if (flatDist > curvesDist) {
                         if (!splitDone) {
                             trace.setOpen();
+                            // Empty flatBuffer before calling end_poly to ensure we discard the flat segment 
+                            // we are splitting at, rather than flushing the flat points into the ended segment.
                             flatBuffer = [];
                             end_poly();
                             splitDone = true;
@@ -1342,6 +1349,10 @@ export class Trace {
                         newtrace();
                         self_trace.setClosed();
                         self_trace.setLoopIndex(loopIdx);
+                        
+                        // Seed the starting lastPP with the final point of the loop.
+                        // This maintains circular continuity, so the first point is checked for flatness
+                        // against the last point of the loop, preventing CW vs. CCW starting point asymmetry.
                         const lastPt = evaluated[evaluated.length - 1];
                         if (lastPt) {
                             self_trace.setLastPoint(newPoint(lastPt.x, lastPt.y, lastPt.z + leave));

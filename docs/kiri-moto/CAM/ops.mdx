@@ -74,12 +74,23 @@ The Rough op removes large volumes of material quickly using a stepped-down tool
 
 <ImageCarousel base="/img/CAM/example/contour/" images="contour" />
 
-The Contour op generates detailed toolpaths for complex organic surface geometries.  
-It can trace along the X or Y axis and has configurable precision. It is useful for:
+The Contour op generates detailed finishing toolpaths for complex organic surface geometries.  
+It can trace along the X or Y axes, or in **Radial** mode, with configurable precision. It is useful for:
 
-- Carving 3D shapes with organic or curved profiles
+- Carving 3D shapes with organic, curved, or spherical profiles
 - Finishing complex wall geometries
 - Cleaning up a part after [roughing](#rough)
+
+#### Axis Modes
+- **X / Y Axis**: Generates linear parallel scanning toolpaths along the selected horizontal axis.
+- **Radial**: Generates toolpaths radiating from or circling around the center of the part. This has two shape submodes:
+  - **Spiral**: Emits a continuous spiral toolpath expanding outwards from the center of the part.
+  - **Concentric**: Generates concentric circular loops from the innermost boundary to the perimeter.
+
+#### Key Options
+- **Curves Only**: Restricts linear cleanup to sloped/curved surfaces, automatically skipping flat horizontal sections.
+- **Curve Join Dist**: A multiplier of the tool diameter (defaults to 0.5) defining the maximum length of flat regions between curved profiles that should be bridged and kept continuous to prevent unnecessary tool retractions.
+- **Omit Through**: Bypasses machining slots, holes, and other features that go completely through the part.
 
 ### Register
 
