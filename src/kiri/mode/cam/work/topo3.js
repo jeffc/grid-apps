@@ -47,7 +47,8 @@ export class Topo {
             leave = contour.leave || 0,
             maxangle = contour.angle,
             curvesOnly = contour.curves,
-            curvesDist = (contour.curvesDist !== undefined) ? contour.curvesDist : 3.0,
+            curvesDistFraction = (contour.curvesDist !== undefined) ? contour.curvesDist : 0.5,
+            curvesDist = curvesDistFraction * toolDiameter,
             bridge = contour.bridging || 0,
             stepsX = Math.ceil(boundsX / resolution),
             stepsY = Math.ceil(boundsY / resolution),
@@ -370,7 +371,8 @@ export class Topo {
             contourX,
             contourR,
             resolution,
-            leave
+            leave,
+            holes: (contour.omitthru && shadow.holes && shadow.holes.length) ? shadow.holes : null
         });
 
         if (topo.raster) {
@@ -393,6 +395,57 @@ export class Topo {
                 onupdate(i / 2, l, p);
             });
             topo.raster = false;
+        }
+
+        if (contour.omitthru && shadow.holes && shadow.holes.length) {
+            console.warn("[CAM DEBUGLOG] capping through holes, count:", shadow.holes.length);
+            let cappedCount = 0;
+            const rx = stepsX / boundsX;
+            for (let hole of shadow.holes) {
+                const expHole = POLY.expand([hole], resolution * 1.5)[0];
+                if (!expHole) continue;
+                const hbounds = expHole.bounds;
+                const min_ix = Math.max(0, Math.floor(rx * (hbounds.minx - minX)));
+                const max_ix = Math.min(stepsX - 1, Math.ceil(rx * (hbounds.maxx - minX)));
+                const min_iy = Math.max(0, Math.floor(rx * (hbounds.miny - minY)));
+                const max_iy = Math.min(stepsY - 1, Math.ceil(rx * (hbounds.maxy - minY)));
+
+                for (let ix = min_ix; ix <= max_ix; ix++) {
+                    for (let iy = min_iy; iy <= max_iy; iy++) {
+                        const idx = ix * stepsY + iy;
+                        if (data[idx] < zMin + 0.1) {
+                            const px = minX + ix / rx;
+                            const py = minY + iy / rx;
+                            const pt = newPoint(px, py);
+                            if (pt.isInPolygon(expHole)) {
+                                const edgePt = closestPointOnPolygon(pt, hole);
+                                let outsidePt = edgePt;
+                                const d = pt.distTo2D(edgePt);
+                                if (d > 0.00001) {
+                                    const dx = (edgePt.x - pt.x) / d;
+                                    const dy = (edgePt.y - pt.y) / d;
+                                    outsidePt = newPoint(edgePt.x + dx * (resolution * 0.5), edgePt.y + dy * (resolution * 0.5));
+                                }
+                                let edge_ix = Math.max(0, Math.min(stepsX - 1, Math.round(rx * (outsidePt.x - minX))));
+                                let edge_iy = Math.max(0, Math.min(stepsY - 1, Math.round(rx * (outsidePt.y - minY))));
+                                if (edge_ix === ix && edge_iy === iy) {
+                                    const step_x = Math.sign(outsidePt.x - pt.x) || 0;
+                                    const step_y = Math.sign(outsidePt.y - pt.y) || 0;
+                                    let nx = Math.max(0, Math.min(stepsX - 1, ix + step_x));
+                                    let ny = Math.max(0, Math.min(stepsY - 1, iy + step_y));
+                                    if (nx !== ix || ny !== iy) {
+                                        edge_ix = nx;
+                                        edge_iy = ny;
+                                    }
+                                }
+                                data[idx] = data[edge_ix * stepsY + edge_iy];
+                                cappedCount++;
+                            }
+                        }
+                    }
+                }
+            }
+            console.warn("[CAM DEBUGLOG] total capped grid cells:", cappedCount);
         }
 
         await this.contour({
@@ -782,6 +835,31 @@ export class Trace {
         this.params = params;
         this.probe = probe;
 
+        if (params.holes) {
+            for (let hole of params.holes) {
+                if (!hole.bounds) {
+                    let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+                    for (let p of hole.points) {
+                        if (p.x < minx) minx = p.x;
+                        if (p.x > maxx) maxx = p.x;
+                        if (p.y < miny) miny = p.y;
+                        if (p.y > maxy) maxy = p.y;
+                    }
+                    const hb = {
+                        minx, maxx, miny, maxy,
+                        containsXY(x, y) {
+                            return x >= this.minx && x <= this.maxx && y >= this.miny && y <= this.maxy;
+                        }
+                    };
+                    Object.defineProperty(hole, 'bounds', {
+                        value: hb,
+                        writable: true,
+                        configurable: true
+                    });
+                }
+            }
+        }
+
         let trace,
             slice,
             latent,
@@ -794,6 +872,18 @@ export class Trace {
         const newslice = this.newslice = () => {
             this.slice = slice = [];
         }
+
+        const setClosed = this.setClosed = function () {
+            if (trace) trace.open = false;
+        };
+
+        const setLoopIndex = this.setLoopIndex = function (idx) {
+            if (trace) trace.loopIndex = idx;
+        };
+
+        const setLastPoint = this.setLastPoint = function (point) {
+            lastPP = point;
+        };
 
         const newtrace = this.newtrace = function () {
             trace = object.trace = newPolygon().setOpen();
@@ -852,36 +942,68 @@ export class Trace {
                 let isFlat = false;
                 if (curvesOnly) {
                     if (contourR) {
-                        const delta = Math.max(resolution * 3, 0.5);
-                        const z0 = z - leave;
-                        const zX1 = probe.toolAtXY(x + delta, y);
-                        const zX2 = probe.toolAtXY(x - delta, y);
-                        const zY1 = probe.toolAtXY(x, y + delta);
-                        const zY2 = probe.toolAtXY(x, y - delta);
+                        const delta = Math.max(resolution * 2, 0.05);
+                        const z0 = probe.zAtXY(x, y);
+                        const getSlopeZ = (px, py) => {
+                            if (params.holes) {
+                                for (let hole of params.holes) {
+                                    const hb = hole.bounds;
+                                    if (px >= hb.minx && px <= hb.maxx && py >= hb.miny && py <= hb.maxy) {
+                                        if (newPoint(px, py).isInPolygon(hole)) {
+                                            return z0;
+                                        }
+                                    }
+                                }
+                            }
+                            return probe.zAtXY(px, py);
+                        };
+                        const zX1 = getSlopeZ(x + delta, y);
+                        const zX2 = getSlopeZ(x - delta, y);
+                        const zY1 = getSlopeZ(x, y + delta);
+                        const zY2 = getSlopeZ(x, y - delta);
+                        const slopeFlatness = Math.max(delta * 0.05, 0.002);
                         const isSurfaceSloped = 
-                            Math.abs(zX1 - z0) >= flatness || 
-                            Math.abs(zX2 - z0) >= flatness || 
-                            Math.abs(zY1 - z0) >= flatness || 
-                            Math.abs(zY2 - z0) >= flatness;
-                        isFlat = Math.abs(dz) < flatness && !isSurfaceSloped;
+                            Math.abs(zX1 - z0) >= slopeFlatness || 
+                            Math.abs(zX2 - z0) >= slopeFlatness || 
+                            Math.abs(zY1 - z0) >= slopeFlatness || 
+                            Math.abs(zY2 - z0) >= slopeFlatness;
+                        isFlat = Math.abs(dz) < slopeFlatness && !isSurfaceSloped;
                     } else {
                         isFlat = Math.abs(dz) < flatness;
                     }
                 }
 
                 if (isFlat) {
+                    let inHole = false;
+                    if (params.holes) {
+                        for (let hole of params.holes) {
+                            const hb = hole.bounds;
+                            if (newP.x >= hb.minx && newP.x <= hb.maxx && newP.y >= hb.miny && newP.y <= hb.maxy) {
+                                if (newP.isInPolygon(hole)) {
+                                    inHole = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
                     if (flatBuffer.length === 0) {
                         flatBuffer.push(newP);
-                        flatDist = lastP.distTo2D(newP);
+                        flatDist = inHole ? 0 : lastP.distTo2D(newP);
                         splitDone = false;
                     } else {
-                        flatDist += flatBuffer[flatBuffer.length - 1].distTo2D(newP);
+                        if (!inHole) {
+                            flatDist += flatBuffer[flatBuffer.length - 1].distTo2D(newP);
+                        } else {
+                            console.warn("[CAM DEBUGLOG] point in hole, ignoring from flatDist:", newP, "z0:", (z - leave).round(5));
+                        }
                         flatBuffer.push(newP);
                     }
 
                     if (flatDist > curvesDist) {
                         if (!splitDone) {
                             trace.setOpen();
+                            flatBuffer = [];
                             end_poly();
                             splitDone = true;
                         }
@@ -1202,7 +1324,7 @@ export class Trace {
                                 if (!tracing) {
                                     newtrace();
                                     tracing = true;
-                                    self_trace.trace.loopIndex = loopIdx;
+                                    self_trace.setLoopIndex(loopIdx);
                                 }
                                 push_point(pt.x, pt.y, pt.z + leave);
                             } else {
@@ -1218,8 +1340,12 @@ export class Trace {
                     } else {
                         // No clipping at all: emit as a single closed polygon
                         newtrace();
-                        self_trace.trace.open = false;
-                        self_trace.trace.loopIndex = loopIdx;
+                        self_trace.setClosed();
+                        self_trace.setLoopIndex(loopIdx);
+                        const lastPt = evaluated[evaluated.length - 1];
+                        if (lastPt) {
+                            self_trace.setLastPoint(newPoint(lastPt.x, lastPt.y, lastPt.z + leave));
+                        }
                         for (let pt of evaluated) {
                             push_point(pt.x, pt.y, pt.z + leave);
                         }
@@ -1380,6 +1506,36 @@ function omitMatching(target, matches) {
         });
     }
     return target;
+}
+
+function closestPointOnSegment(p, a, b) {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let ab2 = abx * abx + aby * aby;
+    if (ab2 === 0) return a;
+    let t = (apx * abx + apy * aby) / ab2;
+    t = Math.max(0, Math.min(1, t));
+    return newPoint(a.x + t * abx, a.y + t * aby);
+}
+
+function closestPointOnPolygon(pt, poly) {
+    let points = poly.points;
+    let len = points.length;
+    let minD = Infinity;
+    let closest = null;
+    for (let i = 0; i < len; i++) {
+        let p1 = points[i];
+        let p2 = points[(i + 1) % len];
+        let cp = closestPointOnSegment(pt, p1, p2);
+        let d = pt.distTo2D(cp);
+        if (d < minD) {
+            minD = d;
+            closest = cp;
+        }
+    }
+    return closest;
 }
 
 export async function generate(opt) {
