@@ -160,6 +160,33 @@ class OpContour extends CamOp {
 
         let printPoint = newPoint(bounds.min.x, bounds.min.y, zmax);
 
+        // Helper to convert slice camLines to formatted polygons array for tip2tipEmit
+        const sliceToPolys = (slice) => {
+            let polys = [];
+            slice.camLines.forEach((poly) => {
+                poly = poly.clone(true).annotate({ slice: slice.index + 1 });
+                polys.push({ first: poly.first(), last: poly.last(), poly: poly });
+            });
+            return polys;
+        };
+
+        // Shared callback function to emit toolpaths
+        const emitSegment = (el, point) => {
+            let poly = el.poly;
+            if (poly.isClosed()) {
+                // Closed concentric loops are set to CounterClockwise for standard milling direction
+                poly.setCounterClockwise();
+                polyEmit(poly, -999);
+            } else {
+                // Open concentric arcs: reverse traversal direction if the end point is closer
+                if (poly.last() === point) {
+                    poly.reverse();
+                }
+                polyEmit(poly);
+            }
+            newLayer();
+        };
+
         const isRadial = op.axis.toLowerCase() === 'radial';
 
         if (isRadial) {
@@ -169,95 +196,26 @@ class OpContour extends CamOp {
             // and ordered globally, in Radial Concentric mode we emit loops slice-by-slice (from innermost
             // out) and run tip-to-tip path ordering per loop to minimize travel and prevent collisions.
             for (let slice of sliceOut) {
-                // ignore debug slices
                 if (!slice.camLines) {
                     continue;
                 }
-                let polys = [];
-                slice.camLines.forEach((poly) => {
-                    poly = poly.clone(true).annotate({ slice: slice.index + 1 });
-                    polys.push({ first: poly.first(), last: poly.last(), poly: poly });
-                });
+                let polys = sliceToPolys(slice);
                 // Find optimized path routing (tip2tip) on the loops within this slice
-                printPoint = tip2tipEmit(polys, printPoint, (el, point) => {
-                    let poly = el.poly;
-                    if (poly.isClosed()) {
-                        // Closed concentric loops are set to CounterClockwise for standard milling direction
-                        poly.setCounterClockwise();
-                        polyEmit(poly, -999);
-                    } else {
-                        // Open concentric arcs: reverse traversal direction if the end point is closer
-                        if (poly.last() === point) {
-                            poly.reverse();
-                        }
-                        polyEmit(poly);
-                    }
-                    newLayer();
-                });
+                printPoint = tip2tipEmit(polys, printPoint, emitSegment);
             }
         } else {
             // STANDARD LINEAR X/Y FINISHING EMISSION:
             // Accumulate all segments across all slices first, then run a single global tip-to-tip path optimizer.
             for (let slice of sliceOut) {
-                // ignore debug slices
                 if (!slice.camLines) {
                     continue;
                 }
-                let polys = [], poly;
-                slice.camLines.forEach((poly) => {
-                    poly = poly.clone(true).annotate({ slice: slice.index + 1 });
-                    polys.push({ first: poly.first(), last: poly.last(), poly: poly });
-                });
-                depthData.appendAll(polys);
+                depthData.appendAll(sliceToPolys(slice));
             }
 
-            tip2tipEmit(depthData, printPoint, (el, point) => {
-                let poly = el.poly;
-                if (poly.isClosed()) {
-                    poly.setCounterClockwise();
-                    polyEmit(poly, -999);
-                } else {
-                    if (poly.last() === point) {
-                        poly.reverse();
-                    }
-                    polyEmit(poly);
-                }
-                newLayer();
-            });
+            tip2tipEmit(depthData, printPoint, emitSegment);
         }
     }
-}
-
-// Finds the closest point on segment AB to point P. Used to project points onto boundaries.
-function closestPointOnSegment(p, a, b) {
-    let abx = b.x - a.x;
-    let aby = b.y - a.y;
-    let apx = p.x - a.x;
-    let apy = p.y - a.y;
-    let ab2 = abx * abx + aby * aby;
-    if (ab2 === 0) return a;
-    let t = (apx * abx + apy * aby) / ab2;
-    t = Math.max(0, Math.min(1, t));
-    return newPoint(a.x + t * abx, a.y + t * aby);
-}
-
-// Finds the closest point on the entire polygon perimeter to pt.
-function closestPointOnPolygon(pt, poly) {
-    let points = poly.points;
-    let len = points.length;
-    let minD = Infinity;
-    let closest = null;
-    for (let i = 0; i < len; i++) {
-        let p1 = points[i];
-        let p2 = points[(i + 1) % len];
-        let cp = closestPointOnSegment(pt, p1, p2);
-        let d = pt.distTo2D(cp);
-        if (d < minD) {
-            minD = d;
-            closest = cp;
-        }
-    }
-    return closest;
 }
 
 // SLICE POST-PROCESSING SNAP-TO-HOLE (OMIT THROUGH option):
@@ -317,7 +275,7 @@ function cleanupContourSlices(slices, holes, topo, op) {
 
                 if (currentHole) {
                     // Point is inside a through-hole: snap it to the closest point on the hole perimeter
-                    let edgePt = closestPointOnPolygon(pt, currentHole);
+                    let edgePt = currentHole.findClosestPointOnPerimeter(pt);
                     // Sample Z height at the perimeter edge so the tool remains at the correct part height
                     let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
                     let projectedPt = newPoint(edgePt.x, edgePt.y, z);

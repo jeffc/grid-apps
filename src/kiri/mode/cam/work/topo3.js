@@ -404,7 +404,6 @@ export class Topo {
         // the z-height probe into believing the hole is filled at solid part height, preventing
         // the tool from plunging down or generating toolpaths inside the hole.
         if (contour.omitthru && shadow.holes && shadow.holes.length) {
-            console.warn("[CAM DEBUGLOG] capping through holes, count:", shadow.holes.length);
             let cappedCount = 0;
             const rx = stepsX / boundsX; // Coordinate scaling factor
             for (let hole of shadow.holes) {
@@ -429,7 +428,7 @@ export class Topo {
                             const pt = newPoint(px, py);
                             if (pt.isInPolygon(expHole)) {
                                 // Find the closest boundary point on the original unexpanded hole perimeter
-                                const edgePt = closestPointOnPolygon(pt, hole);
+                                const edgePt = hole.findClosestPointOnPerimeter(pt);
                                 let outsidePt = edgePt;
                                 const d = pt.distTo2D(edgePt);
                                 if (d > 0.00001) {
@@ -462,7 +461,6 @@ export class Topo {
                     }
                 }
             }
-            console.warn("[CAM DEBUGLOG] total capped grid cells:", cappedCount);
         }
 
         await this.contour({
@@ -1029,8 +1027,6 @@ export class Trace {
                     } else {
                         if (!inHole) {
                             flatDist += flatBuffer[flatBuffer.length - 1].distTo2D(newP);
-                        } else {
-                            console.warn("[CAM DEBUGLOG] point in hole, ignoring from flatDist:", newP, "z0:", (z - leave).round(5));
                         }
                         flatBuffer.push(newP);
                     }
@@ -1554,36 +1550,6 @@ function omitMatching(target, matches) {
         });
     }
     return target;
-}
-
-function closestPointOnSegment(p, a, b) {
-    let abx = b.x - a.x;
-    let aby = b.y - a.y;
-    let apx = p.x - a.x;
-    let apy = p.y - a.y;
-    let ab2 = abx * abx + aby * aby;
-    if (ab2 === 0) return a;
-    let t = (apx * abx + apy * aby) / ab2;
-    t = Math.max(0, Math.min(1, t));
-    return newPoint(a.x + t * abx, a.y + t * aby);
-}
-
-function closestPointOnPolygon(pt, poly) {
-    let points = poly.points;
-    let len = points.length;
-    let minD = Infinity;
-    let closest = null;
-    for (let i = 0; i < len; i++) {
-        let p1 = points[i];
-        let p2 = points[(i + 1) % len];
-        let cp = closestPointOnSegment(pt, p1, p2);
-        let d = pt.distTo2D(cp);
-        if (d < minD) {
-            minD = d;
-            closest = cp;
-        }
-    }
-    return closest;
 }
 
 export async function generate(opt) {

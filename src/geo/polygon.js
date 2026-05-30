@@ -1415,6 +1415,33 @@ export class Polygon {
     }
 
     /**
+     * find the closest point on the polygon perimeter/boundary to target
+     *
+     * @param {Point} target
+     * @return {Point} closestPoint
+     */
+    findClosestPointOnPerimeter(target) {
+        let points = this.points;
+        let len = points.length;
+        if (len === 0) return null;
+        if (len === 1) return points[0];
+        let minD = Infinity;
+        let closest = null;
+        for (let i = 0; i < len; i++) {
+            let p1 = points[i];
+            let p2 = points[this.open ? i + 1 : (i + 1) % len];
+            if (!p2) continue;
+            let cp = closestPointOnSegment(target, p1, p2);
+            let d = target.distTo2D(cp);
+            if (d < minD) {
+                minD = d;
+                closest = cp;
+            }
+        }
+        return closest;
+    }
+
+    /**
      * @param {Polygon[]} out
      * @param {[]} deep recurse and track recursion
      * @param {boolean} crush remove inner array after flatten
@@ -1753,4 +1780,16 @@ export function fromClipperPath(path, z) {
 
 export function newPolygon(points) {
     return new Polygon(points);
+}
+
+function closestPointOnSegment(p, a, b) {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let ab2 = abx * abx + aby * aby;
+    if (ab2 === 0) return a;
+    let t = (apx * abx + apy * aby) / ab2;
+    t = Math.max(0, Math.min(1, t));
+    return newPoint(a.x + t * abx, a.y + t * aby);
 }
