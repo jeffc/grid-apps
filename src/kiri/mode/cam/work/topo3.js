@@ -273,7 +273,7 @@ export class Topo {
                 const maxR = Math.sqrt(dx * dx + dy * dy);
                 const shape = (contour.shape || 'Spiral').toLowerCase();
 
-                if (shape === 'concentric') {
+                if (shape === 'concentric' || shape === 'contour spiral') {
                     if (clipTo && clipTo.length) {
                         let outs = [];
                         POLY.offset(clipTo, -toolStep, { count: 999, outs: outs, flat: true, z: 0, minArea: 0.01 });
@@ -287,13 +287,18 @@ export class Topo {
                         }
                         loops = POLY.flatten(loops, [], true);
 
+                        if (shape === 'contour spiral') {
+                            loops = POLY.spiralize(loops);
+                        }
+
                         for (let poly of loops) {
                             const points = poly.points;
                             const numPoints = points.length;
                             if (numPoints < 2) continue;
 
                             let subPoints = [];
-                            for (let i = 0; i < numPoints; i++) {
+                            const limit = poly.open ? numPoints - 1 : numPoints;
+                            for (let i = 0; i < limit; i++) {
                                 const p1 = points[i];
                                 const p2 = points[(i + 1) % numPoints];
                                 const len = p1.distTo2D(p2);
@@ -307,6 +312,10 @@ export class Topo {
                                 } else {
                                     subPoints.push(p1.x, p1.y);
                                 }
+                            }
+                            if (poly.open && numPoints > 0) {
+                                let lastP = points[numPoints - 1];
+                                subPoints.push(lastP.x, lastP.y);
                             }
                             radial2DPaths.push(new Float32Array(subPoints));
                         }
@@ -1667,6 +1676,8 @@ export class Trace {
                 } else {
                     then([]);
                 }
+            } else if (shape === 'contour spiral') {
+                this.crossRadial_sync(params, then);
             } else {
                 // Spiral shape parallelization
                 const b = toolStep / (2 * Math.PI);
@@ -1732,8 +1743,8 @@ export class Trace {
 
         newslice();
 
-        if (shape === 'concentric') {
-            // CONCENTRIC SHAPE GENERATION:
+        if (shape === 'concentric' || shape === 'contour spiral') {
+            // CONCENTRIC/CONTOUR SPIRAL SHAPE GENERATION:
             // Generates closed concentric loop paths from the innermost region to the outer perimeter.
             if (params.loop) {
                 let poly = newPolygon().fromObject(params.loop);
@@ -1845,6 +1856,10 @@ export class Trace {
                 }
                 loops = POLY.flatten(loops, [], true);
 
+                if (shape === 'contour spiral') {
+                    loops = POLY.spiralize(loops);
+                }
+
                 const self_trace = this;
 
                 let loopIdx = 0;
@@ -1857,7 +1872,8 @@ export class Trace {
                     // Subdivides long segments into smaller points spaced by 'step'. This guarantees
                     // we have enough point density to accurately sample the 3D surface heights.
                     let subPoints = [];
-                    for (let i = 0; i < numPoints; i++) {
+                    const limit = poly.open ? numPoints - 1 : numPoints;
+                    for (let i = 0; i < limit; i++) {
                         const p1 = points[i];
                         const p2 = points[(i + 1) % numPoints];
                         const len = p1.distTo2D(p2);
@@ -1873,6 +1889,10 @@ export class Trace {
                         } else {
                             subPoints.push({ x: p1.x, y: p1.y });
                         }
+                    }
+                    if (poly.open && numPoints > 0) {
+                        let lastP = points[numPoints - 1];
+                        subPoints.push({ x: lastP.x, y: lastP.y });
                     }
 
                     // 2. Evaluate clipping and probe Z height for each point:
@@ -1901,12 +1921,15 @@ export class Trace {
                     }
 
                     // 3. Emit points using state machine:
-                    if (hasOut) {
-                        // PARTIAL CLIPPING: If the concentric loop intersects the boundaries (i.e. goes out of stock),
+                    if (hasOut || poly.open) {
+                        // PARTIAL CLIPPING: If the loop intersects the boundaries (i.e. goes out of stock),
                         // we must split it into open segments. We find the first out-of-clip point and rotate the array
-                        // so it starts outside. This allows us to cleanly start/stop tracing when entering/exiting bounds.
-                        let firstOutIdx = evaluated.findIndex(p => !p.inClip);
-                        let rotated = [...evaluated.slice(firstOutIdx), ...evaluated.slice(0, firstOutIdx)];
+                        // so it starts outside. For open paths, we do not rotate.
+                        let rotated = evaluated;
+                        if (hasOut && !poly.open) {
+                            let firstOutIdx = evaluated.findIndex(p => !p.inClip);
+                            rotated = [...evaluated.slice(firstOutIdx), ...evaluated.slice(0, firstOutIdx)];
+                        }
 
                         let tracing = false;
                         for (let pt of rotated) {
