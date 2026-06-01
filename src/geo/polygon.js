@@ -1496,6 +1496,43 @@ export class Polygon {
         return closest;
     }
 
+    snapToIntersectionAngle(target, angle) {
+        let dx_line = Math.cos(angle);
+        let dy_line = Math.sin(angle);
+        let points = this.points;
+        let len = points.length;
+        if (len === 0) return null;
+        if (len === 1) return points[0];
+        
+        let closestPt = null;
+        let minDist = Infinity;
+        
+        for (let i = 0; i < len; i++) {
+            let A = points[i];
+            let B = points[this.open ? i + 1 : (i + 1) % len];
+            if (!B) continue;
+            
+            let dx_seg = B.x - A.x;
+            let dy_seg = B.y - A.y;
+            
+            let det = dy_line * dx_seg - dx_line * dy_seg;
+            if (Math.abs(det) < 1e-9) continue; // parallel
+            
+            let s = (dx_line * (A.y - target.y) - dy_line * (A.x - target.x)) / det;
+            if (s >= 0 && s <= 1) {
+                let ix = A.x + s * dx_seg;
+                let iy = A.y + s * dy_seg;
+                let ipt = newPoint(ix, iy, target.z);
+                let dist = target.distTo2D(ipt);
+                if (dist < minDist) {
+                    minDist = dist;
+                    closestPt = ipt;
+                }
+            }
+        }
+        return closestPt;
+    }
+
     /**
      * find the closest point on the polygon perimeter/boundary to target
      *

@@ -215,7 +215,19 @@ export class Topo {
                                 const pt = newPoint(px, py);
                                 if (pt.isInPolygon(expHole)) {
                                     let edgePt = null;
-                                    edgePt = hole.findClosestPointOnPerimeter(pt);
+                                    const gaxis = (contour.axis || 'X').toLowerCase();
+                                    if (gaxis === 'x') {
+                                        edgePt = hole.snapToIntersectionX(pt);
+                                    } else if (gaxis === 'y') {
+                                        edgePt = hole.snapToIntersectionY(pt);
+                                    } else if (gaxis === 'radial') {
+                                        const theta = Math.atan2(pt.y - centerY, pt.x - centerX);
+                                        const tangentAngle = theta + Math.PI / 2;
+                                        edgePt = hole.snapToIntersectionAngle(pt, tangentAngle);
+                                    }
+                                    if (!edgePt) {
+                                        edgePt = hole.findClosestPointOnPerimeter(pt);
+                                    }
                                     let outsidePt = edgePt;
                                     const d = pt.distTo2D(edgePt);
                                     if (d > 0.00001) {
@@ -784,6 +796,10 @@ export class Topo {
                                     edgePt = hole.snapToIntersectionX(pt);
                                 } else if (axis === 'y') {
                                     edgePt = hole.snapToIntersectionY(pt);
+                                } else if (axis === 'radial') {
+                                    const theta = Math.atan2(pt.y - centerY, pt.x - centerX);
+                                    const tangentAngle = theta + Math.PI / 2;
+                                    edgePt = hole.snapToIntersectionAngle(pt, tangentAngle);
                                 }
                                 if (!edgePt) {
                                     edgePt = hole.findClosestPointOnPerimeter(pt);
@@ -1120,6 +1136,25 @@ export class Topo {
                                 slicesR.push(slice);
                             }
                         }
+                    } else if (shape.toLowerCase() === 'contour spiral') {
+                        // Contour Spiral mode: split into separate slices (revolutions)
+                        let sliceIdx = 0;
+                        for (let seg of segments) {
+                            let rN = seg.resampleN || 100;
+                            let points = seg.points;
+                            let ptsCount = points.length;
+                            for (let i = 0; i < ptsCount; i += rN) {
+                                let start = Math.max(0, i - 1);
+                                let end = Math.min(ptsCount, i + rN);
+                                if (end - start < 2) continue;
+                                
+                                let slice = newSlice(sliceIdx++);
+                                let chunkPoly = newPolygon(points.slice(start, end));
+                                chunkPoly.setOpen();
+                                slice.camLines = [ chunkPoly ];
+                                slicesR.push(slice);
+                            }
+                        }
                     } else {
                         // Spiral mode: single slice
                         let slice = newSlice(0);
@@ -1260,6 +1295,10 @@ export class Trace {
             if (trace) trace.loopIndex = idx;
         };
 
+        const setResampleN = this.setResampleN = function (n) {
+            if (trace) trace.resampleN = n;
+        };
+
         const setLastPoint = this.setLastPoint = function (point) {
             lastPP = point;
         };
@@ -1288,8 +1327,10 @@ export class Trace {
                     slice.push(trace);
                 }
                 const oldIdx = trace.loopIndex;
+                const oldN = trace.resampleN;
                 newtrace();
                 trace.loopIndex = oldIdx;
+                trace.resampleN = oldN;
             }
             lastPP = undefined;
             latent = undefined;
@@ -1864,6 +1905,9 @@ export class Trace {
 
                 let loopIdx = 0;
                 for (let poly of loops) {
+                    if (shape === 'contour spiral') {
+                        self_trace.setResampleN(poly.resampleN);
+                    }
                     const points = poly.points;
                     const numPoints = points.length;
                     if (numPoints < 2) continue;

@@ -281,6 +281,13 @@ function cleanupContourSlices(slices, holes, topo, op) {
                         edgePt = currentHole.snapToIntersectionX(pt);
                     } else if (axis === 'y') {
                         edgePt = currentHole.snapToIntersectionY(pt);
+                    } else if (axis === 'radial') {
+                        let bounds = topo && topo.widget ? topo.widget.getBoundingBox() : null;
+                        let centerX = bounds ? (bounds.min.x + bounds.max.x) / 2 : 0;
+                        let centerY = bounds ? (bounds.min.y + bounds.max.y) / 2 : 0;
+                        let theta = Math.atan2(pt.y - centerY, pt.x - centerX);
+                        let tangentAngle = theta + Math.PI / 2;
+                        edgePt = currentHole.snapToIntersectionAngle(pt, tangentAngle);
                     }
                     if (!edgePt) {
                         edgePt = currentHole.findClosestPointOnPerimeter(pt);
