@@ -262,7 +262,10 @@ function cleanupContourSlices(slices, holes, topo, op) {
                 }
             };
 
-            for (let pt of poly.points) {
+            let points = poly.points;
+            let len = points.length;
+            for (let i = 0; i < len; i++) {
+                let pt = points[i];
                 let currentHole = null;
                 for (let hb of holeBoxes) {
                     if (pt.x >= hb.min_x && pt.x <= hb.max_x && pt.y >= hb.min_y && pt.y <= hb.max_y) {
@@ -274,31 +277,77 @@ function cleanupContourSlices(slices, holes, topo, op) {
                 }
 
                 if (currentHole) {
-                    // Point is inside a through-hole: snap it to the closest point on the hole perimeter
-                    let edgePt = null;
-                    let axis = op.axis ? op.axis.toLowerCase() : '';
-                    if (axis === 'x') {
-                        edgePt = currentHole.snapToIntersectionX(pt);
-                    } else if (axis === 'y') {
-                        edgePt = currentHole.snapToIntersectionY(pt);
+                    if (newPoints.length === 0) {
+                        continue;
                     }
-                    if (!edgePt) {
-                        edgePt = currentHole.findClosestPointOnPerimeter(pt);
-                    }
-                    // Sample Z height at the perimeter edge so the tool remains at the correct part height
-                    let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
-                    let projectedPt = newPoint(edgePt.x, edgePt.y, z);
-
                     if (inHolePolygon === currentHole) {
-                        inHoleLast = projectedPt;
+                        // Already in this hole: only calculate snap if this is the exit point
+                        let isExit = (i === len - 1);
+                        if (!isExit) {
+                            let nextPt = points[i + 1];
+                            let nextHole = null;
+                            for (let hb of holeBoxes) {
+                                if (nextPt.x >= hb.min_x && nextPt.x <= hb.max_x && nextPt.y >= hb.min_y && nextPt.y <= hb.max_y) {
+                                    if (nextPt.isInPolygon(hb.hole)) {
+                                        nextHole = hb.hole;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (nextHole !== currentHole) {
+                                isExit = true;
+                            }
+                        }
+
+                        if (isExit) {
+                            let edgePt = null;
+                            let axis = op.axis ? op.axis.toLowerCase() : '';
+                            if (axis === 'x') {
+                                edgePt = currentHole.snapToIntersectionX(pt);
+                            } else if (axis === 'y') {
+                                edgePt = currentHole.snapToIntersectionY(pt);
+                            } else if (axis === 'radial') {
+                                let bounds = topo && topo.widget ? topo.widget.getBoundingBox() : null;
+                                let centerX = bounds ? (bounds.min.x + bounds.max.x) / 2 : 0;
+                                let centerY = bounds ? (bounds.min.y + bounds.max.y) / 2 : 0;
+                                let theta = Math.atan2(pt.y - centerY, pt.x - centerX);
+                                let tangentAngle = theta + Math.PI / 2;
+                                edgePt = currentHole.snapToIntersectionAngle(pt, tangentAngle);
+                            }
+                            if (!edgePt) {
+                                edgePt = currentHole.findClosestPointOnPerimeter(pt);
+                            }
+                            let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
+                            inHoleLast = newPoint(edgePt.x, edgePt.y, z);
+                        }
                     } else {
+                        // Entry point (first point inside the hole): compute and snap entry
                         emitHole();
                         inHolePolygon = currentHole;
+
+                        let edgePt = null;
+                        let axis = op.axis ? op.axis.toLowerCase() : '';
+                        if (axis === 'x') {
+                            edgePt = currentHole.snapToIntersectionX(pt);
+                        } else if (axis === 'y') {
+                            edgePt = currentHole.snapToIntersectionY(pt);
+                        } else if (axis === 'radial') {
+                            let bounds = topo && topo.widget ? topo.widget.getBoundingBox() : null;
+                            let centerX = bounds ? (bounds.min.x + bounds.max.x) / 2 : 0;
+                            let centerY = bounds ? (bounds.min.y + bounds.max.y) / 2 : 0;
+                            let theta = Math.atan2(pt.y - centerY, pt.x - centerX);
+                            let tangentAngle = theta + Math.PI / 2;
+                            edgePt = currentHole.snapToIntersectionAngle(pt, tangentAngle);
+                        }
+                        if (!edgePt) {
+                            edgePt = currentHole.findClosestPointOnPerimeter(pt);
+                        }
+                        let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
+                        let projectedPt = newPoint(edgePt.x, edgePt.y, z);
                         inHoleStart = projectedPt;
                         inHoleLast = projectedPt;
                     }
                 } else {
-                    // Point is on solid part: emit normally
                     emitHole();
                     newPoints.push(pt);
                 }

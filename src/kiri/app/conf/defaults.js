@@ -460,7 +460,7 @@ export const conf = {
                 camContourOmitThru: false,
                 camContourOver: 0.5,
                 camContourReduce: 2,
-                camContourShape: "Spiral",
+                camContourShape: "Concentric",
                 camContourSpeed: 1000,
                 camContourSpindle: 1000,
                 camContourTool: 1000,

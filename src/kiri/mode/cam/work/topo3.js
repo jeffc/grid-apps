@@ -271,7 +271,7 @@ export class Topo {
                 const dx = maxX - centerX + partOff;
                 const dy = maxY - centerY + partOff;
                 const maxR = Math.sqrt(dx * dx + dy * dy);
-                const shape = (contour.shape || 'Spiral').toLowerCase();
+                const shape = (contour.shape || 'Concentric').toLowerCase();
 
                 if (shape === 'concentric') {
                     if (clipTo && clipTo.length) {
@@ -387,7 +387,7 @@ export class Topo {
 
                 this.trace.newslice();
 
-                const shape = (contour.shape || 'Spiral').toLowerCase();
+                const shape = (contour.shape || 'Concentric').toLowerCase();
                 let loopIdx = 0;
 
                 for (let pathXYZ of output.paths) {
@@ -1090,10 +1090,10 @@ export class Topo {
                 centerY,
                 maxR,
                 toolStep,
-                shape: (shape || 'Spiral').toLowerCase()
+                shape: (shape || 'Concentric').toLowerCase()
             }, segments => {
                 if (segments.length > 0) {
-                    if ((shape || 'Spiral').toLowerCase() === 'concentric') {
+                    if ((shape || 'Concentric').toLowerCase() === 'concentric') {
                         // Export each loop as a separate slice
                         let grouped = [];
                         for (let seg of segments) {
@@ -1620,7 +1620,7 @@ export class Trace {
     crossRadial(params, then) {
         const { minions } = self.kiri_worker || {};
         const { clipTo, toolStep, resolution, density } = this.cross;
-        const shape = (params.shape || 'Spiral').toLowerCase();
+        const shape = (params.shape || 'Concentric').toLowerCase();
 
         if (minions && minions.running > 1 && this.cross.concurrent) {
             if (shape === 'concentric') {

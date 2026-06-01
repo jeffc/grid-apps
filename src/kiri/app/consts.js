@@ -98,8 +98,8 @@ const LISTS = {
         { name: "Radial" }
     ],
     crshape: [
-        { name: "Spiral" },
-        { name: "Concentric" }
+        { name: "Concentric" },
+        { name: "Spiral" }
     ],
     regaxis: [
         { name: "X" },
