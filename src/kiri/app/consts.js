@@ -128,6 +128,10 @@ const LISTS = {
         { name: "concentric" },
         { name: "spiral" }
     ],
+    roughtyp: [
+        { name: "concentric" },
+        { name: "spiral" }
+    ],
     direction: [
         { name: "climb" },
         { name: "conventional" },

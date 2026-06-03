@@ -113,7 +113,7 @@ class OpContour extends CamOp {
                 // If 'Omit Through' is enabled, post-process the generated toolpath slices
                 // to cleanly snap coordinates crossing any through-hole onto the hole perimeter.
                 if (op.omitthru && state.shadow && state.shadow.holes && state.shadow.holes.length) {
-                    slices = cleanupContourSlices(slices, state.shadow.holes, topo, op);
+                    slices = cleanupContourSlices(slices, state.shadow.holes, topo, op, toolDiam);
                 }
                 slices = filter(slices);
                 this.sliceOut = slices;
@@ -266,57 +266,121 @@ class OpContour extends CamOp {
     }
 }
 
-// SLICE POST-PROCESSING SNAP-TO-HOLE (OMIT THROUGH option):
-// Post-processes contour slice lines to snap segments that cross through-holes onto the hole boundary.
-// When 'Omit Through' is active, the toolpath should not run inside the holes. For segments crossing
-// the holes, we project points inside the hole onto the nearest point on the hole's perimeter,
-// and sample the correct Z height at that edge. This creates clean, continuous contours wrapping
-// around the through-holes rather than leaving jagged/broken segments.
-function cleanupContourSlices(slices, holes, topo, op) {
+// SLICE POST-PROCESSING HOLE PRUNING & RETRACT OPTIMIZATION (OMIT THROUGH option):
+// Post-processes contour slice lines when 'Omit Through' is active so that toolpaths do not run inside the holes.
+// For segments crossing through a hole, we check if the straight line shortcut crosses solid material (outside the hole
+// or within the tool radius of the hole boundaries). If it does, we retract/split the toolpath. Otherwise, we keep the
+// toolpath continuous so the tool feeds directly across the empty hole space, minimizing retracts.
+function cleanupContourSlices(slices, holes, topo, op, toolDiam) {
     let holeBoxes = [];
     // Compute bounding boxes for each through-hole to accelerate polygon containment tests
     for (let hole of holes) {
-        let min_x = Infinity, max_x = -Infinity, min_y = Infinity, max_y = -Infinity;
-        for (let p of hole.points) {
-            if (p.x < min_x) min_x = p.x;
-            if (p.x > max_x) max_x = p.x;
-            if (p.y < min_y) min_y = p.y;
-            if (p.y > max_y) max_y = p.y;
-        }
-        holeBoxes.push({ min_x, max_x, min_y, max_y, hole });
+        let bounds = hole.bounds;
+        holeBoxes.push({
+            min_x: bounds.minx,
+            max_x: bounds.maxx,
+            min_y: bounds.miny,
+            max_y: bounds.maxy,
+            hole
+        });
     }
+
+    const toolRadius = (toolDiam || 0) / 2;
 
     for (let slice of slices) {
         if (!slice.camLines) continue;
         let newPolys = [];
         for (let poly of slice.camLines) {
-            let newPoints = [];
             let points = poly.points;
             let len = points.length;
+            if (len < 2) {
+                if (len > 0) newPolys.push(poly);
+                continue;
+            }
+
+            let splitPolysPoints = [];
+            let currentPoints = [];
+            let lastSolidPt = null;
+            let hasSkipped = false;
+
             for (let i = 0; i < len; i++) {
                 let pt = points[i];
-                let inHole = false;
+                let ptInHole = false;
                 for (let hb of holeBoxes) {
                     if (pt.x >= hb.min_x && pt.x <= hb.max_x && pt.y >= hb.min_y && pt.y <= hb.max_y) {
                         if (pt.isInPolygon(hb.hole)) {
-                            inHole = true;
+                            ptInHole = true;
                             break;
                         }
                     }
                 }
-                if (!inHole) {
-                    newPoints.push(pt);
+
+                if (!ptInHole) {
+                    if (hasSkipped && lastSolidPt) {
+                        let crosses = segmentCrossesSolid(lastSolidPt, pt, holeBoxes, toolRadius);
+                        if (crosses) {
+                            if (currentPoints.length > 1) {
+                                splitPolysPoints.push(currentPoints);
+                            }
+                            currentPoints = [];
+                        }
+                    }
+                    currentPoints.push(pt);
+                    lastSolidPt = pt;
+                    hasSkipped = false;
+                } else {
+                    hasSkipped = true;
                 }
             }
 
-            if (newPoints.length > 1) {
-                poly.points = newPoints;
-                newPolys.push(poly);
+            if (currentPoints.length > 1) {
+                splitPolysPoints.push(currentPoints);
+            }
+
+            for (let pts of splitPolysPoints) {
+                let newPoly = newPolygon(pts).setOpen();
+                if (poly.spiralId !== undefined) newPoly.spiralId = poly.spiralId;
+                newPolys.push(newPoly);
             }
         }
         slice.camLines = newPolys;
     }
     return slices;
+}
+
+function segmentCrossesSolid(p1, p2, holeBoxes, toolRadius) {
+    if (!p1 || !p2) return false;
+    // Sample 25%, 50%, and 75% along the shortcut segment
+    for (let pct of [0.25, 0.50, 0.75]) {
+        let testPt = newPoint(
+            p1.x + (p2.x - p1.x) * pct,
+            p1.y + (p2.y - p1.y) * pct,
+            p1.z + (p2.z - p1.z) * pct
+        );
+        let inAnyHole = false;
+        for (let hb of holeBoxes) {
+            if (testPt.x >= hb.min_x && testPt.x <= hb.max_x && testPt.y >= hb.min_y && testPt.y <= hb.max_y) {
+                if (testPt.isInPolygon(hb.hole)) {
+                    // Check if the tool center is at least one tool radius away from the hole perimeter
+                    // to prevent the side of the tool from clipping/gouging the hole walls.
+                    let edgePt = hb.hole.findClosestPointOnPerimeter(testPt);
+                    if (edgePt) {
+                        let dist = testPt.distTo2D(edgePt);
+                        if (dist >= toolRadius) {
+                            inAnyHole = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // If the sample point is not inside any hole, or is too close to a hole wall,
+        // we treat it as crossing/gouging solid material.
+        if (!inAnyHole) {
+            return true;
+        }
+    }
+    return false;
 }
 
 export { OpContour };

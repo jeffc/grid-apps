@@ -585,9 +585,19 @@ function omitMatching(target, matches) {
     target = target.clone(true);
     for (let poly of target.filter(p => p.inner)) {
         poly.inner = poly.inner.filter(inner => {
+            let innerCenter = inner.bounds.center();
             for (let ho of matches) {
-                if (inner.isEquivalent(ho)) {
+                if (inner.isEquivalent(ho, false, 0.2)) {
                     return false;
+                }
+                // Fallback check: if the center of the sliced hole is inside the matching hole,
+                // and their areas are within a 20% tolerance threshold.
+                let hoArea = Math.abs(ho.area());
+                let innerArea = Math.abs(inner.area());
+                if (hoArea > 0.001 && Math.abs(hoArea - innerArea) / hoArea < 0.2) {
+                    if (innerCenter.isInPolygon(ho)) {
+                        return false;
+                    }
                 }
             }
             return true;

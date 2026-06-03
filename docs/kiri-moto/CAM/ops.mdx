@@ -60,6 +60,7 @@ The Level op creates a flat-surface clearing toolpath across a selected area. It
 - Clearing large areas with consistent depth quickly
 
 #### Key Options
+
 - **Pattern**: The toolpath pattern used to surface the area:
   - **linear**: Parallel zig-zag raster paths.
   - **concentric**: Progressive concentric loops offsetting inwards from the perimeter.
@@ -78,6 +79,7 @@ The Rough op removes large volumes of material quickly using a stepped-down tool
 - Preserving tool life by reducing cutting load in later passes
 
 #### Key Options
+
 - **Pattern**: The clearing pattern type:
   - **concentric**: Progressive concentric loops offsetting inwards from the boundary.
   - **spiral**: Continuously spiralized concentric offset paths.
@@ -94,12 +96,14 @@ It can trace along the X or Y axes, or in **Radial** mode, with configurable pre
 - Cleaning up a part after [roughing](#rough)
 
 #### Axis Modes
+
 - **X / Y Axis**: Generates linear parallel scanning toolpaths along the selected horizontal axis.
 - **Radial**: Generates toolpaths radiating from or circling around the center of the part. This has two shape submodes:
   - **Spiral**: Emits a continuous spiral toolpath expanding outwards from the center of the part.
   - **Concentric**: Generates concentric circular loops from the innermost boundary to the perimeter.
 
 #### Key Options
+
 - **Curves Only**: Restricts linear cleanup to sloped/curved surfaces, automatically skipping flat horizontal sections.
 - **Curve Join Dist**: A multiplier of the tool diameter (defaults to 0.5) defining the maximum length of flat regions between curved profiles that should be bridged and kept continuous to prevent unnecessary tool retractions.
 - **Omit Through**: Bypasses machining slots, holes, and other features that go completely through the part.
@@ -157,6 +161,7 @@ for an approximation of a v-bit carve. Some use cases specific to the Pocket op 
 - Clearing a specific area of a part
 
 #### Key Options
+
 - **Contour / Surfacing Pattern**: When **contour** is enabled, chooses the surfacing pattern type:
   - **linear**: Parallel zig-zag toolpaths.
   - **concentric**: Progressive concentric loops offsetting inwards.
@@ -175,6 +180,7 @@ The Area operation allows you to select specific boundary loops or surfaces on a
 - Surfacing localized regions of a part.
 
 #### Key Options
+
 - **Mode**: Chooses the operation style:
   - **clear**: Clears the material inside the selected boundaries.
   - **trace**: Traces the selected boundary lines directly.
