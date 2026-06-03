@@ -272,8 +272,8 @@ export class Topo {
                 const dy = maxY - centerY + partOff;
                 const maxR = Math.sqrt(dx * dx + dy * dy);
                 const shape = (contour.shape || 'Concentric').toLowerCase();
-                const isConcentricLike = shape === 'concentric' || shape === 'concentric spiral' || shape === 'contour spiral';
-                const isSpiralLike = shape === 'concentric spiral' || shape === 'contour spiral';
+                const isConcentricLike = shape === 'concentric' || shape === 'spiral' || shape === 'concentric spiral' || shape === 'contour spiral';
+                const isSpiralLike = shape === 'spiral' || shape === 'concentric spiral' || shape === 'contour spiral';
 
                 if (isConcentricLike) {
                     if (clipTo && clipTo.length) {
@@ -322,23 +322,6 @@ export class Topo {
                             radial2DPaths.push(new Float32Array(subPoints));
                         }
                     }
-                } else {
-                    // Spiral mode
-                    let subPoints = [];
-                    const b = toolStep / (2 * Math.PI);
-                    let theta = 0;
-                    let r = 0;
-
-                    while (r <= maxR) {
-                        const x = centerX + r * Math.cos(theta);
-                        const y = centerY + r * Math.sin(theta);
-                        subPoints.push(x, y);
-
-                        const dtheta = radialStep / Math.sqrt(b * b + r * r);
-                        theta += dtheta;
-                        r = b * theta;
-                    }
-                    radial2DPaths.push(new Float32Array(subPoints));
                 }
             }
 
@@ -1123,7 +1106,7 @@ export class Topo {
                                 slicesR.push(slice);
                             }
                         }
-                    } else if (lshape === 'concentric spiral' || lshape === 'contour spiral') {
+                    } else if (lshape === 'spiral' || lshape === 'concentric spiral' || lshape === 'contour spiral') {
                         // Contour/Concentric Spiral mode: split into separate slices (revolutions)
                         let sliceIdx = 0;
                         for (let segIdx = 0; segIdx < segments.length; segIdx++) {
@@ -1145,10 +1128,23 @@ export class Topo {
                             }
                         }
                     } else {
-                        // Spiral mode: single slice
-                        let slice = newSlice(0);
-                        slice.camLines = segments;
-                        slicesR.push(slice);
+                        // Fallback to Concentric slice building if shape is unrecognized
+                        let grouped = [];
+                        for (let seg of segments) {
+                            let lidx = seg.loopIndex ?? 0;
+                            if (!grouped[lidx]) {
+                                grouped[lidx] = [];
+                            }
+                            grouped[lidx].push(seg);
+                        }
+                        let sliceIdx = 0;
+                        for (let g of grouped) {
+                            if (g && g.length > 0) {
+                                let slice = newSlice(sliceIdx++);
+                                slice.camLines = g;
+                                slicesR.push(slice);
+                            }
+                        }
                     }
                 }
                 onupdate(stepsTotal, stepsTotal, "contour radial");
@@ -1706,54 +1702,8 @@ export class Trace {
                 } else {
                     then([]);
                 }
-            } else if (shape === 'concentric spiral' || shape === 'contour spiral') {
+            } else if (shape === 'spiral' || shape === 'concentric spiral' || shape === 'contour spiral') {
                 this.crossRadial_sync(params, then);
-            } else {
-                // Spiral shape parallelization
-                const b = toolStep / (2 * Math.PI);
-                const bounds = this.probe.params.boundsOverride || this.cross.box;
-                const minX = bounds.min.x;
-                const maxX = bounds.max.x;
-                const minY = bounds.min.y;
-                const maxY = bounds.max.y;
-                const centerX = (minX + maxX) / 2;
-                const centerY = (minY + maxY) / 2;
-                const partOff = this.cross.partOff || 0;
-                const dx = maxX - centerX + partOff;
-                const dy = maxY - centerY + partOff;
-                const maxR = Math.sqrt(dx * dx + dy * dy);
-                const maxTheta = maxR / b;
-
-                const numMinions = minions.running;
-                const chunkSize = maxTheta / numMinions;
-                let promises = [];
-
-                for (let i = 0; i < numMinions; i++) {
-                    const thetaStart = i * chunkSize;
-                    const thetaEnd = (i + 1) * chunkSize;
-                    promises.push(new Promise(resolve => {
-                        minions.queue({
-                            cmd: "trace_radial",
-                            params: {
-                                ...params,
-                                thetaStart,
-                                thetaEnd
-                            }
-                        }, data => {
-                            resolve(codec.decode(data.slice));
-                        });
-                    }));
-                }
-
-                Promise.all(promises).then(slices => {
-                    let merged = [];
-                    for (let slice of slices) {
-                        if (slice) {
-                            merged.push(...slice);
-                        }
-                    }
-                    then(merged);
-                });
             }
         } else {
             this.crossRadial_sync(params, then);
@@ -1774,8 +1724,8 @@ export class Trace {
         newslice();
 
         const lshape = (shape || 'Concentric').toLowerCase();
-        const isConcentricLike = lshape === 'concentric' || lshape === 'concentric spiral' || lshape === 'contour spiral';
-        const isSpiralLike = lshape === 'concentric spiral' || lshape === 'contour spiral';
+        const isConcentricLike = lshape === 'concentric' || lshape === 'spiral' || lshape === 'concentric spiral' || lshape === 'contour spiral';
+        const isSpiralLike = lshape === 'spiral' || lshape === 'concentric spiral' || lshape === 'contour spiral';
 
         if (isConcentricLike) {
             // CONCENTRIC SHAPE GENERATION:
@@ -2007,59 +1957,6 @@ export class Trace {
                     }
                     loopIdx++;
                 }
-            }
-        } else {
-            // DEFAULT SPIRAL MODE:
-            // Generates a continuous Archimedean spiral from the center outwards.
-            const b = toolStep / (2 * Math.PI);
-            let theta = params.thetaStart !== undefined ? params.thetaStart : 0;
-            let r = b * theta;
-            const thetaEnd = params.thetaEnd;
-
-            let tracing = false;
-
-            while (r <= maxR && (thetaEnd === undefined || theta <= thetaEnd)) {
-                // Convert polar coordinates (r, theta) to Cartesian workspace coordinates (x, y)
-                const x = centerX + r * Math.cos(theta);
-                const y = centerY + r * Math.sin(theta);
-                checkr.x = x;
-                checkr.y = y;
-
-                // Restrict toolpath within stock AND expanded part boundaries (intersection check)
-                const inStock = !clipStock || inClip(clipStock, undefined, checkr);
-                const inShadow = !clipTo || inClip(clipTo, undefined, checkr);
-
-                if (!inStock || !inShadow) {
-                    // Terminate path segment if we exit allowed regions
-                    if (tracing) {
-                        end_poly();
-                        tracing = false;
-                    }
-                } else {
-                    if (!tracing) {
-                        newtrace();
-                        tracing = true;
-                    }
-                    // Probe topography height map at (x, y) coordinates
-                    let tv = toolAtXY(x, y);
-
-                    // Override height if tool is within tab boundary to prevent milling tabs
-                    if (clipTab && clipTab.length && tv < tabHeight && inClip(clipTab, tv, checkr)) {
-                        tv = this.tabZ;
-                    }
-
-                    push_point(x, y, tv + leave);
-                }
-
-                // STEPPING FORMULA:
-                // We use dtheta = ds / sqrt(b^2 + r^2) to maintain a constant linear feed resolution
-                // (linear step size 'step') as the spiral radius expands outwards.
-                const dtheta = step / Math.sqrt(b * b + r * r);
-                theta += dtheta;
-                r = b * theta;
-            }
-            if (tracing) {
-                end_poly();
             }
         }
 

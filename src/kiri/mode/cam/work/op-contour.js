@@ -189,7 +189,7 @@ class OpContour extends CamOp {
 
         const isRadial = op.axis.toLowerCase() === 'radial';
         const lshape = (op.shape || '').toLowerCase();
-        const isSpiral = lshape === 'concentric spiral' || lshape === 'contour spiral';
+        const isSpiral = lshape === 'spiral' || lshape === 'concentric spiral' || lshape === 'contour spiral';
 
         if (isRadial) {
             // RADIAL FINISHING TOOLPATH EMISSION:
