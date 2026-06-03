@@ -1126,7 +1126,8 @@ export class Topo {
                     } else if (lshape === 'concentric spiral' || lshape === 'contour spiral') {
                         // Contour/Concentric Spiral mode: split into separate slices (revolutions)
                         let sliceIdx = 0;
-                        for (let seg of segments) {
+                        for (let segIdx = 0; segIdx < segments.length; segIdx++) {
+                            let seg = segments[segIdx];
                             let rN = seg.resampleN || 100;
                             let points = seg.points;
                             let ptsCount = points.length;
@@ -1138,6 +1139,7 @@ export class Topo {
                                 let slice = newSlice(sliceIdx++);
                                 let chunkPoly = newPolygon(points.slice(start, end));
                                 chunkPoly.setOpen();
+                                chunkPoly.spiralId = segIdx;
                                 slice.camLines = [ chunkPoly ];
                                 slicesR.push(slice);
                             }

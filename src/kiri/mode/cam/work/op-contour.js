@@ -188,6 +188,8 @@ class OpContour extends CamOp {
         };
 
         const isRadial = op.axis.toLowerCase() === 'radial';
+        const lshape = (op.shape || '').toLowerCase();
+        const isSpiral = lshape === 'concentric spiral' || lshape === 'contour spiral';
 
         if (isRadial) {
             // RADIAL FINISHING TOOLPATH EMISSION:
@@ -195,13 +197,59 @@ class OpContour extends CamOp {
             // Unlike linear X/Y parallel finishing passes where all segments are accumulated together
             // and ordered globally, in Radial Concentric mode we emit loops slice-by-slice (from innermost
             // out) and run tip-to-tip path ordering per loop to minimize travel and prevent collisions.
-            for (let slice of sliceOut) {
-                if (!slice.camLines) {
-                    continue;
+            if (isSpiral) {
+                // Group all chunk polygons by their spiralId (or group index)
+                let groups = new Map();
+                for (let slice of sliceOut) {
+                    if (!slice.camLines) continue;
+                    for (let poly of slice.camLines) {
+                        let id = poly.spiralId || 0;
+                        if (!groups.has(id)) {
+                            groups.set(id, []);
+                        }
+                        groups.get(id).push(poly);
+                    }
                 }
-                let polys = sliceToPolys(slice);
-                // Find optimized path routing (tip2tip) on the loops within this slice
-                printPoint = tip2tipEmit(polys, printPoint, emitSegment);
+
+                // For each group, merge them into a single continuous polygon
+                let mergedPolys = [];
+                for (let [id, polys] of groups.entries()) {
+                    if (polys.length === 0) continue;
+                    let mergedPoints = [];
+                    for (let poly of polys) {
+                        for (let pt of poly.points) {
+                            if (mergedPoints.length > 0) {
+                                let lastPt = mergedPoints[mergedPoints.length - 1];
+                                if (lastPt.distTo2D(pt) < 0.0001) {
+                                    // Skip duplicate overlap point
+                                    continue;
+                                }
+                            }
+                            mergedPoints.push(pt);
+                        }
+                    }
+                    if (mergedPoints.length > 1) {
+                        let mergedPoly = newPolygon(mergedPoints);
+                        mergedPoly.setOpen();
+                        mergedPoly.spiralId = id;
+                        mergedPolys.push(mergedPoly);
+                    }
+                }
+
+                // Now emit these merged polygons as a single tip2tipEmit call to preserve continuous milling
+                let depthData = mergedPolys.map(poly => {
+                    return { first: poly.first(), last: poly.last(), poly: poly };
+                });
+                printPoint = tip2tipEmit(depthData, printPoint, emitSegment);
+            } else {
+                for (let slice of sliceOut) {
+                    if (!slice.camLines) {
+                        continue;
+                    }
+                    let polys = sliceToPolys(slice);
+                    // Find optimized path routing (tip2tip) on the loops within this slice
+                    printPoint = tip2tipEmit(polys, printPoint, emitSegment);
+                }
             }
         } else {
             // STANDARD LINEAR X/Y FINISHING EMISSION:
@@ -243,116 +291,23 @@ function cleanupContourSlices(slices, holes, topo, op) {
         let newPolys = [];
         for (let poly of slice.camLines) {
             let newPoints = [];
-            let inHolePolygon = null;
-            let inHoleStart = null;
-            let inHoleLast = null;
-
-            // Helper to emit the snapped boundary segment once we exit the through-hole area
-            const emitHole = () => {
-                if (inHolePolygon) {
-                    if (inHoleStart) {
-                        newPoints.push(inHoleStart);
-                    }
-                    if (inHoleLast && inHoleLast !== inHoleStart) {
-                        newPoints.push(inHoleLast);
-                    }
-                    inHolePolygon = null;
-                    inHoleStart = null;
-                    inHoleLast = null;
-                }
-            };
-
             let points = poly.points;
             let len = points.length;
             for (let i = 0; i < len; i++) {
                 let pt = points[i];
-                let currentHole = null;
+                let inHole = false;
                 for (let hb of holeBoxes) {
                     if (pt.x >= hb.min_x && pt.x <= hb.max_x && pt.y >= hb.min_y && pt.y <= hb.max_y) {
                         if (pt.isInPolygon(hb.hole)) {
-                            currentHole = hb.hole;
+                            inHole = true;
                             break;
                         }
                     }
                 }
-
-                if (currentHole) {
-                    if (newPoints.length === 0) {
-                        continue;
-                    }
-                    if (inHolePolygon === currentHole) {
-                        // Already in this hole: only calculate snap if this is the exit point
-                        let isExit = (i === len - 1);
-                        if (!isExit) {
-                            let nextPt = points[i + 1];
-                            let nextHole = null;
-                            for (let hb of holeBoxes) {
-                                if (nextPt.x >= hb.min_x && nextPt.x <= hb.max_x && nextPt.y >= hb.min_y && nextPt.y <= hb.max_y) {
-                                    if (nextPt.isInPolygon(hb.hole)) {
-                                        nextHole = hb.hole;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (nextHole !== currentHole) {
-                                isExit = true;
-                            }
-                        }
-
-                        if (isExit) {
-                            let edgePt = null;
-                            let axis = op.axis ? op.axis.toLowerCase() : '';
-                            if (axis === 'x') {
-                                edgePt = currentHole.snapToIntersectionX(pt);
-                            } else if (axis === 'y') {
-                                edgePt = currentHole.snapToIntersectionY(pt);
-                            } else if (axis === 'radial') {
-                                let bounds = topo && topo.widget ? topo.widget.getBoundingBox() : null;
-                                let centerX = bounds ? (bounds.min.x + bounds.max.x) / 2 : 0;
-                                let centerY = bounds ? (bounds.min.y + bounds.max.y) / 2 : 0;
-                                let theta = Math.atan2(pt.y - centerY, pt.x - centerX);
-                                let tangentAngle = theta + Math.PI / 2;
-                                edgePt = currentHole.snapToIntersectionAngle(pt, tangentAngle);
-                            }
-                            if (!edgePt) {
-                                edgePt = currentHole.findClosestPointOnPerimeter(pt);
-                            }
-                            let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
-                            inHoleLast = newPoint(edgePt.x, edgePt.y, z);
-                        }
-                    } else {
-                        // Entry point (first point inside the hole): compute and snap entry
-                        emitHole();
-                        inHolePolygon = currentHole;
-
-                        let edgePt = null;
-                        let axis = op.axis ? op.axis.toLowerCase() : '';
-                        if (axis === 'x') {
-                            edgePt = currentHole.snapToIntersectionX(pt);
-                        } else if (axis === 'y') {
-                            edgePt = currentHole.snapToIntersectionY(pt);
-                        } else if (axis === 'radial') {
-                            let bounds = topo && topo.widget ? topo.widget.getBoundingBox() : null;
-                            let centerX = bounds ? (bounds.min.x + bounds.max.x) / 2 : 0;
-                            let centerY = bounds ? (bounds.min.y + bounds.max.y) / 2 : 0;
-                            let theta = Math.atan2(pt.y - centerY, pt.x - centerX);
-                            let tangentAngle = theta + Math.PI / 2;
-                            edgePt = currentHole.snapToIntersectionAngle(pt, tangentAngle);
-                        }
-                        if (!edgePt) {
-                            edgePt = currentHole.findClosestPointOnPerimeter(pt);
-                        }
-                        let z = (topo && topo.toolAtXY ? topo.toolAtXY(edgePt.x, edgePt.y) : pt.z) + (op.leave || 0);
-                        let projectedPt = newPoint(edgePt.x, edgePt.y, z);
-                        inHoleStart = projectedPt;
-                        inHoleLast = projectedPt;
-                    }
-                } else {
-                    emitHole();
+                if (!inHole) {
                     newPoints.push(pt);
                 }
             }
-            emitHole();
 
             if (newPoints.length > 1) {
                 poly.points = newPoints;
