@@ -27,8 +27,9 @@ class OpArea extends CamOp {
 
     async slice(progress) {
         let { op, state } = this;
-        let { direction, down, expand, flats, flatOff, follow, sr_type, omitthru } = op;
+        let { direction, down, expand, flats, flatOff, follow, omitthru } = op;
         let { mode, outline, over, rename, smooth, tool } = op;
+        let sr_type = (mode === 'clear' ? op.sr_type_clear : op.sr_type_surf) || op.sr_type || 'concentric';
         let { addSlices, axisIndex, color, cutTabs, settings } = state;
         let { shadowAt, setToolDiam, tabs, widget, workarea } = state;
 
@@ -351,7 +352,7 @@ class OpArea extends CamOp {
                 }
             } else
             if (mode === 'surface') {
-                let { sr_type, sr_angle, sr_alter, tolerance } = op;
+                let { sr_angle, sr_alter, tolerance } = op;
 
                 let resolution = tolerance || 0.05;
                 let raster = await self.get_raster_gpu({ mode: "tracing", resolution });
@@ -674,14 +675,14 @@ function prunePointsInHoles(poly, holes) {
     if (!holes || !holes.length) return poly;
     let holeBoxes = [];
     for (let hole of holes) {
-        let min_x = Infinity, max_x = -Infinity, min_y = Infinity, max_y = -Infinity;
-        for (let p of hole.points) {
-            if (p.x < min_x) min_x = p.x;
-            if (p.x > max_x) max_x = p.x;
-            if (p.y < min_y) min_y = p.y;
-            if (p.y > max_y) max_y = p.y;
-        }
-        holeBoxes.push({ min_x, max_x, min_y, max_y, hole });
+        let bounds = hole.bounds;
+        holeBoxes.push({
+            min_x: bounds.minx,
+            max_x: bounds.maxx,
+            min_y: bounds.miny,
+            max_y: bounds.maxy,
+            hole
+        });
     }
     let newPoints = [];
     for (let pt of poly.points) {

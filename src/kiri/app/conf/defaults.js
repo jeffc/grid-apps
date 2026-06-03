@@ -433,7 +433,7 @@ export const conf = {
                 camAreaTool: 1000,
                 camAreaMode: "clear",
                 camAreaTrace: "none",
-                camAreaSurface: "linear",
+                camAreaSurface: "concentric",
                 camAreaEdgeOnly: false,
                 camAreaAngle: 0,
                 camAreaOver: 0.4,

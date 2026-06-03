@@ -256,7 +256,7 @@ export function createPopOps() {
     }
 
     function isSurfaceLinear() {
-        return env.poppedRec.mode === 'surface' && env.poppedRec.sr_type === 'linear';
+        return env.poppedRec.mode === 'surface' && env.poppedRec.sr_type_surf === 'linear';
     }
 
     function canDogBones() {
@@ -773,7 +773,8 @@ export function createPopOps() {
         mode: 'camAreaMode',
         direction: 'camMillDirection',
         tr_type: 'camAreaTrace',
-        sr_type: 'camAreaSurface',
+        sr_type_clear: 'camAreaSurface',
+        sr_type_surf: 'camAreaSurface',
         sr_angle: 'camAreaAngle',
         sr_alter: 'camAreaZigZag',
         over: 'camAreaOver',
@@ -797,7 +798,8 @@ export function createPopOps() {
     }).inputs = {
         mode: UC.newSelect(LANG.mo_menu, { post: opRender }, "opmode"),
         tr_type: UC.newSelect(LANG.cc_offs_s, { title: LANG.cc_offs_l, show: isTrace }, "traceoff"),
-        sr_type: UC.newSelect("pattern", { title: "pattern", show: () => isClear() || isSurface() }, "surftyp"),
+        sr_type_clear: UC.newSelect("pattern", { title: "pattern", show: isClear }, "roughtyp"),
+        sr_type_surf: UC.newSelect("pattern", { title: "pattern", show: isSurface }, "surftyp"),
         sep: UC.newBlank({ class: "pop-sep" }),
         exp: UC.newExpand("area selection", { open }),
         menu: UC.newRow([

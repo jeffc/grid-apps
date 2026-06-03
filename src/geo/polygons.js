@@ -1310,6 +1310,10 @@ export function reconnect(polys, sameZ = true) {
 export function spiralize(loops, climb) {
     if (!loops || loops.length === 0) return [];
 
+    // Filter out empty loops first to avoid undefined point access during resampling
+    loops = loops.filter(l => l && l.points && l.points.length > 0);
+    if (loops.length === 0) return [];
+
     // Ensure winding is set if climb is specified
     if (climb !== undefined && climb !== null) {
         setWinding(loops.filter(p => p.isClosed()), climb);
