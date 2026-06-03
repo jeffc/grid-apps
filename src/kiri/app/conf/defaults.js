@@ -594,6 +594,7 @@ export const conf = {
                 camRoughStock: 0,
                 camRoughStockZ: 0,
                 camRoughTool: 1000,
+                camRoughType: "concentric",
                 camRoughTop: true,
                 camRoundCorners: true,
                 camStockClipTo: false,

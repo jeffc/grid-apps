@@ -325,11 +325,13 @@ export function createPopOps() {
         flats: 'camRoughFlat',
         inside: 'camRoughIn',
         omitthru: 'camRoughOmitThru',
+        sr_type: 'camRoughType',
         ov_topz: 0,
         ov_botz: 0,
     }).inputs = {
         tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
         direction: UC.newSelect(LANG.ou_dire_s, { title: LANG.ou_dire_l }, "direction"),
+        sr_type: UC.newSelect("pattern", { title: "pattern" }, "surftyp"),
         sep: UC.newBlank({ class: "pop-sep" }),
         step: UC.newInput(LANG.cc_sovr_s, { title: LANG.cc_sovr_l, convert: toFloat, bound: UC.bound(0.01, 1.0) }),
         down: UC.newInput(LANG.cc_sdwn_s, { title: LANG.cc_sdwn_l, convert: toFloat, units }),

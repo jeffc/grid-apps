@@ -30,6 +30,7 @@ These operations include:
     - [Drill](#drill)
     - [Trace](#trace)
     - [Pocket](#pocket)
+    - [Area](#area)
 - [Gcode](#gcode)
 - Laser Operations
 - Indexed Operations
@@ -58,6 +59,12 @@ The Level op creates a flat-surface clearing toolpath across a selected area. It
 - Creating uniform faces on complex objects
 - Clearing large areas with consistent depth quickly
 
+#### Key Options
+- **Pattern**: The toolpath pattern used to surface the area:
+  - **linear**: Parallel zig-zag raster paths.
+  - **concentric**: Progressive concentric loops offsetting inwards from the perimeter.
+  - **spiral**: Continuously spiralized concentric offset paths.
+
 ### Rough
 
 <ImageCarousel base="/img/CAM/example/rough/" images="rough" />
@@ -69,6 +76,11 @@ The Rough op removes large volumes of material quickly using a stepped-down tool
 - Clearing voids or flat faces for many objects at once
 - Preparing a part for finish machining
 - Preserving tool life by reducing cutting load in later passes
+
+#### Key Options
+- **Pattern**: The clearing pattern type:
+  - **concentric**: Progressive concentric loops offsetting inwards from the boundary.
+  - **spiral**: Continuously spiralized concentric offset paths.
 
 ### Contour
 
@@ -143,6 +155,36 @@ for an approximation of a v-bit carve. Some use cases specific to the Pocket op 
 - Creating one pocket in a part with multiple
 - Attempting a v-carve
 - Clearing a specific area of a part
+
+#### Key Options
+- **Contour / Surfacing Pattern**: When **contour** is enabled, chooses the surfacing pattern type:
+  - **linear**: Parallel zig-zag toolpaths.
+  - **concentric**: Progressive concentric loops offsetting inwards.
+  - **spiral**: Continuously spiralized concentric offset paths from the center outwards, with the innermost loop fully traced in its entirety to ensure no center stock is left uncut.
+- **Outline Only**: Restricts pocket contouring to only trace the outer perimeter and hole outlines.
+- **Omit Through**: When **Outline Only** is checked, this bypasses machining boundaries for holes and features that go completely through the part.
+
+### Area
+
+<ImageCarousel base="/img/CAM/example/area/" images="area" />
+
+The Area operation allows you to select specific boundary loops or surfaces on a part to clear, trace, or surface. It provides precise control over localized features. It is useful for:
+
+- Clearing flat pockets or horizontal areas.
+- Tracing specific boundary contours.
+- Surfacing localized regions of a part.
+
+#### Key Options
+- **Mode**: Chooses the operation style:
+  - **clear**: Clears the material inside the selected boundaries.
+  - **trace**: Traces the selected boundary lines directly.
+  - **surface**: Surfaces the area using a designated pattern.
+- **Pattern**: When in **clear** or **surface** mode, defines the toolpath pattern:
+  - **linear**: Parallel scanlines/zig-zag paths.
+  - **concentric**: Progressive concentric loops offsetting inwards from the boundary.
+  - **spiral**: Continuously spiralized concentric offset paths.
+- **Outline Only**: When in **clear** or **surface** mode, restricts paths to trace the outer perimeter and hole outlines.
+- **Omit Through**: When **Outline Only** is checked, this prunes toolpath points inside through-holes to skip them cleanly.
 
 ### Gcode
 

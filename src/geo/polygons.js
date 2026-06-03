@@ -1459,6 +1459,14 @@ export function spiralize(loops, climb) {
 
         // Interpolate spiral
         let spiralPoints = [];
+
+        // Trace the first (innermost) loop in its entirety to clean the inner wall
+        let L_first = resampledLoops[0];
+        for (let j = 0; j < N; j++) {
+            spiralPoints.push(L_first[j].clone());
+        }
+        spiralPoints.push(L_first[0].clone());
+
         for (let i = 0; i < resampledLoops.length - 1; i++) {
             let L_curr = resampledLoops[i];
             let L_next = resampledLoops[i + 1];
