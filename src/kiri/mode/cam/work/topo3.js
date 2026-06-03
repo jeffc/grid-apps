@@ -272,8 +272,10 @@ export class Topo {
                 const dy = maxY - centerY + partOff;
                 const maxR = Math.sqrt(dx * dx + dy * dy);
                 const shape = (contour.shape || 'Concentric').toLowerCase();
+                const isConcentricLike = shape === 'concentric' || shape === 'concentric spiral' || shape === 'contour spiral';
+                const isSpiralLike = shape === 'concentric spiral' || shape === 'contour spiral';
 
-                if (shape === 'concentric') {
+                if (isConcentricLike) {
                     if (clipTo && clipTo.length) {
                         let outs = [];
                         POLY.offset(clipTo, -toolStep, { count: 999, outs: outs, flat: true, z: 0, minArea: 0.01 });
@@ -287,13 +289,18 @@ export class Topo {
                         }
                         loops = POLY.flatten(loops, [], true);
 
+                        if (isSpiralLike) {
+                            loops = POLY.spiralize(loops);
+                        }
+
                         for (let poly of loops) {
                             const points = poly.points;
                             const numPoints = points.length;
                             if (numPoints < 2) continue;
 
                             let subPoints = [];
-                            for (let i = 0; i < numPoints; i++) {
+                            const limit = poly.open ? numPoints - 1 : numPoints;
+                            for (let i = 0; i < limit; i++) {
                                 const p1 = points[i];
                                 const p2 = points[(i + 1) % numPoints];
                                 const len = p1.distTo2D(p2);
@@ -307,6 +314,10 @@ export class Topo {
                                 } else {
                                     subPoints.push(p1.x, p1.y);
                                 }
+                            }
+                            if (poly.open && numPoints > 0) {
+                                let lastP = points[numPoints - 1];
+                                subPoints.push(lastP.x, lastP.y);
                             }
                             radial2DPaths.push(new Float32Array(subPoints));
                         }
@@ -1093,7 +1104,8 @@ export class Topo {
                 shape: (shape || 'Concentric').toLowerCase()
             }, segments => {
                 if (segments.length > 0) {
-                    if ((shape || 'Concentric').toLowerCase() === 'concentric') {
+                    const lshape = (shape || 'Concentric').toLowerCase();
+                    if (lshape === 'concentric') {
                         // Export each loop as a separate slice
                         let grouped = [];
                         for (let seg of segments) {
@@ -1108,6 +1120,25 @@ export class Topo {
                             if (g && g.length > 0) {
                                 let slice = newSlice(sliceIdx++);
                                 slice.camLines = g;
+                                slicesR.push(slice);
+                            }
+                        }
+                    } else if (lshape === 'concentric spiral' || lshape === 'contour spiral') {
+                        // Contour/Concentric Spiral mode: split into separate slices (revolutions)
+                        let sliceIdx = 0;
+                        for (let seg of segments) {
+                            let rN = seg.resampleN || 100;
+                            let points = seg.points;
+                            let ptsCount = points.length;
+                            for (let i = 0; i < ptsCount; i += rN) {
+                                let start = Math.max(0, i - 1);
+                                let end = Math.min(ptsCount, i + rN);
+                                if (end - start < 2) continue;
+
+                                let slice = newSlice(sliceIdx++);
+                                let chunkPoly = newPolygon(points.slice(start, end));
+                                chunkPoly.setOpen();
+                                slice.camLines = [ chunkPoly ];
                                 slicesR.push(slice);
                             }
                         }
@@ -1251,6 +1282,10 @@ export class Trace {
             if (trace) trace.loopIndex = idx;
         };
 
+        const setResampleN = this.setResampleN = function (n) {
+            if (trace) trace.resampleN = n;
+        };
+
         const setLastPoint = this.setLastPoint = function (point) {
             lastPP = point;
         };
@@ -1279,8 +1314,10 @@ export class Trace {
                     slice.push(trace);
                 }
                 const oldIdx = trace.loopIndex;
+                const oldN = trace.resampleN;
                 newtrace();
                 trace.loopIndex = oldIdx;
+                trace.resampleN = oldN;
             }
             lastPP = undefined;
             latent = undefined;
@@ -1667,6 +1704,8 @@ export class Trace {
                 } else {
                     then([]);
                 }
+            } else if (shape === 'concentric spiral' || shape === 'contour spiral') {
+                this.crossRadial_sync(params, then);
             } else {
                 // Spiral shape parallelization
                 const b = toolStep / (2 * Math.PI);
@@ -1732,7 +1771,11 @@ export class Trace {
 
         newslice();
 
-        if (shape === 'concentric') {
+        const lshape = (shape || 'Concentric').toLowerCase();
+        const isConcentricLike = lshape === 'concentric' || lshape === 'concentric spiral' || lshape === 'contour spiral';
+        const isSpiralLike = lshape === 'concentric spiral' || lshape === 'contour spiral';
+
+        if (isConcentricLike) {
             // CONCENTRIC SHAPE GENERATION:
             // Generates closed concentric loop paths from the innermost region to the outer perimeter.
             if (params.loop) {
@@ -1845,10 +1888,17 @@ export class Trace {
                 }
                 loops = POLY.flatten(loops, [], true);
 
+                if (isSpiralLike) {
+                    loops = POLY.spiralize(loops);
+                }
+
                 const self_trace = this;
 
                 let loopIdx = 0;
                 for (let poly of loops) {
+                    if (isSpiralLike) {
+                        self_trace.setResampleN(poly.resampleN);
+                    }
                     const points = poly.points;
                     const numPoints = points.length;
                     if (numPoints < 2) continue;
@@ -1857,7 +1907,8 @@ export class Trace {
                     // Subdivides long segments into smaller points spaced by 'step'. This guarantees
                     // we have enough point density to accurately sample the 3D surface heights.
                     let subPoints = [];
-                    for (let i = 0; i < numPoints; i++) {
+                    const limit = poly.open ? numPoints - 1 : numPoints;
+                    for (let i = 0; i < limit; i++) {
                         const p1 = points[i];
                         const p2 = points[(i + 1) % numPoints];
                         const len = p1.distTo2D(p2);
@@ -1873,6 +1924,10 @@ export class Trace {
                         } else {
                             subPoints.push({ x: p1.x, y: p1.y });
                         }
+                    }
+                    if (poly.open && numPoints > 0) {
+                        let lastP = points[numPoints - 1];
+                        subPoints.push({ x: lastP.x, y: lastP.y });
                     }
 
                     // 2. Evaluate clipping and probe Z height for each point:
@@ -1901,12 +1956,15 @@ export class Trace {
                     }
 
                     // 3. Emit points using state machine:
-                    if (hasOut) {
-                        // PARTIAL CLIPPING: If the concentric loop intersects the boundaries (i.e. goes out of stock),
+                    if (hasOut || poly.open) {
+                        // PARTIAL CLIPPING: If the loop intersects the boundaries (i.e. goes out of stock),
                         // we must split it into open segments. We find the first out-of-clip point and rotate the array
-                        // so it starts outside. This allows us to cleanly start/stop tracing when entering/exiting bounds.
-                        let firstOutIdx = evaluated.findIndex(p => !p.inClip);
-                        let rotated = [...evaluated.slice(firstOutIdx), ...evaluated.slice(0, firstOutIdx)];
+                        // so it starts outside. For open paths, we do not rotate.
+                        let rotated = evaluated;
+                        if (hasOut && !poly.open) {
+                            let firstOutIdx = evaluated.findIndex(p => !p.inClip);
+                            rotated = [...evaluated.slice(firstOutIdx), ...evaluated.slice(0, firstOutIdx)];
+                        }
 
                         let tracing = false;
                         for (let pt of rotated) {

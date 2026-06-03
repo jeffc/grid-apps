@@ -389,9 +389,17 @@ class OpArea extends CamOp {
                     });
                     paths.forEach(poly => poly.isClosed() && poly.push(poly.first()));
                     POLY.setWinding(paths.filter(p => p.isClosed()), direction === 'climb');
+                } else
+                if (sr_type === 'spiral' || sr_type === 'concentric spiral') {
+                    let loops = [];
+                    POLY.offset([ area ], [ -toolDiam / 2, -toolOver ], {
+                        count: 999, outs: loops, flat: true, z: 0, minArea: 0
+                    });
+                    paths.push(...POLY.spiralize(loops, direction === 'climb'));
                 }
 
                 // convert resulting poly lines to raster float32 array groups
+                let resampleNs = paths.map(poly => poly.resampleN);
                 paths = paths.map(poly => poly.points.map(p => [ p.x, p.y ]).flat().toFloat32());
 
                 // prepare tool mesh points
@@ -429,15 +437,38 @@ class OpArea extends CamOp {
 
                 // convert terrain raster output back to open polylines
                 // todo: add leave_z support
+                let pathIdx = 0;
                 for (let path of output.paths) {
-                    path = newPolygon().fromArray([1, ...path]);
-                    if (op.refine) path.refine(op.refine);
-                    surface.push(path);
-                    let slice = newLayer();
-                    slice.camLines = [ path ];
-                    slice.output()
-                        .setLayer(rename ?? "linear", { line: color }, false)
-                        .addPolys([ path ]);
+                    let rN = resampleNs[pathIdx++];
+                    let splitPaths = [];
+                    if (rN) {
+                        let ptsCount = path.length / 3;
+                        for (let i = 0; i < ptsCount; i += rN) {
+                            let start = Math.max(0, i - 1);
+                            let end = Math.min(ptsCount, i + rN);
+                            if (end - start < 2) continue;
+                            splitPaths.push(path.subarray(start * 3, end * 3));
+                        }
+                    } else {
+                        splitPaths.push(path);
+                    }
+
+                    // Push the original continuous path to the surface array so that
+                    // G-code generates a single continuous toolpath without travel lifts/moves.
+                    let origPathPoly = newPolygon().fromArray([1, ...path]);
+                    if (op.refine) origPathPoly.refine(op.refine);
+                    surface.push(origPathPoly);
+
+                    // Add split segments to separate layers for step-by-step preview visualization
+                    for (let sp of splitPaths) {
+                        let polyPath = newPolygon().fromArray([1, ...sp]);
+                        if (op.refine) polyPath.refine(op.refine);
+                        let slice = newLayer();
+                        slice.camLines = [ polyPath ];
+                        slice.output()
+                            .setLayer(rename ?? "linear", { line: color }, false)
+                            .addPolys([ polyPath ]);
+                    }
                 }
 
                 // output this surface

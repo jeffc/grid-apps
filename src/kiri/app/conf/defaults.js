@@ -560,6 +560,7 @@ export const conf = {
                 camOutlineTool: 1000,
                 camOutlineWide: false,
                 camPocketContour: false,
+                camPocketType: "offset",
                 camPocketDown: 1,
                 camPocketExpand: 0,
                 camPocketFollow: 5,

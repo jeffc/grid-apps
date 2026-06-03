@@ -99,7 +99,8 @@ const LISTS = {
     ],
     crshape: [
         { name: "Concentric" },
-        { name: "Spiral" }
+        { name: "Spiral" },
+        { name: "Concentric Spiral" }
     ],
     regaxis: [
         { name: "X" },
@@ -126,6 +127,7 @@ const LISTS = {
     surftyp: [
         { name: "linear" },
         { name: "offset" },
+        { name: "concentric spiral" }
     ],
     direction: [
         { name: "climb" },
