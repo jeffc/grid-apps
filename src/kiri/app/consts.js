@@ -125,7 +125,7 @@ const LISTS = {
     ],
     surftyp: [
         { name: "linear" },
-        { name: "offset" },
+        { name: "concentric" },
         { name: "spiral" }
     ],
     direction: [

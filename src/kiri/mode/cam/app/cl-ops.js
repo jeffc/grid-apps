@@ -295,7 +295,8 @@ export function createPopOps() {
         rate: 'camLevelSpeed',
         down: 'camLevelDown',
         inset: 'camLevelInset',
-        stock: 'camLevelStock'
+        stock: 'camLevelStock',
+        sr_type: 'camLevelType'
     }).inputs = {
         tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
         sep: UC.newBlank({ class: "pop-sep" }),
@@ -305,6 +306,7 @@ export function createPopOps() {
         rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),
         down: UC.newInput(LANG.cc_loff_s, { title: LANG.cc_loff_l, convert: toFloat, units }),
         inset: UC.newInput(LANG.cc_lxyo_s, { title: LANG.cc_lxyo_l, convert: toFloat, units, show: () => !env.popOp.level.rec.stock }),
+        sr_type: UC.newSelect("pattern", { title: "pattern" }, "surftyp"),
         sep: UC.newBlank({ class: "pop-sep" }),
         stock: UC.newBoolean(LANG.cc_lsto_s, undefined, { title: LANG.cc_lsto_l }),
     };
@@ -548,6 +550,7 @@ export function createPopOps() {
         contour: 'camPocketContour',
         sr_type: 'camPocketType',
         outline: 'camPocketOutline',
+        omitthru: 'camPocketOmitThru',
         ov_topz: 0,
         ov_botz: 0,
         ov_conv: '~camConventional',
@@ -568,6 +571,7 @@ export function createPopOps() {
         contour: UC.newBoolean(LANG.cp_cont_s, undefined, { title: LANG.cp_cont_s }),
         sr_type: UC.newSelect("pattern", { title: "pattern", show: () => env.poppedRec.contour }, "surftyp"),
         outline: UC.newBoolean(LANG.cp_outl_s, undefined, { title: LANG.cp_outl_l }),
+        omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l, show: () => env.poppedRec.outline }),
         exp: UC.newExpand("feeds & speeds", { }),
         spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),
         rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),
@@ -780,6 +784,7 @@ export function createPopOps() {
         follow: 'camAreaFollow',
         refine: 'camAreaRefine',
         outline: 'camAreaOutline',
+        omitthru: 'camAreaOmitThru',
         shadow: 'camAreaShadow',
         tolerance: 'camTolerance',
         dogbones: 'camAreaDogbones',
@@ -790,7 +795,7 @@ export function createPopOps() {
     }).inputs = {
         mode: UC.newSelect(LANG.mo_menu, { post: opRender }, "opmode"),
         tr_type: UC.newSelect(LANG.cc_offs_s, { title: LANG.cc_offs_l, show: isTrace }, "traceoff"),
-        sr_type: UC.newSelect("pattern", { title: "pattern", show: isSurface }, "surftyp"),
+        sr_type: UC.newSelect("pattern", { title: "pattern", show: () => isClear() || isSurface() }, "surftyp"),
         sep: UC.newBlank({ class: "pop-sep" }),
         exp: UC.newExpand("area selection", { open }),
         menu: UC.newRow([
@@ -799,6 +804,7 @@ export function createPopOps() {
         ], { class: "ext-buttons f-row", show: () => !isShadow() }),
         shadow: UC.newBoolean(LANG.cp_shad_s, undefined, { title: LANG.cp_shad_l }),
         outline: UC.newBoolean(LANG.cp_outl_s, undefined, { title: LANG.cp_outl_l }),
+        omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l, show: () => env.poppedRec.outline }),
         exp_end: UC.endExpand(),
         sep: UC.newBlank({ class: "pop-sep" }),
         exp: UC.newExpand("area modifiers", { }),

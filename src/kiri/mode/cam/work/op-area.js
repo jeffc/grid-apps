@@ -27,7 +27,7 @@ class OpArea extends CamOp {
 
     async slice(progress) {
         let { op, state } = this;
-        let { direction, down, expand, flats, flatOff, follow } = op;
+        let { direction, down, expand, flats, flatOff, follow, sr_type, omitthru } = op;
         let { mode, outline, over, rename, smooth, tool } = op;
         let { addSlices, axisIndex, color, cutTabs, settings } = state;
         let { shadowAt, setToolDiam, tabs, widget, workarea } = state;
@@ -210,6 +210,9 @@ class OpArea extends CamOp {
                     POLY.offset(clip, offsets, {
                         count: op.walls ? 1 : (op.steps ?? 999), outs, flat: true, z: z - zMov, ...offopt
                     });
+                    if (sr_type === 'spiral' || sr_type === 'concentric spiral') {
+                        outs = POLY.spiralize(outs);
+                    }
                     // if we see no offsets, re-check the mesh bottom Z then exit
                     if (outs.length === 0) {
                         if (bounds && lzo > bounds.min.z) {
@@ -357,8 +360,9 @@ class OpArea extends CamOp {
 
                 // prepare paths
                 if (sr_type === 'linear') {
+                    let angle = (sr_angle || 0) * DEG2RAD;
                     // scan the area bounding box with rays at defined angle
-                    let scan = scanBoxAtAngle(bounds, sr_angle * DEG2RAD, toolOver);
+                    let scan = scanBoxAtAngle(bounds, angle, toolOver);
                     let lines = scan.map(line => {
                         let { a, b } = line;
                         return [ newPoint(a.x, a.y, 0).toClipper(), newPoint(b.x, b.y, 0).toClipper() ]
@@ -378,11 +382,12 @@ class OpArea extends CamOp {
                         paths.forEach(path => path.reverse());
                     }
                     // optional alternating paths
-                    if (paths.length && sr_alter) {
+                    if (paths.length && sr_alter !== false) {
                         paths = tip2tipJoin(paths, paths[0].first(), toolOver * 10);
                     }
                 } else
-                if (sr_type === 'offset') {
+                // check 'offset' for backward compatibility with older save files (renamed to 'concentric')
+                if (sr_type === 'concentric' || sr_type === 'offset') {
                     // progressive inset from perimeter
                     POLY.offset([ area ], [ -toolDiam / 2, -toolOver ], {
                         count: 999, outs: paths, flat: true, z: 0, minArea: 0
@@ -457,17 +462,27 @@ class OpArea extends CamOp {
                     // G-code generates a single continuous toolpath without travel lifts/moves.
                     let origPathPoly = newPolygon().fromArray([1, ...path]);
                     if (op.refine) origPathPoly.refine(op.refine);
-                    surface.push(origPathPoly);
+                    if (omitthru) {
+                        origPathPoly = prunePointsInHoles(origPathPoly, thruHoles);
+                    }
+                    if (origPathPoly.points.length > 1) {
+                        surface.push(origPathPoly);
+                    }
 
                     // Add split segments to separate layers for step-by-step preview visualization
                     for (let sp of splitPaths) {
                         let polyPath = newPolygon().fromArray([1, ...sp]);
                         if (op.refine) polyPath.refine(op.refine);
-                        let slice = newLayer();
-                        slice.camLines = [ polyPath ];
-                        slice.output()
-                            .setLayer(rename ?? "linear", { line: color }, false)
-                            .addPolys([ polyPath ]);
+                        if (omitthru) {
+                            polyPath = prunePointsInHoles(polyPath, thruHoles);
+                        }
+                        if (polyPath.points.length > 1) {
+                            let slice = newLayer();
+                            slice.camLines = [ polyPath ];
+                            slice.output()
+                                .setLayer(rename ?? "linear", { line: color }, false)
+                                .addPolys([ polyPath ]);
+                        }
                     }
                 }
 
@@ -643,6 +658,38 @@ function scanBoxAtAngle(box2, angle, step) {
     }
 
     return rays;
+}
+
+function prunePointsInHoles(poly, holes) {
+    if (!holes || !holes.length) return poly;
+    let holeBoxes = [];
+    for (let hole of holes) {
+        let min_x = Infinity, max_x = -Infinity, min_y = Infinity, max_y = -Infinity;
+        for (let p of hole.points) {
+            if (p.x < min_x) min_x = p.x;
+            if (p.x > max_x) max_x = p.x;
+            if (p.y < min_y) min_y = p.y;
+            if (p.y > max_y) max_y = p.y;
+        }
+        holeBoxes.push({ min_x, max_x, min_y, max_y, hole });
+    }
+    let newPoints = [];
+    for (let pt of poly.points) {
+        let inHole = false;
+        for (let hb of holeBoxes) {
+            if (pt.x >= hb.min_x && pt.x <= hb.max_x && pt.y >= hb.min_y && pt.y <= hb.max_y) {
+                if (pt.isInPolygon(hb.hole)) {
+                    inHole = true;
+                    break;
+                }
+            }
+        }
+        if (!inHole) {
+            newPoints.push(pt);
+        }
+    }
+    poly.points = newPoints;
+    return poly;
 }
 
 export { OpArea };
