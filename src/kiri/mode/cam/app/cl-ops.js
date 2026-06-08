@@ -324,6 +324,8 @@ export function createPopOps() {
         all: 'camAdaptiveAll',
         inside: 'camAdaptiveIn',
         omitthru: 'camAdaptiveOmitThru',
+        helixMin: 'camAdaptiveHelixMin',
+        helixMax: 'camAdaptiveHelixMax',
         ov_topz: 0,
         ov_botz: 0,
     }).inputs = {
@@ -338,6 +340,9 @@ export function createPopOps() {
         all: UC.newBoolean(LANG.cr_clst_s, undefined, { title: LANG.cr_clst_l, show: () => !env.poppedRec.inside || env.poppedRec.all }),
         inside: UC.newBoolean(LANG.cr_olin_s, undefined, { title: LANG.cr_olin_l, show: () => !env.poppedRec.all || env.poppedRec.inside }),
         omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l }),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        helixMin: UC.newInput("helix min", { title: "minimum helical entry diameter relative to tool diameter", convert: toFloat, bound: UC.bound(0.1, 2.0) }),
+        helixMax: UC.newInput("helix max", { title: "maximum helical entry diameter relative to tool diameter.\nValues greater than 1.0 will leave an uncut pin in the center.", convert: toFloat, bound: UC.bound(0.1, 2.0) }),
         sep: UC.newBlank({ class: "pop-sep" }),
         exp: UC.newExpand("feeds & speeds", { }),
         spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),

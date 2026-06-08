@@ -428,6 +428,8 @@ export const conf = {
             p:{
                 camAdaptiveAll: true,
                 camAdaptiveDown: 2,
+                camAdaptiveHelixMax: 0.9,
+                camAdaptiveHelixMin: 0.8,
                 camAdaptiveIn: true,
                 camAdaptiveOmitThru: false,
                 camAdaptiveOver: 0.4,
