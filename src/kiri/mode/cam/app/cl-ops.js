@@ -354,6 +354,49 @@ export function createPopOps() {
         exp_end: UC.endExpand(),
     };
 
+    createPopOp('adaptive', {
+        tool: 'camRoughTool',
+        direction: 'camMillDirection',
+        spindle: 'camRoughSpindle',
+        down: 'camRoughDown',
+        step: 0.1, // Default 10% stepover for adaptive
+        stepup: 0.5, // Default 0.5mm stepup/terrace height
+        rate: 'camRoughSpeed',
+        plunge: 'camRoughPlunge',
+        leave: 'camRoughStock',
+        ramp: 2, // 2 degrees max ramp angle
+        tolerance: 0.01,
+        inside: 'camRoughIn',
+        all: 'camRoughAll',
+        omitthru: 'camRoughOmitThru',
+        ov_topz: 0,
+        ov_botz: 0,
+    }).inputs = {
+        tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
+        direction: UC.newSelect(LANG.ou_dire_s, { title: LANG.ou_dire_l }, "direction"),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        step: UC.newInput("stepover", { title: "radial depth of cut (fraction of tool diameter)", convert: toFloat, bound: UC.bound(0.01, 1.0) }),
+        down: UC.newInput("step-down (Z major)", { title: "maximum step-down distance (Z major)", convert: toFloat, units }),
+        stepup: UC.newInput("step-up (Z minor)", { title: "terrace step-up height (Z minor)", convert: toFloat, units }),
+        leave: UC.newInput(LANG.cr_lsto_s, { title: LANG.cr_lsto_l, convert: toFloat, units }),
+        ramp: UC.newInput("ramp angle", { title: "maximum helical ramp angle (degrees)", convert: toFloat, bound: UC.bound(0.1, 10.0) }),
+        tolerance: UC.newInput("tolerance", { title: "micro tolerance for offset (mm)", convert: toFloat, bound: UC.bound(0.001, 0.5) }),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        all: UC.newBoolean(LANG.cr_clst_s, undefined, { title: LANG.cr_clst_l, show: () => !env.poppedRec.inside || env.poppedRec.all }),
+        inside: UC.newBoolean(LANG.cr_olin_s, undefined, { title: LANG.cr_olin_l, show: () => !env.poppedRec.all || env.poppedRec.inside }),
+        omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l }),
+        sep: UC.newBlank({ class: "pop-sep" }),
+        exp: UC.newExpand("feeds & speeds", { }),
+        spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),
+        rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),
+        plunge: UC.newInput(LANG.cc_plng_s, { title: LANG.cc_plng_l, convert: toInt, units }),
+        exp_end: UC.endExpand(),
+        exp: UC.newExpand("top & bottom", ov_hover),
+        ov_topz: UC.newInput(LANG.ou_ztop_s, ov_topz),
+        ov_botz: UC.newInput(LANG.ou_zbot_s, ov_botz),
+        exp_end: UC.endExpand(),
+    };
+
     createPopOp('outline', {
         tool: 'camOutlineTool',
         direction: 'camMillDirection',

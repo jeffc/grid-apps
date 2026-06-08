@@ -191,6 +191,10 @@ const opAddRough = () => {
     opAdd(env.popOp.rough.new());
 };
 
+const opAddAdaptive = () => {
+    opAdd(env.popOp.adaptive.new());
+};
+
 const opAddOutline = () => {
     opAdd(env.popOp.outline.new());
 };
@@ -817,6 +821,7 @@ export function init() {
             case "level": return opAddLevel();
             case "loop": return opAddLoop();
             case "rough": return opAddRough();
+            case "adaptive": return opAddAdaptive();
             case "outline": return opAddOutline();
             case "contour":
                 let caxis = "X";
