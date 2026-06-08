@@ -426,6 +426,17 @@ export const conf = {
             },
             // process defaults CAM:Process
             p:{
+                camAdaptiveAll: true,
+                camAdaptiveDown: 2,
+                camAdaptiveIn: true,
+                camAdaptiveOmitThru: false,
+                camAdaptiveOver: 0.4,
+                camAdaptivePlunge: 250,
+                camAdaptiveSpeed: 1000,
+                camAdaptiveSpindle: 1000,
+                camAdaptiveStock: 0,
+                camAdaptiveStockZ: 0,
+                camAdaptiveTool: 1000,
                 camArcEnabled: false,
                 camArcResolution: 1,
                 camArcTolerance: 0.005,

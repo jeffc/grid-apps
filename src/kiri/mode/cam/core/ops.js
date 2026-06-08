@@ -1,6 +1,7 @@
 /** Copyright Stewart Allen <sa@grid.space> -- All Rights Reserved */
 
 import { CamOp } from './op.js';
+import { OpAdaptive } from '../work/op-adaptive.js';
 import { OpArea } from '../work/op-area.js';
 import { OpContour } from '../work/op-contour.js';
 import { OpDrill } from '../work/op-drill.js';
@@ -21,6 +22,7 @@ import { OpTrace } from '../work/op-trace.js';
 import { OpXRay } from '../work/op-xray.js';
 
 export const ops = {
+    "adaptive":  OpAdaptive,
     "area":      OpArea,
     "contour":   OpContour,
     "drill":     OpDrill,

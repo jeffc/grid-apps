@@ -187,6 +187,13 @@ const opAddLoop = () => {
     opAdd(env.popOp.loop.new());
 };
 
+const opAddAdaptive = () => {
+    traceDone();
+    surfaceDone();
+    let rec = env.popOp.adaptive.new();
+    opAdd(rec);
+};
+
 const opAddRough = () => {
     opAdd(env.popOp.rough.new());
 };
@@ -816,6 +823,7 @@ export function init() {
             case "gcode": return opAddGCode();
             case "level": return opAddLevel();
             case "loop": return opAddLoop();
+            case "adaptive": return opAddAdaptive();
             case "rough": return opAddRough();
             case "outline": return opAddOutline();
             case "contour":
