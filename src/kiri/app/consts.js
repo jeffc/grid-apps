@@ -123,6 +123,12 @@ const LISTS = {
         { name: "trace" },
         { name: "surface" }
     ],
+    boundtreat: [
+        { name: "clear margin" },
+        { name: "clear stock" },
+        { name: "allow entry in stock" },
+        { name: "inside only" }
+    ],
     surftyp: [
         { name: "linear" },
         { name: "concentric" },

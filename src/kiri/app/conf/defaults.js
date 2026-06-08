@@ -426,14 +426,14 @@ export const conf = {
             },
             // process defaults CAM:Process
             p:{
-                camAdaptiveAll: true,
+                camAdaptiveBounds: "clear margin",
                 camAdaptiveDown: 2,
                 camAdaptiveHelixMax: 0.9,
                 camAdaptiveHelixMin: 0.8,
-                camAdaptiveIn: true,
                 camAdaptiveOmitThru: false,
                 camAdaptiveOver: 0.4,
                 camAdaptivePlunge: 250,
+                camAdaptiveRampAngle: 2,
                 camAdaptiveSpeed: 1000,
                 camAdaptiveSpindle: 1000,
                 camAdaptiveStock: 0,
