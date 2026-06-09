@@ -18,6 +18,8 @@ class OpAdaptive extends CamOp {
         let { addSlices, color, shadowAt, shadow, stock, tool, workarea } = state;
         let { down, omitthru } = op;
         
+        this.sliceOut = [];
+
         // Fetch the boundary treatment option, defaulting to "clear margin"
         let bounds = op.bounds ?? "clear margin";
 
@@ -254,6 +256,7 @@ class OpAdaptive extends CamOp {
                     .addPolys(cutRegion);
                     
                 addSlices(slice);
+                this.sliceOut.push(slice);
             } else {
                 let isFirst = true;
                 for (let seg of allSegments) {
@@ -273,16 +276,19 @@ class OpAdaptive extends CamOp {
                             layers
                                 .setLayer("helical-entry", { line: 0xff0000 }, false)
                                 .addPolys(helicalCircles);
+                            slice.helicalCircles = helicalCircles.map(c => c.clone(true));
                         }
                         if (rampContours.length > 0) {
                             layers
                                 .setLayer("ramp-entry", { line: 0xffff00 }, false)
                                 .addPolys(rampContours);
+                            slice.rampContours = rampContours.map(c => c.clone(true));
                         }
                         if (plungePoints.length > 0) {
                             layers
                                 .setLayer("plunge-entry", { line: 0x00ffff }, false)
                                 .addPolys(plungePoints);
+                            slice.plungePoints = plungePoints.map(p => p.clone(true));
                         }
                         isFirst = false;
                     }
@@ -305,6 +311,7 @@ class OpAdaptive extends CamOp {
 
                     // Add slice to widget slices
                     addSlices(slice);
+                    this.sliceOut.push(slice);
                 }
             }
 
@@ -314,8 +321,183 @@ class OpAdaptive extends CamOp {
     }
 
     prepare(ops, progress) {
-        // stub: does nothing for now
+        let { op, sliceOut, state } = this;
+        let { polyEmit, camOut, newLayer, setTool } = ops;
+
+        if (!sliceOut || sliceOut.length === 0) return;
+
+        // Set the tool parameters: toolId, rate, and plunge rate
+        setTool(op.tool, op.rate, op.plunge || op.rate);
+
+        let total = sliceOut.length;
+        let index = 0;
+
+        for (let slice of sliceOut) {
+            let z = slice.z;
+
+            // 1. Helical entry descent
+            if (slice.helicalCircles && slice.helicalCircles.length > 0) {
+                let zStart = z + op.down;
+                if (state.stock && typeof state.stock.z === 'number') {
+                    zStart = Math.min(state.stock.z, zStart);
+                } else if (state.workarea && typeof state.workarea.top_z === 'number') {
+                    zStart = Math.min(state.workarea.top_z, zStart);
+                }
+
+                for (let circle of slice.helicalCircles) {
+                    let center = circle.bounds.center();
+                    let radius = circle.points[0].distTo2D(center);
+                    // Generate a CCW helix (clockwise = false)
+                    let helicalPath = generateHelicalPath(center, radius, zStart, z, op.rampAngle || 2, false);
+                    polyEmit(helicalPath);
+                    newLayer();
+                }
+            }
+
+            // 2. Ramp entry descent
+            if (slice.rampContours && slice.rampContours.length > 0) {
+                let zStart = z + op.down;
+                if (state.stock && typeof state.stock.z === 'number') {
+                    zStart = Math.min(state.stock.z, zStart);
+                } else if (state.workarea && typeof state.workarea.top_z === 'number') {
+                    zStart = Math.min(state.workarea.top_z, zStart);
+                }
+
+                for (let contour of slice.rampContours) {
+                    let rampPath = generateRampPath(contour, zStart, z, op.rampAngle || 2);
+                    polyEmit(rampPath);
+                    newLayer();
+                }
+            }
+
+            // 3. Plunge entry descent
+            if (slice.plungePoints && slice.plungePoints.length > 0) {
+                let zStart = z + op.down;
+                if (state.stock && typeof state.stock.z === 'number') {
+                    zStart = Math.min(state.stock.z, zStart);
+                } else if (state.workarea && typeof state.workarea.top_z === 'number') {
+                    zStart = Math.min(state.workarea.top_z, zStart);
+                }
+
+                for (let circle of slice.plungePoints) {
+                    let pt = circle.bounds.center();
+                    // G00 travel to plunge location at starting Z
+                    camOut(newPoint(pt.x, pt.y, zStart), 0);
+                    // G01 plunge straight down to cutting Z
+                    camOut(newPoint(pt.x, pt.y, z), 1);
+                    newLayer();
+                }
+            }
+
+            // 4. Main pocket clearing toolpath
+            if (slice.camLines && slice.camLines.length > 0) {
+                for (let poly of slice.camLines) {
+                    if (poly.open) {
+                        polyEmit(poly);
+                    } else {
+                        // closed loops: start from the point closest to print point
+                        polyEmit(poly, -999);
+                    }
+                }
+                newLayer();
+            }
+
+            index++;
+            progress(index / total, "preparing adaptive");
+        }
     }
+}
+
+/**
+ * Generates a CCW helical spiral descent path as a series of linear segments.
+ */
+function generateHelicalPath(center, radius, zStart, zEnd, rampAngle, clockwise) {
+    let theta_rad = (rampAngle || 2) * Math.PI / 180;
+    let C = 2 * Math.PI * radius;
+    let pitch = C * Math.tan(theta_rad);
+    
+    let total_drop = zStart - zEnd;
+    let turns = Math.ceil(total_drop / pitch);
+    if (turns <= 0) turns = 1;
+    let drop_per_turn = total_drop / turns;
+    
+    let points = [];
+    let numSegs = 24; // segments per turn
+    
+    let startAngle = 0;
+    let cwMultiplier = clockwise ? -1 : 1;
+    
+    let currentZ = zStart;
+    let p_start = center.clone().setZ(zStart).add(newPoint(Math.cos(startAngle) * radius, Math.sin(startAngle) * radius, 0));
+    points.push(p_start);
+    
+    for (let t = 0; t < turns; t++) {
+        let nextZ = zStart - (t + 1) * drop_per_turn;
+        for (let i = 1; i <= numSegs; i++) {
+            let angle = startAngle + (i / numSegs) * 2 * Math.PI * cwMultiplier;
+            let z = currentZ - (i / numSegs) * drop_per_turn;
+            let pt = center.clone().setZ(z).add(newPoint(Math.cos(angle) * radius, Math.sin(angle) * radius, 0));
+            points.push(pt);
+        }
+        currentZ = nextZ;
+        startAngle = startAngle + 2 * Math.PI * cwMultiplier;
+    }
+    
+    // One flat cleanup circle at the bottom depth
+    for (let i = 1; i <= numSegs; i++) {
+        let angle = startAngle + (i / numSegs) * 2 * Math.PI * cwMultiplier;
+        let pt = center.clone().setZ(zEnd).add(newPoint(Math.cos(angle) * radius, Math.sin(angle) * radius, 0));
+        points.push(pt);
+    }
+    
+    let poly = newPolygon().setOpen().addPoints(points);
+    return poly;
+}
+
+/**
+ * Generates a descending contour ramp path by traversing and interpolating Z values along a polygon contour.
+ */
+function generateRampPath(poly, zStart, zEnd, rampAngle) {
+    let pts = poly.points;
+    let n = pts.length;
+    if (n < 2) return poly;
+    
+    let L = 0;
+    for (let i = 0; i < n; i++) {
+        let p1 = pts[i];
+        let p2 = pts[(i + 1) % n];
+        L += p1.distTo2D(p2);
+    }
+    
+    let theta_rad = (rampAngle || 2) * Math.PI / 180;
+    let pitch = L * Math.tan(theta_rad);
+    
+    let total_drop = zStart - zEnd;
+    let turns = Math.ceil(total_drop / pitch);
+    if (turns <= 0) turns = 1;
+    
+    let points = [];
+    let z_step_per_segment = (total_drop / turns) / n;
+    
+    for (let t = 0; t < turns; t++) {
+        for (let i = 0; i < n; i++) {
+            let pt = pts[i];
+            let z = zStart - ((t * n) + i) * z_step_per_segment;
+            points.push(newPoint(pt.x, pt.y, Math.max(zEnd, z)));
+        }
+    }
+    
+    // Cleanup pass at the bottom Z depth
+    for (let i = 0; i < n; i++) {
+        let pt = pts[i];
+        points.push(newPoint(pt.x, pt.y, zEnd));
+    }
+    // Close the cleanup loop
+    let pt = pts[0];
+    points.push(newPoint(pt.x, pt.y, zEnd));
+    
+    let polyOut = newPolygon().setOpen().addPoints(points);
+    return polyOut;
 }
 
 /**
@@ -647,6 +829,10 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
         
         if (d === N - 1) {
             for (let poly of currentPolys) {
+                let entryPt = findEntryForPoly(poly, helicalCircles, rampContours, plungePoints);
+                if (entryPt) {
+                    rotatePolyToPoint(poly, entryPt);
+                }
                 let loopSegs = classifyInnermostSegments(poly, toolRadius, toolOver, z, cleared);
                 for (let seg of loopSegs) {
                     classifiedSegments.push(seg);
@@ -1074,6 +1260,69 @@ function resamplePoints(pts, stepSize) {
  */
 function lerpPoint(p1, p2, t) {
     return newPoint(p1.x + (p2.x - p1.x) * t, p1.y + (p2.y - p1.y) * t, p1.z);
+}
+
+/**
+ * Finds the entry point closest to the first point of the given loop polygon.
+ */
+function findEntryForPoly(poly, helicalCircles, rampContours, plungePoints) {
+    if (!poly || !poly.points || poly.points.length === 0) return null;
+    let bestPt = null;
+    let minDist = Infinity;
+    let firstPt = poly.first();
+    
+    // Check helical circles
+    for (let c of helicalCircles) {
+        let cp = c.bounds.center();
+        let dist = firstPt.distTo2D(cp);
+        if (dist < minDist) {
+            minDist = dist;
+            bestPt = cp;
+        }
+    }
+    // Check ramp contours
+    for (let c of rampContours) {
+        let cp = c.first();
+        let dist = firstPt.distTo2D(cp);
+        if (dist < minDist) {
+            minDist = dist;
+            bestPt = cp;
+        }
+    }
+    // Check plunge points
+    for (let c of plungePoints) {
+        let cp = c.bounds.center();
+        let dist = firstPt.distTo2D(cp);
+        if (dist < minDist) {
+            minDist = dist;
+            bestPt = cp;
+        }
+    }
+    
+    return bestPt;
+}
+
+/**
+ * Rotates the vertices of a polygon closed loop so that the vertex closest to a target point is at index 0.
+ */
+function rotatePolyToPoint(poly, targetPt) {
+    let pts = poly.points;
+    let n = pts.length;
+    if (n < 2) return;
+    
+    let closestIndex = 0;
+    let minDist = Infinity;
+    for (let i = 0; i < n; i++) {
+        let dist = pts[i].distTo2D(targetPt);
+        if (dist < minDist) {
+            minDist = dist;
+            closestIndex = i;
+        }
+    }
+    
+    if (closestIndex > 0) {
+        poly.points = [...pts.slice(closestIndex), ...pts.slice(0, closestIndex)];
+    }
 }
 
 export { OpAdaptive };
