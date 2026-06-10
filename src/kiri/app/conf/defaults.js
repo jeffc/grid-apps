@@ -427,6 +427,7 @@ export const conf = {
             // process defaults CAM:Process
             p:{
                 camAdaptiveBounds: "clear margin",
+                camAdaptiveClearFirst: true,
                 camAdaptiveDown: 2,
                 camAdaptiveHelixMax: 0.9,
                 camAdaptiveHelixMin: 0.8,
