@@ -1225,7 +1225,8 @@ function processSlotBranch(startArc, entryPt, R_0, numPoints, toolRadius, toolOv
             } else {
                 let prevEnd = trochoidPath[trochoidPath.length - 1];
                 let currStart = loopPts[0];
-                // Vertical Z-hop retract
+                // Vertical Z-hop retract: This is intended behavior to preserve the surface finish
+                // and prevent the tool from unnecessarily dragging across the cut floor during the rapid return.
                 trochoidPath.push(newPoint(prevEnd.x, prevEnd.y, z + 0.5));
                 trochoidPath.push(newPoint(currStart.x, currStart.y, z + 0.5));
                 trochoidPath.push(newPoint(currStart.x, currStart.y, z));
