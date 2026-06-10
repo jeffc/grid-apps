@@ -183,100 +183,36 @@ class OpAdaptive extends CamOp {
                 if (poly.open) continue;
 
                 // --- ENTRY POINT SELECTION & SIZING ---
-                let entryPoint = null;
-                let bestDist = -Infinity;
-
-                // For "allow entry in stock", search for a safe entry point in the stock first
-                if (bounds === "allow entry in stock") {
-                    // Localize search region around the pocket by expanding by 3 * tool diameter
-                    let expanded = POLY.expand([poly], D * 3);
-                    if (expanded) {
-                        // Subtract partShadow to make sure we don't enter inside part walls
-                        let allowed = [];
-                        POLY.subtract(expanded, partShadow, allowed, undefined, undefined, 0);
-                        
-                        // Clip the search zone to the physical stock rectangle
-                        let clipped = POLY.trimTo(allowed, [stockPoly]);
-                        if (clipped && clipped.length > 0) {
-                            // Find specific polygon containing the pocket's first point
-                            let firstPt = poly.first();
-                            let searchPoly = null;
-                            for (let cp of clipped) {
-                                if (firstPt.isInPolygon(cp)) {
-                                    searchPoly = cp;
-                                    break;
-                                }
-                            }
-                            if (!searchPoly) {
-                                searchPoly = clipped[0];
-                            }
-                            
-                            // Query the stock-entry finder for a point closest to part shadow with non-clipping transition path
-                            let stockRes = findStockEntryPoint(
-                                poly,
-                                searchPoly,
-                                partShadow,
-                                stockPoly,
-                                toolRadius,
-                                leave_xy,
-                                H_r_min,
-                                H_r_max,
-                                z
-                            );
-                            if (stockRes) {
-                                entryPoint = stockRes.point;
-                                bestDist = stockRes.dist;
-                            }
-                        }
+                let maGraph = buildMATGraph(poly);
+                let bestVertex = null;
+                let maxRadius = -1;
+                for (let v of maGraph.vertices.values()) {
+                    if (v.radius > maxRadius) {
+                        maxRadius = v.radius;
+                        bestVertex = v;
                     }
                 }
-
-                // Fallback: search strictly inside the pocket if no stock entry is found or not allowed
-                if (!entryPoint) {
-                    let res = findPoleOfInaccessibility(poly, z);
-                    entryPoint = res.point;
-                    bestDist = res.dist;
+                
+                let entryPoint = null;
+                let bestDist = -Infinity;
+                if (bestVertex) {
+                    entryPoint = newPoint(bestVertex.x, bestVertex.y, z);
+                    bestDist = bestVertex.radius;
+                } else {
+                    let bounds = poly.bounds;
+                    entryPoint = bounds.center();
+                    bestDist = 0;
                 }
 
                 // Classify and generate visual entry indicators
-                if (bestDist >= R_req_max) {
-                    // Fits the maximum helix diameter
-                    let circle = newPolygon().centerCircle(entryPoint, H_r_max, 20);
-                    POLY.setZ([circle], z);
-                    helicalCircles.push(circle);
-                } else if (bestDist >= R_req_min) {
-                    // Fits a smaller helix diameter down to minimum limit
-                    let fitRadius = Math.max(H_r_min, bestDist - toolRadius - leave_xy - epsilon);
+                if (bestDist >= toolRadius + leave_xy + 0.1) {
+                    // Fits a helix of radius fitRadius
+                    let fitRadius = Math.max(0.1, Math.min(H_r_max, bestDist - toolRadius - leave_xy - epsilon));
                     let circle = newPolygon().centerCircle(entryPoint, fitRadius, 20);
                     POLY.setZ([circle], z);
                     helicalCircles.push(circle);
-                } else if (bestDist >= toolRadius + leave_xy) {
-                    // Helix doesn't fit, but the tool fits: do a contour ramp along innermost offset loop
-                    let stepover = toolRadius * 0.8;
-                    let currentLoops = [ poly.clone(true) ];
-                    let innermost = [];
-                    
-                    // Offset progressively inward until the loop collapses to find the center-most path
-                    while (currentLoops.length > 0) {
-                        let nextLoops = POLY.offset(currentLoops, -stepover, { flat: true, z });
-                        if (!nextLoops || nextLoops.length === 0) {
-                            innermost = currentLoops;
-                            break;
-                        }
-                        currentLoops = nextLoops;
-                    }
-                    
-                    if (innermost.length > 0) {
-                        POLY.setZ(innermost, z);
-                        rampContours.push(...innermost);
-                    } else {
-                        // Fallback to plunge point if innermost loop cannot be computed
-                        let circle = newPolygon().centerCircle(entryPoint, toolRadius / 4, 8);
-                        POLY.setZ([circle], z);
-                        plungePoints.push(circle);
-                    }
                 } else {
-                    // Pocket is too narrow: plunge entry point only
+                    // Too narrow: plunge entry point only
                     let circle = newPolygon().centerCircle(entryPoint, toolRadius / 4, 8);
                     POLY.setZ([circle], z);
                     plungePoints.push(circle);
@@ -300,7 +236,7 @@ class OpAdaptive extends CamOp {
                 let pocketSegments = generateLinkedToolpath(
                     levels, toolRadius, toolOver, z,
                     helicalCircles, rampContours, plungePoints, bounds, stock,
-                    leave_xy, op.clearFirst ?? true
+                    leave_xy, op.clearFirst ?? true, maGraph
                 );
                 allSegments.push(...pocketSegments);
             }
@@ -361,6 +297,12 @@ class OpAdaptive extends CamOp {
                         // Slot centerline drawn in Magenta (0xff00ff)
                         layers
                             .setLayer("adaptive-centerline", { line: 0xff00ff }, false)
+                            .addPolys(seg.polys);
+                        // Do not set slice.camLines so it is not emitted to G-code
+                    } else if (seg.type === 'skeleton') {
+                        // MAT skeleton debug layer drawn in Blue (0x0000ff)
+                        layers
+                            .setLayer("adaptive-skeleton", { line: 0x0000ff }, false)
                             .addPolys(seg.polys);
                         // Do not set slice.camLines so it is not emitted to G-code
                     } else {
@@ -669,74 +611,6 @@ function generateRampPath(poly, zStart, zEnd, rampAngle) {
 }
 
 /**
- * Finds the Pole of Inaccessibility inside a polygon (the point furthest from all walls/boundaries).
- * Uses a coarse 16x16 grid search followed by 3 passes of local refinement.
- */
-function findPoleOfInaccessibility(poly, z) {
-    let bounds = poly.bounds;
-    let minX = bounds.minx, maxX = bounds.maxx;
-    let minY = bounds.miny, maxY = bounds.maxy;
-    
-    // Initial 16x16 grid search
-    let bestPt = null;
-    let bestDist = -Infinity;
-    
-    let gridX = 16;
-    let gridY = 16;
-    let dx = (maxX - minX) / gridX;
-    let dy = (maxY - minY) / gridY;
-    
-    for (let i = 0; i <= gridX; i++) {
-        for (let j = 0; j <= gridY; j++) {
-            let x = minX + i * dx;
-            let y = minY + j * dy;
-            let pt = newPoint(x, y, z);
-            if (pt.isInPolygon(poly)) {
-                let dist = getDistToWalls(pt, poly);
-                if (dist > bestDist) {
-                    bestDist = dist;
-                    bestPt = pt;
-                }
-            }
-        }
-    }
-    
-    if (!bestPt) {
-        // Fallback to bounding box center if no grid point is inside
-        let cx = (minX + maxX) / 2;
-        let cy = (minY + maxY) / 2;
-        let pt = newPoint(cx, cy, z);
-        return { point: pt, dist: 0 };
-    }
-    
-    // 3 passes of local refinement
-    let rx = dx;
-    let ry = dy;
-    for (let pass = 0; pass < 3; pass++) {
-        rx /= 2;
-        ry /= 2;
-        let centerPt = bestPt;
-        for (let i = -2; i <= 2; i++) {
-            for (let j = -2; j <= 2; j++) {
-                if (i === 0 && j === 0) continue;
-                let x = centerPt.x + i * rx;
-                let y = centerPt.y + j * ry;
-                let pt = newPoint(x, y, z);
-                if (pt.isInPolygon(poly)) {
-                    let dist = getDistToWalls(pt, poly);
-                    if (dist > bestDist) {
-                        bestDist = dist;
-                        bestPt = pt;
-                    }
-                }
-            }
-        }
-    }
-    
-    return { point: bestPt, dist: bestDist };
-}
-
-/**
  * Calculates the distance from a point to the walls (including inner holes) of a polygon.
  */
 function getDistToWalls(pt, poly) {
@@ -795,7 +669,7 @@ function closestPointOnSegment(p, a, b) {
     let abLenSq = ab_x * ab_x + ab_y * ab_y;
     if (abLenSq < 1e-9) return a.clone();
     
-    let t = (ap_x * ab_x + ap_y * ab_y) / abLenSq;
+    let t = (ap_x * ab_x + ap_y * ap_y) / abLenSq;
     t = Math.max(0, Math.min(1, t));
     return newPoint(a.x + t * ab_x, a.y + t * ab_y, p.z);
 }
@@ -854,83 +728,6 @@ function getDistToPartShadow(pt, partShadow) {
         }
     }
     return dist;
-}
-
-/**
- * Perform a grid search followed by local refinement to find a safe entry point in the stock area.
- * Prioritizes points that are as close to the part boundary as possible while satisfying clearance/no-clip requirements.
- */
-function findStockEntryPoint(poly, searchPoly, partShadow, stockPoly, toolRadius, leave_xy, H_r_min, H_r_max, z) {
-    let R_req_min = H_r_min + toolRadius + leave_xy;
-    
-    let bounds = searchPoly.bounds;
-    let minX = bounds.minx, maxX = bounds.maxx;
-    let minY = bounds.miny, maxY = bounds.maxy;
-    
-    let bestPt = null;
-    let bestDist = -Infinity;
-    let bestPartDist = Infinity; // We want to minimize distance to part
-    
-    let gridX = 16;
-    let gridY = 16;
-    let dx = (maxX - minX) / gridX;
-    let dy = (maxY - minY) / gridY;
-    
-    // Evaluate if a candidate point is safe and score its distance to the part boundary
-    function evaluateCandidate(pt) {
-        if (!pt.isInPolygon(searchPoly)) return;
-        
-        let distToPart = getDistToPartShadow(pt, partShadow);
-        let distToStock = pt.distToPolySegments(stockPoly);
-        
-        // Safety check: must fit at least the minimum helix size safely away from part and stock edges
-        if (distToPart < R_req_min || distToStock < R_req_min) return;
-        
-        // Safety check: path from candidate entry point to pocket must not intersect any part boundary
-        let Q = getClosestPointOnPoly(pt, poly);
-        if (Q && pathIntersectsPart(pt, Q, partShadow)) return;
-        
-        // Update best point if this valid candidate is closer to the part boundary
-        if (distToPart < bestPartDist) {
-            bestPartDist = distToPart;
-            bestPt = pt;
-            // bestDist is the clearance distance for helix sizing
-            bestDist = Math.min(distToPart, distToStock);
-        }
-    }
-    
-    // Pass 1: Grid Search
-    for (let i = 0; i <= gridX; i++) {
-        for (let j = 0; j <= gridY; j++) {
-            let x = minX + i * dx;
-            let y = minY + j * dy;
-            let pt = newPoint(x, y, z);
-            evaluateCandidate(pt);
-        }
-    }
-    
-    // Pass 2: Local Refinement (3 rounds of local subdivision)
-    if (bestPt) {
-        let rx = dx;
-        let ry = dy;
-        for (let pass = 0; pass < 3; pass++) {
-            rx /= 2;
-            ry /= 2;
-            let centerPt = bestPt;
-            for (let i = -2; i <= 2; i++) {
-                for (let j = -2; j <= 2; j++) {
-                    if (i === 0 && j === 0) continue;
-                    let x = centerPt.x + i * rx;
-                    let y = centerPt.y + j * ry;
-                    let pt = newPoint(x, y, z);
-                    evaluateCandidate(pt);
-                }
-            }
-        }
-        return { point: bestPt, dist: bestDist };
-    }
-    
-    return null;
 }
 
 /**
@@ -1151,6 +948,59 @@ function buildMATGraph(pocketRoot) {
     return { vertices, edges };
 }
 
+function mergeNearbyChains(chains, gapThreshold) {
+    if (chains.length < 2) return chains;
+    let merged = [];
+    let remaining = [...chains];
+    
+    while (remaining.length > 0) {
+        let curr = remaining.shift();
+        let progressed = true;
+        while (progressed) {
+            progressed = false;
+            let lastPt = curr[curr.length - 1];
+            let firstPt = curr[0];
+            
+            for (let i = 0; i < remaining.length; i++) {
+                let other = remaining[i];
+                let otherFirst = other[0];
+                let otherLast = other[other.length - 1];
+                
+                // Try connecting end of curr to start of other
+                if (Math.hypot(lastPt.x - otherFirst.x, lastPt.y - otherFirst.y) < gapThreshold) {
+                    curr.push(...other.slice(1));
+                    remaining.splice(i, 1);
+                    progressed = true;
+                    break;
+                }
+                // Try connecting end of curr to end of other (reversed)
+                if (Math.hypot(lastPt.x - otherLast.x, lastPt.y - otherLast.y) < gapThreshold) {
+                    curr.push(...[...other].reverse().slice(1));
+                    remaining.splice(i, 1);
+                    progressed = true;
+                    break;
+                }
+                // Try connecting start of other to start of curr
+                if (Math.hypot(otherLast.x - firstPt.x, otherLast.y - firstPt.y) < gapThreshold) {
+                    curr = other.concat(curr.slice(1));
+                    remaining.splice(i, 1);
+                    progressed = true;
+                    break;
+                }
+                // Try connecting start of curr to start of other (reversed)
+                if (Math.hypot(otherFirst.x - firstPt.x, otherFirst.y - firstPt.y) < gapThreshold) {
+                    curr = [...other].reverse().concat(curr.slice(1));
+                    remaining.splice(i, 1);
+                    progressed = true;
+                    break;
+                }
+            }
+        }
+        merged.push(curr);
+    }
+    return merged;
+}
+
 function extractSlotChains(maGraph, toolRadius, toolOver, leave_xy) {
     let slotThreshold = toolRadius + toolOver + leave_xy;
     let edges = maGraph.edges;
@@ -1221,41 +1071,48 @@ function extractSlotChains(maGraph, toolRadius, toolOver, leave_xy) {
         slotChains.push(chain);
     }
     
-    return slotChains;
+    return mergeNearbyChains(slotChains, toolRadius * 2);
 }
 
 function resampleChain(chain, stepSize) {
     if (chain.length < 2) return [];
-    let resampled = [];
-    let current = chain[0];
-    resampled.push({ x: current.x, y: current.y, radius: current.radius });
-    
-    let i = 1;
-    let distanceAccum = 0;
-    while (i < chain.length) {
-        let next = chain[i];
-        let d = Math.hypot(next.x - current.x, next.y - current.y);
-        if (distanceAccum + d >= stepSize) {
-            let needed = stepSize - distanceAccum;
-            let t = needed / d;
-            let np = {
-                x: current.x + (next.x - current.x) * t,
-                y: current.y + (next.y - current.y) * t,
-                radius: current.radius + (next.radius - current.radius) * t
-            };
-            resampled.push(np);
-            current = np;
-            distanceAccum = 0;
-        } else {
-            distanceAccum += d;
-            current = next;
-            i++;
-        }
+    let L = 0;
+    for (let i = 0; i < chain.length - 1; i++) {
+        L += Math.hypot(chain[i+1].x - chain[i].x, chain[i+1].y - chain[i].y);
     }
-    let last = chain[chain.length - 1];
-    let lastR = resampled[resampled.length - 1];
-    if (Math.hypot(last.x - lastR.x, last.y - lastR.y) > 0.01) {
-        resampled.push({ x: last.x, y: last.y, radius: last.radius });
+    if (L < 0.01) {
+        return [{ x: chain[0].x, y: chain[0].y, radius: chain[0].radius }];
+    }
+    let numSteps = Math.ceil(L / stepSize);
+    if (numSteps < 1) numSteps = 1;
+    let actualStep = L / numSteps;
+    
+    let resampled = [];
+    resampled.push({ x: chain[0].x, y: chain[0].y, radius: chain[0].radius });
+    
+    let currIdx = 0;
+    let distAccum = 0;
+    
+    for (let step = 1; step <= numSteps; step++) {
+        let targetDist = step * actualStep;
+        while (currIdx < chain.length - 1) {
+            let p1 = chain[currIdx];
+            let p2 = chain[currIdx + 1];
+            let d = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+            if (distAccum + d >= targetDist - 0.0001) {
+                let needed = targetDist - distAccum;
+                let t = Math.max(0, Math.min(1, needed / (d || 1)));
+                resampled.push({
+                    x: p1.x + (p2.x - p1.x) * t,
+                    y: p1.y + (p2.y - p1.y) * t,
+                    radius: p1.radius + (p2.radius - p1.radius) * t
+                });
+                break;
+            } else {
+                distAccum += d;
+                currIdx++;
+            }
+        }
     }
     return resampled;
 }
@@ -1265,11 +1122,37 @@ function isPointCleared(rp, cleared, toolRadius) {
     return pt.isInPolygon(cleared);
 }
 
-function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments) {
+function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments, entryPt) {
     let slotSegments = [];
     let stepSize = toolOver * 0.35;
     
+    let processedChains = [];
     for (let chain of slotChains) {
+        if (chain.length < 2) continue;
+        if (entryPt) {
+            let bestIdx = -1;
+            let minDist = Infinity;
+            for (let i = 0; i < chain.length; i++) {
+                let p = chain[i];
+                let dist = Math.hypot(entryPt.x - p.x, entryPt.y - p.y);
+                if (dist < minDist) {
+                    minDist = dist;
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx > 0 && bestIdx < chain.length - 1 && minDist < toolRadius * 2) {
+                let chain1 = chain.slice(0, bestIdx + 1).reverse();
+                let chain2 = chain.slice(bestIdx);
+                processedChains.push(chain1, chain2);
+            } else {
+                processedChains.push(chain);
+            }
+        } else {
+            processedChains.push(chain);
+        }
+    }
+    
+    for (let chain of processedChains) {
         let resampled = resampleChain(chain, stepSize);
         let m = resampled.length;
         if (m < 2) continue;
@@ -1326,6 +1209,8 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
             if (trochoidPath.length === 0) {
                 trochoidPath.push(...loopPts);
             } else {
+                // Successive trochoids are linked via Z-hop retracts (raise by 0.5mm, move, plunge)
+                // to protect the surface finish and reduce tool wear as intended.
                 let prevEnd = trochoidPath[trochoidPath.length - 1];
                 let currStart = loopPts[0];
                 trochoidPath.push(newPoint(prevEnd.x, prevEnd.y, z + 0.5));
@@ -1361,6 +1246,7 @@ function sortSegments(segments, startPt, clearFirst) {
     while (remaining.length > 0) {
         let bestIdx = -1;
         let minDist = Infinity;
+        let shouldReverse = false;
         
         let hasCoresLeft = clearFirst && remaining.some(s => s.type === "spiral");
         
@@ -1373,14 +1259,29 @@ function sortSegments(segments, startPt, clearFirst) {
             if (dist < minDist) {
                 minDist = dist;
                 bestIdx = i;
+                shouldReverse = false;
+            }
+            
+            if (seg.pts.length > 1) {
+                let lastPt = seg.pts[seg.pts.length - 1];
+                let distEnd = currentPt.distTo2D(lastPt);
+                if (distEnd < minDist) {
+                    minDist = distEnd;
+                    bestIdx = i;
+                    shouldReverse = true;
+                }
             }
         }
         
         if (bestIdx === -1) {
             bestIdx = 0;
+            shouldReverse = false;
         }
         
         let chosen = remaining[bestIdx];
+        if (shouldReverse) {
+            chosen.pts.reverse();
+        }
         ordered.push(chosen);
         currentPt = chosen.pts[chosen.pts.length - 1];
         remaining.splice(bestIdx, 1);
@@ -1389,25 +1290,16 @@ function sortSegments(segments, startPt, clearFirst) {
     return ordered;
 }
 
-function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles, rampContours, plungePoints, bounds, stock, leave_xy, clearFirst) {
+function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles, rampContours, plungePoints, bounds, stock, leave_xy, clearFirst, maGraph) {
     let N = levels.length;
     if (N === 0) return [];
     
     let flatLevels = levels.map(level => flattenToSimpleLoops(level));
 
+    let stepSize = toolOver * 0.35;
     let cleared = [];
-    for (let poly of helicalCircles) {
-        let exp = POLY.expand([poly], toolRadius);
-        if (exp) cleared.push(...POLY.flatten(exp));
-    }
-    for (let poly of rampContours) {
-        let exp = POLY.expand([poly], toolRadius);
-        if (exp) cleared.push(...POLY.flatten(exp));
-    }
-    for (let poly of plungePoints) {
-        let exp = POLY.expand([poly], toolRadius);
-        if (exp) cleared.push(...POLY.flatten(exp));
-    }
+    // Omit entry points (helical/plunge) from cleared to ensure that slotting trochoidal paths
+    // start exactly inside the entry holes (e.g. at the helical center point) and step outwards.
 
     let coreSegments = [];
     let classifiedSegments = [];
@@ -1435,130 +1327,131 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
             }
 
             let limitPoly = null;
-            if (pocketRoot) limitPoly = POLY.expand([pocketRoot], -(toolRadius + leave_xy));
-
-            let R_max = Infinity;
-            for (let loop of pocketLoops) {
-                let dist = entryPt.distToPolySegments(loop);
-                if (dist < R_max) R_max = dist;
-            }
-            let R_largest = R_max - toolRadius - leave_xy;
-
-            let H_r = 0.01;
-            for (let c of helicalCircles) {
-                let cp = c.bounds.center();
-                if (cp.distTo2D(entryPt) < 0.1) {
-                    H_r = c.points[0].distTo2D(cp);
-                    break;
+            if (pocketRoot) {
+                let collapseOffset = -(toolRadius + toolOver + leave_xy);
+                let core = POLY.expand([pocketRoot], collapseOffset);
+                if (core && core.length > 0) {
+                    let expanded = POLY.expand(core, toolOver);
+                    if (expanded) {
+                        limitPoly = POLY.flatten(expanded);
+                    }
                 }
             }
 
             let combinedPts = [];
-            if (R_largest > H_r) {
-                let pitch = toolOver;
-                let r0 = H_r;
-                let r1 = R_largest;
-                let totalAngle = ((r1 - r0) / pitch) * 2 * Math.PI;
-                let steps = Math.ceil(totalAngle / (Math.PI / 16));
-                if (steps < 8) steps = 8;
-                
-                let spiralPts = [];
-                for (let step = 0; step <= steps; step++) {
-                    let theta = (step / steps) * totalAngle;
-                    let r = r0 + (pitch / (2 * Math.PI)) * theta;
-                    let x = entryPt.x + r * Math.cos(theta);
-                    let y = entryPt.y + r * Math.sin(theta);
-                    spiralPts.push(newPoint(x, y, z));
+            if (limitPoly && limitPoly.length > 0) {
+                let R_max = Infinity;
+                for (let loop of pocketLoops) {
+                    let dist = entryPt.distToPolySegments(loop);
+                    if (dist < R_max) R_max = dist;
                 }
-                combinedPts.push(...spiralPts);
+                let R_largest = R_max - toolRadius - leave_xy;
 
-                let closingSteps = 64;
-                let lastPt = spiralPts[spiralPts.length - 1];
-                let startAngle = Math.atan2(lastPt.y - entryPt.y, lastPt.x - entryPt.x);
-                let closingPts = [];
-                for (let step = 1; step <= closingSteps; step++) {
-                    let theta = startAngle + (step / closingSteps) * 2 * Math.PI;
-                    let x = entryPt.x + r1 * Math.cos(theta);
-                    let y = entryPt.y + r1 * Math.sin(theta);
-                    closingPts.push(newPoint(x, y, z));
-                }
-                combinedPts.push(...closingPts);
-            }
-
-            let R_0 = (R_largest > H_r ? R_largest : H_r) + toolOver;
-            let toolDiameter = toolRadius * 2;
-            let initialArcs = [];
-            let numPoints = 128;
-            let circlePts = [];
-            for (let step = 0; step < numPoints; step++) {
-                let theta = (step / numPoints) * 2 * Math.PI;
-                let x = entryPt.x + R_0 * Math.cos(theta);
-                let y = entryPt.y + R_0 * Math.sin(theta);
-                circlePts.push(newPoint(x, y, z));
-            }
-            let ptSafe = circlePts.map(pt => !isPointCleared(pt, cleared, 0));
-            let inArc = false;
-            let currentArc = [];
-            for (let step = 0; step < numPoints; step++) {
-                if (ptSafe[step]) {
-                    if (!inArc) { inArc = true; currentArc = [ circlePts[step] ]; } 
-                    else { currentArc.push(circlePts[step]); }
-                } else if (inArc) { inArc = false; initialArcs.push(currentArc); currentArc = []; }
-            }
-            if (inArc && currentArc.length > 0) {
-                if (initialArcs.length > 0 && ptSafe[0]) initialArcs[0] = currentArc.concat(initialArcs[0]);
-                else initialArcs.push(currentArc);
-            }
-
-            let branches = [];
-            for (let startArc of initialArcs) {
-                if (startArc.length <= 1) continue;
-                let isFullCircle = (startArc.length >= numPoints - 5);
-                let chordLen = startArc[0].distTo2D(startArc[startArc.length - 1]);
-                if (!isFullCircle && chordLen <= toolDiameter) continue;
-                let branch = { arcs: [ startArc ], theta_center: Math.atan2(startArc[Math.floor(startArc.length / 2)].y - entryPt.y, startArc[Math.floor(startArc.length / 2)].x - entryPt.x) };
-                branches.push(branch);
-            }
-
-            for (let branch of branches) {
-                let k = branch.arcs.length;
-                let firstArc = branch.arcs[0];
-                let startPt = firstArc[0];
-                let theta_start = Math.atan2(startPt.y - entryPt.y, startPt.x - entryPt.x);
-                let R_safe = R_largest > H_r ? R_largest : H_r;
-                let plungePt = newPoint(entryPt.x + R_safe * Math.cos(theta_start), entryPt.y + R_safe * Math.sin(theta_start), z);
-                
-                if (combinedPts.length > 0) {
-                    let lastPt = combinedPts[combinedPts.length - 1];
-                    combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5), newPoint(plungePt.x, plungePt.y, z + 0.5), newPoint(plungePt.x, plungePt.y, z));
-                } else {
-                    combinedPts.push(newPoint(plungePt.x, plungePt.y, z + 0.5), newPoint(plungePt.x, plungePt.y, z));
-                }
-                combinedPts.push(startPt);
-                for (let i = 0; i < k; i++) {
-                    let arc = branch.arcs[i];
-                    combinedPts.push(...(i > 0 ? arc.slice(1) : arc));
-                    if (i > 0) {
-                        let bestLp = null, minDistLp = Infinity;
-                        if (limitPoly) {
-                            for (let lp of limitPoly) {
-                                let dist = arc[arc.length-1].distToPolySegments(lp);
-                                if (dist < minDistLp) { minDistLp = dist; bestLp = lp; }
-                            }
-                        }
-                        if (bestLp) combinedPts.push(...getShortestContourSegment(bestLp, arc[arc.length-1], branch.arcs[i-1][branch.arcs[i-1].length-1]).slice(1));
+                let H_r = 0.01;
+                for (let c of helicalCircles) {
+                    let cp = c.bounds.center();
+                    if (cp.distTo2D(entryPt) < 0.1) {
+                        H_r = c.points[0].distTo2D(cp);
+                        break;
                     }
-                    if (i < k - 1) {
-                        let lastPt = combinedPts[combinedPts.length - 1];
-                        combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5), newPoint(arc[0].x, arc[0].y, z + 0.5), newPoint(arc[0].x, arc[0].y, z));
-                        let bestLp = null, minDistLp = Infinity;
-                        if (limitPoly) {
-                            for (let lp of limitPoly) {
-                                let dist = arc[0].distToPolySegments(lp);
-                                if (dist < minDistLp) { minDistLp = dist; bestLp = lp; }
+                }
+
+                if (R_largest > H_r) {
+                    let pitch = toolOver;
+                    let r0 = H_r;
+                    let r1 = R_largest;
+                    let totalAngle = ((r1 - r0) / pitch) * 2 * Math.PI;
+                    let steps = Math.ceil(totalAngle / (Math.PI / 16));
+                    if (steps < 8) steps = 8;
+                    
+                    let spiralPts = [];
+                    for (let step = 0; step <= steps; step++) {
+                        let theta = (step / steps) * totalAngle;
+                        let r = r0 + (pitch / (2 * Math.PI)) * theta;
+                        let x = entryPt.x + r * Math.cos(theta);
+                        let y = entryPt.y + r * Math.sin(theta);
+                        spiralPts.push(newPoint(x, y, z));
+                    }
+                    combinedPts.push(...spiralPts);
+
+                    let closingSteps = 64;
+                    let lastPt = spiralPts[spiralPts.length - 1];
+                    let startAngle = Math.atan2(lastPt.y - entryPt.y, lastPt.x - entryPt.x);
+                    let closingPts = [];
+                    for (let step = 1; step <= closingSteps; step++) {
+                        let theta = startAngle + (step / closingSteps) * 2 * Math.PI;
+                        let x = entryPt.x + r1 * Math.cos(theta);
+                        let y = entryPt.y + r1 * Math.sin(theta);
+                        closingPts.push(newPoint(x, y, z));
+                    }
+                    combinedPts.push(...closingPts);
+                }
+
+                // Generate morphed loops from R_largest (or H_r) out to the boundary limit
+                let morphedLoops = [];
+                let R_max_dist = 0;
+                for (let lp of limitPoly) {
+                    for (let p of lp.points) {
+                        R_max_dist = Math.max(R_max_dist, entryPt.distTo2D(p));
+                    }
+                }
+
+                let d = R_max_dist - R_largest;
+                if (d > 0) {
+                    let numPasses = Math.ceil(d / toolOver);
+                    if (numPasses < 1) numPasses = 1;
+                    let actualStep = d / numPasses;
+                    
+                    // TODO: Reconsider shape-based ray-cast morphing in the future with a more complex algorithm.
+                    // For now, use simple insetting offsets (POLY.expand) to keep loops closed, nested, and robust.
+                    for (let i = 0; i <= numPasses; i++) {
+                        let offsetVal = -d + i * actualStep;
+                        if (offsetVal > -0.0001) offsetVal = 0;
+                        
+                        let loops = POLY.expand(limitPoly, offsetVal);
+                        if (loops && loops.length > 0) {
+                            POLY.setZ(loops, z);
+                            morphedLoops.push(...loops);
+                        }
+                    }
+                }
+
+                // Link morphed loops to combinedPts
+                let currentPt = combinedPts[combinedPts.length - 1] || entryPt;
+                let remainingLoops = [...morphedLoops];
+                while (remainingLoops.length > 0) {
+                    let bestIdx = -1;
+                    let minDist = Infinity;
+                    let bestStartIdx = -1;
+                    for (let i = 0; i < remainingLoops.length; i++) {
+                        let loop = remainingLoops[i];
+                        for (let j = 0; j < loop.points.length; j++) {
+                            let dist = currentPt.distTo2D(loop.points[j]);
+                            if (dist < minDist) {
+                                minDist = dist;
+                                bestIdx = i;
+                                bestStartIdx = j;
                             }
                         }
-                        if (bestLp) combinedPts.push(...getShortestContourSegment(bestLp, arc[0], branch.arcs[i+1][0]).slice(1));
+                    }
+                    
+                    if (bestIdx !== -1) {
+                        let loop = remainingLoops[bestIdx];
+                        let pts = loop.points;
+                        let rotated = [...pts.slice(bestStartIdx), ...pts.slice(0, bestStartIdx)];
+                        
+                        if (minDist > toolRadius * 2) {
+                            combinedPts.push(newPoint(currentPt.x, currentPt.y, z + 0.5));
+                            combinedPts.push(newPoint(rotated[0].x, rotated[0].y, z + 0.5));
+                            combinedPts.push(newPoint(rotated[0].x, rotated[0].y, z));
+                        }
+                        combinedPts.push(...rotated);
+                        combinedPts.push(rotated[0].clone());
+                        
+                        currentPt = rotated[0];
+                        remainingLoops.splice(bestIdx, 1);
+                    } else {
+                        break;
                     }
                 }
             }
@@ -1573,9 +1466,8 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
 
     let pocketRoot = levels[0][0];
     let slotSegments = [];
-    if (pocketRoot) {
-        let maGraph = buildMATGraph(pocketRoot);
-        slotSegments = generateSlotToolpaths(extractSlotChains(maGraph, toolRadius, toolOver, leave_xy), toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments);
+    if (pocketRoot && maGraph) {
+        slotSegments = generateSlotToolpaths(extractSlotChains(maGraph, toolRadius, toolOver, leave_xy), toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments, helicalCircles[0]?.bounds.center() || plungePoints[0]?.bounds.center() || newPoint(0, 0, z));
         for (let seg of slotSegments) {
             let exp = expandToolpath(newPolygon().setOpen().addPoints(seg.pts), toolRadius, z);
             if (exp) cleared.push(...POLY.flatten(exp));
@@ -1585,6 +1477,83 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
     let allToLink = [...coreSegments, ...slotSegments];
     let startPt = helicalCircles[0]?.bounds.center() || plungePoints[0]?.bounds.center() || newPoint(0, 0, z);
     let sorted = sortSegments(allToLink, startPt, clearFirst);
+    
+    // Associate any leftover entry paths with the closest segment in sorted
+    let associatedHelical = new Set();
+    let associatedRamp = new Set();
+    let associatedPlunge = new Set();
+    
+    for (let seg of sorted) {
+        if (seg.helicalCircles) {
+            for (let c of seg.helicalCircles) associatedHelical.add(c);
+        }
+        if (seg.rampContours) {
+            for (let c of seg.rampContours) associatedRamp.add(c);
+        }
+        if (seg.plungePoints) {
+            for (let c of seg.plungePoints) associatedPlunge.add(c);
+        }
+    }
+    
+    if (sorted.length > 0) {
+        for (let c of helicalCircles) {
+            if (!associatedHelical.has(c)) {
+                let bestSeg = null;
+                let minDist = Infinity;
+                let center = c.bounds.center();
+                for (let seg of sorted) {
+                    let dist = center.distTo2D(seg.pts[0]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestSeg = seg;
+                    }
+                }
+                if (bestSeg) {
+                    if (!bestSeg.helicalCircles) bestSeg.helicalCircles = [];
+                    bestSeg.helicalCircles.push(c);
+                }
+            }
+        }
+        
+        for (let c of rampContours) {
+            if (!associatedRamp.has(c)) {
+                let bestSeg = null;
+                let minDist = Infinity;
+                let first = c.first();
+                for (let seg of sorted) {
+                    let dist = first.distTo2D(seg.pts[0]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestSeg = seg;
+                    }
+                }
+                if (bestSeg) {
+                    if (!bestSeg.rampContours) bestSeg.rampContours = [];
+                    bestSeg.rampContours.push(c);
+                }
+            }
+        }
+        
+        for (let c of plungePoints) {
+            if (!associatedPlunge.has(c)) {
+                let bestSeg = null;
+                let minDist = Infinity;
+                let center = c.bounds.center();
+                for (let seg of sorted) {
+                    let dist = center.distTo2D(seg.pts[0]);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestSeg = seg;
+                    }
+                }
+                if (bestSeg) {
+                    if (!bestSeg.plungePoints) bestSeg.plungePoints = [];
+                    bestSeg.plungePoints.push(c);
+                }
+            }
+        }
+    }
+
     let resultSegments = [];
     for (let seg of sorted) {
         let p = newPolygon().setOpen().addPoints(seg.pts);
@@ -1598,6 +1567,18 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
             resultSegments.push({ type: seg.type, polys: [ p ] });
         }
     }
+    
+    // Add skeleton debug layer segments
+    if (maGraph && maGraph.edges) {
+        for (let edge of maGraph.edges) {
+            let p = newPolygon().setOpen().addPoints([
+                newPoint(edge.v0.x, edge.v0.y, z),
+                newPoint(edge.v1.x, edge.v1.y, z)
+            ]);
+            resultSegments.push({ type: "skeleton", polys: [ p ] });
+        }
+    }
+    
     return resultSegments;
 }
 
