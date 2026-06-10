@@ -1122,6 +1122,14 @@ function isPointCleared(rp, cleared, toolRadius) {
     return pt.isInPolygon(cleared);
 }
 
+function isChainClockwise(chain) {
+    let sum = 0;
+    for (let i = 0; i < chain.length - 1; i++) {
+        sum += (chain[i+1].x - chain[i].x) * (chain[i+1].y + chain[i].y);
+    }
+    return sum > 0;
+}
+
 function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments, entryPt) {
     let slotSegments = [];
     let stepSize = toolOver * 0.35;
@@ -1129,6 +1137,11 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
     let processedChains = [];
     for (let chain of slotChains) {
         if (chain.length < 2) continue;
+        
+        let pStart = chain[0];
+        let pEnd = chain[chain.length - 1];
+        let isClosedLoop = Math.hypot(pStart.x - pEnd.x, pStart.y - pEnd.y) < 0.1;
+        
         if (entryPt) {
             let bestIdx = -1;
             let minDist = Infinity;
@@ -1140,15 +1153,39 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
                     bestIdx = i;
                 }
             }
-            if (bestIdx > 0 && bestIdx < chain.length - 1 && minDist < toolRadius * 2) {
-                let chain1 = chain.slice(0, bestIdx + 1).reverse();
-                let chain2 = chain.slice(bestIdx);
-                processedChains.push(chain1, chain2);
+            
+            if (isClosedLoop) {
+                let rotated = [...chain.slice(bestIdx), ...chain.slice(0, bestIdx)];
+                rotated.push({ ...rotated[0] });
+                if (!isChainClockwise(rotated)) {
+                    rotated.reverse();
+                }
+                processedChains.push(rotated);
+            } else {
+                if (minDist < toolRadius * 2) {
+                    if (bestIdx === 0) {
+                        processedChains.push(chain);
+                    } else if (bestIdx === chain.length - 1) {
+                        processedChains.push([...chain].reverse());
+                    } else {
+                        let chain1 = chain.slice(0, bestIdx + 1).reverse();
+                        let chain2 = chain.slice(bestIdx);
+                        processedChains.push(chain1, chain2);
+                    }
+                } else {
+                    processedChains.push(chain);
+                }
+            }
+        } else {
+            if (isClosedLoop) {
+                let rotated = [...chain];
+                if (!isChainClockwise(rotated)) {
+                    rotated.reverse();
+                }
+                processedChains.push(rotated);
             } else {
                 processedChains.push(chain);
             }
-        } else {
-            processedChains.push(chain);
         }
     }
     
@@ -1162,7 +1199,28 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
         for (let j = 0; j < m; j++) {
             let rp = resampled[j];
             let Tx, Ty;
-            if (j < m - 1) {
+            if (j > 0 && j < m - 1) {
+                let prev = resampled[j-1];
+                let next = resampled[j+1];
+                
+                let dx1 = rp.x - prev.x;
+                let dy1 = rp.y - prev.y;
+                let len1 = Math.hypot(dx1, dy1);
+                let tx1 = dx1 / (len1 || 1);
+                let ty1 = dy1 / (len1 || 1);
+                
+                let dx2 = next.x - rp.x;
+                let dy2 = next.y - rp.y;
+                let len2 = Math.hypot(dx2, dy2);
+                let tx2 = dx2 / (len2 || 1);
+                let ty2 = dy2 / (len2 || 1);
+                
+                let tx = tx1 + tx2;
+                let ty = ty1 + ty2;
+                let len = Math.hypot(tx, ty);
+                Tx = tx / (len || 1);
+                Ty = ty / (len || 1);
+            } else if (j < m - 1) {
                 let next = resampled[j+1];
                 let dx = next.x - rp.x;
                 let dy = next.y - rp.y;
@@ -1200,7 +1258,7 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
             let steps = 12;
             let loopPts = [];
             for (let k_step = 0; k_step <= steps; k_step++) {
-                let phi = -Math.PI / 2 + (k_step / steps) * Math.PI;
+                let phi = Math.PI / 2 - (k_step / steps) * Math.PI;
                 let x = rp.x + R_path * Math.cos(phi) * T.x + R_path * Math.sin(phi) * N.x;
                 let y = rp.y + R_path * Math.cos(phi) * T.y + R_path * Math.sin(phi) * N.y;
                 loopPts.push(newPoint(x, y, z));
@@ -1288,6 +1346,62 @@ function sortSegments(segments, startPt, clearFirst) {
     }
     
     return ordered;
+}
+
+function resampleDensePolygon(poly, delta_d) {
+    let pts = poly.points;
+    if (pts.length < 2) return poly.clone();
+    
+    let resampledPts = [];
+    let isClosed = !poly.isOpen();
+    let numSegments = isClosed ? pts.length : pts.length - 1;
+    
+    let currentPt = pts[0];
+    resampledPts.push(newPoint(currentPt.x, currentPt.y, currentPt.z));
+    
+    let distAccum = 0;
+    for (let i = 0; i < numSegments; i++) {
+        let p1 = pts[i];
+        let p2 = pts[(i + 1) % pts.length];
+        let segLen = p1.distTo2D(p2);
+        if (segLen < 1e-9) continue;
+        
+        let dirX = (p2.x - p1.x) / segLen;
+        let dirY = (p2.y - p1.y) / segLen;
+        let dirZ = (p2.z - p1.z) / segLen;
+        
+        let remainingSegLen = segLen;
+        let stepDist = delta_d - distAccum;
+        
+        while (remainingSegLen >= stepDist) {
+            let nextX = currentPt.x + dirX * stepDist;
+            let nextY = currentPt.y + dirY * stepDist;
+            let nextZ = currentPt.z + dirZ * stepDist;
+            
+            currentPt = newPoint(nextX, nextY, nextZ);
+            resampledPts.push(currentPt);
+            
+            remainingSegLen -= stepDist;
+            stepDist = delta_d;
+            distAccum = 0;
+        }
+        
+        distAccum += remainingSegLen;
+        currentPt = p2;
+    }
+    
+    if (!isClosed && resampledPts[resampledPts.length - 1].distTo2D(pts[pts.length - 1]) > 1e-6) {
+        let lastPt = pts[pts.length - 1];
+        resampledPts.push(newPoint(lastPt.x, lastPt.y, lastPt.z));
+    }
+    
+    let newPoly = newPolygon(resampledPts);
+    if (isClosed) {
+        newPoly.setClosed();
+    } else {
+        newPoly.setOpen();
+    }
+    return newPoly;
 }
 
 function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles, rampContours, plungePoints, bounds, stock, leave_xy, clearFirst, maGraph) {
@@ -1387,31 +1501,67 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                     combinedPts.push(...closingPts);
                 }
 
-                // Generate morphed loops from R_largest (or H_r) out to the boundary limit
+                // Generate morphed loops using Ray-Casting Morphing
                 let morphedLoops = [];
-                let R_max_dist = 0;
-                for (let lp of limitPoly) {
-                    for (let p of lp.points) {
+                if (limitPoly && limitPoly.length > 0) {
+                    let delta_d = Math.max(0.05, Math.min(0.5, toolOver * 0.2));
+                    
+                    // Find the outer pocket boundary containing entryPt
+                    let outerPoly = null;
+                    for (let lp of limitPoly) {
+                        if (entryPt.isInPolygon(lp)) {
+                            outerPoly = lp;
+                            break;
+                        }
+                    }
+                    if (!outerPoly) outerPoly = limitPoly[0];
+                    
+                    let resampledLp = resampleDensePolygon(outerPoly, delta_d);
+                    
+                    let R_max_dist = 0;
+                    for (let p of resampledLp.points) {
                         R_max_dist = Math.max(R_max_dist, entryPt.distTo2D(p));
                     }
-                }
-
-                let d = R_max_dist - R_largest;
-                if (d > 0) {
-                    let numPasses = Math.ceil(d / toolOver);
-                    if (numPasses < 1) numPasses = 1;
-                    let actualStep = d / numPasses;
                     
-                    // TODO: Reconsider shape-based ray-cast morphing in the future with a more complex algorithm.
-                    // For now, use simple insetting offsets (POLY.expand) to keep loops closed, nested, and robust.
-                    for (let i = 0; i <= numPasses; i++) {
-                        let offsetVal = -d + i * actualStep;
-                        if (offsetVal > -0.0001) offsetVal = 0;
+                    let d = R_max_dist - R_largest;
+                    if (d > 0) {
+                        let numPasses = Math.ceil(d / toolOver);
+                        if (numPasses < 1) numPasses = 1;
                         
-                        let loops = POLY.expand(limitPoly, offsetVal);
-                        if (loops && loops.length > 0) {
-                            POLY.setZ(loops, z);
-                            morphedLoops.push(...loops);
+                        for (let i = 1; i <= numPasses; i++) {
+                            let t = i / numPasses;
+                            let morphedPts = [];
+                            
+                            for (let p of resampledLp.points) {
+                                let vx = p.x - entryPt.x;
+                                let vy = p.y - entryPt.y;
+                                let r = Math.hypot(vx, vy);
+                                r = Math.max(R_largest, r);
+                                let ux = vx / r;
+                                let uy = vy / r;
+                                
+                                let r_t = (1 - t) * R_largest + t * r;
+                                let mx = entryPt.x + r_t * ux;
+                                let my = entryPt.y + r_t * uy;
+                                morphedPts.push(newPoint(mx, my, z));
+                            }
+                            
+                            let rawLoop = newPolygon(morphedPts);
+                            if (outerPoly.isOpen()) {
+                                rawLoop.setOpen();
+                            } else {
+                                rawLoop.setClosed();
+                            }
+                            
+                            // Clip the morphed loop against limitPoly (retaining only parts inside the pocket)
+                            let clipped = POLY.trimTo([rawLoop], limitPoly);
+                            if (clipped && clipped.length > 0) {
+                                for (let c of clipped) {
+                                    c.setClosed();
+                                }
+                                POLY.setZ(clipped, z);
+                                morphedLoops.push(...clipped);
+                            }
                         }
                     }
                 }
