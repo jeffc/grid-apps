@@ -1,5 +1,64 @@
 /** Copyright Stewart Allen <sa@grid.space> -- All Rights Reserved */
 
+/**
+ * HIGH-EFFICIENCY 3D ADAPTIVE CLEARING ALGORITHM
+ * 
+ * OVERVIEW:
+ * This module implements a high-efficiency adaptive roughing (volumetric clearing) toolpath generator
+ * designed to maintain a strict control over the Tool Engagement Angle (TEA). Controlling the TEA prevents
+ * tool overload/breakage in sharp corners and slots, while maintaining optimal material removal rates.
+ * The pocket is cleared from the inside out, starting with a safe entry descent (helical, ramp, or plunge),
+ * proceeding through an Archimedean spiral outward to the largest inscribed circle, and then branching
+ * outward depth-first into pocket corners using expanding circular arcs linked by Z-hop travels.
+ * 
+ * ALGORITHMIC WORKFLOW:
+ * 
+ * 1. Safe Entry Point Detection:
+ *    - Finds the furthest point from all pocket walls (Pole of Inaccessibility / Medial Axis Center)
+ *      to serve as the entry descent location.
+ *    - Slices innermost pocket boundaries and generates helical descent passes using the "0.9D centerline rule"
+ *      (where D is tool diameter) to ensure the center pillar is fully swept by the tool face.
+ * 
+ * 2. Smooth Archimedean Spiral Clearing:
+ *    - From the bottom of the helical entry, the tool winds outward along a smooth CCW Archimedean spiral:
+ *          r(theta) = H_r + (pitch / 2*pi) * theta
+ *      where H_r is the helical radius and pitch is the tool stepover (toolOver).
+ *    - A 360-degree circular closing pass at the maximum radius (R_largest) finishes the spiral, sealing the shape.
+ * 
+ * 3. Depth-First Branch Arc Milling:
+ *    - Beyond the maximum inscribed circle, the tool clears the pocket by stepping outward in concentric circles.
+ *    - The circle at each step is trimmed against the inward-offset pocket boundary ("limitPoly").
+ *    - This trims the circles into safe partial arcs inside the pocket.
+ *    - Starting arcs at R_0 define individual "branches" (channels/corners of the pocket).
+ *    - Each branch is tracked outward depth-first: we step out by `toolOver` and find the closest matching arc
+ *      in the next concentric level (within Pi/3 radians). We continue until no matching arc exists or the arc chord
+ *      distance falls below the tool diameter (signifying the slot has narrowed below the slotting limit).
+ * 
+ * 4. Micro Z-Hop Linking & Wall Contour Milling:
+ *    - Within a branch, arcs are linked sequentially.
+ *    - To maintain climb-milling (CCW), after completing arc `i` to `pEnd_i`, the tool:
+ *      a. Mills back along the right wall contour from `pEnd_i` to the previous arc's end `pEnd_{i-1}` (if i > 0).
+ *      b. Performs a vertical Z-hop retract (lifts by 0.5mm, rapid-travels to the start of the current arc `pStart_i`,
+ *         and plunges back to depth).
+ *      c. Mills along the left wall contour from `pStart_i` to the start of the next arc `pStart_{i+1}` (if i < k - 1).
+ *    - At the end of the branch, a Z-hop is performed to the tip, and a smaller finishing pass traces the outer tip
+ *      boundary contour from `pEnd_last` to `pStart_last`.
+ * 
+ * 5. Colinear Wall Alignment (Segment Projection):
+ *    - To ensure wall contour cuts are perfectly colinear and parallel to the pocket sides (rather than angled due
+ *      to discretized circle endpoint spacing), the endpoints `pStart` and `pEnd` are projected onto the closest
+ *      polygon segments of the boundary.
+ *    - The tool moves from the raw arc endpoint to its projected wall coordinate, cuts exactly along the projected
+ *      wall segments, and exits back to the next raw arc endpoint.
+ * 
+ * 6. Safe Plunging & Horizontal Feed between Branches:
+ *    - After finishing a branch, the tool retracts to z + 0.5.
+ *    - Before entering the next branch, the tool moves at z + 0.5 to a plunge point (P_plunge) along the maximum
+ *      cleared circle (R_largest) and plunges vertically into empty air.
+ *    - The tool then feeds horizontally at cutting depth from P_plunge to the first arc's start point, completely
+ *      preventing plunging into uncut stock.
+ */
+
 import { CamOp } from '../core/op.js';
 import { newSlice } from '../../../core/slice.js';
 import { newPoint } from '../../../../geo/point.js';
@@ -300,15 +359,20 @@ class OpAdaptive extends CamOp {
                         layers
                             .setLayer("adaptive-peel", { line: 0xffa500 }, false)
                             .addPolys(seg.polys);
+                        slice.camLines = seg.polys;
+                    } else if (seg.type === 'centerline') {
+                        // Slot centerline drawn in Magenta (0xff00ff)
+                        layers
+                            .setLayer("adaptive-centerline", { line: 0xff00ff }, false)
+                            .addPolys(seg.polys);
+                        // Do not set slice.camLines so it is not emitted to G-code
                     } else {
                         // Spiral morphing toolpath drawn in Green (0x00ff00)
                         layers
                             .setLayer("adaptive-spiral", { line: 0x00ff00 }, false)
                             .addPolys(seg.polys);
+                        slice.camLines = seg.polys;
                     }
-
-                    // Store the actual clearing segment lines as camLines on this slice
-                    slice.camLines = seg.polys;
 
                     // Add slice to widget slices
                     addSlices(slice);
@@ -1039,6 +1103,144 @@ function getShortestContourSegment(lp, pStart, pEnd) {
 }
 
 /**
+ * Traces a narrow slot centerline from a starting arc and generates a CCW micro-trochoidal toolpath along it.
+ */
+function processSlotBranch(startArc, entryPt, R_0, numPoints, toolRadius, toolOver, z, limitPoly, pocketRoot, isPointSafe) {
+    let branch = {
+        arcs: [ startArc ],
+        theta_center: 0
+    };
+    let midPt = startArc[Math.floor(startArc.length / 2)];
+    branch.theta_center = Math.atan2(midPt.y - entryPt.y, midPt.x - entryPt.x);
+    
+    let slotCenterPts = [ midPt ];
+    let currPt = midPt;
+    // Initialize direction pointing from entryPt to midPt
+    let dx = midPt.x - entryPt.x;
+    let dy = midPt.y - entryPt.y;
+    let len = Math.hypot(dx, dy);
+    let dirX = dx / (len || 1);
+    let dirY = dy / (len || 1);
+    
+    let slotLoopCount = 0;
+    while (slotLoopCount < 1000) {
+        let bestPt = null;
+        let bestScore = -Infinity;
+        
+        let numCheckPoints = 32;
+        let ds = toolOver;
+        for (let i = 0; i < numCheckPoints; i++) {
+            let theta = (i / numCheckPoints) * 2 * Math.PI;
+            let vx = Math.cos(theta);
+            let vy = Math.sin(theta);
+            
+            // Dot product with current direction (allow up to ~100 degree turns)
+            let dot = vx * dirX + vy * dirY;
+            if (dot <= -0.2) continue;
+            
+            let testPt = newPoint(currPt.x + ds * vx, currPt.y + ds * vy, z);
+            if (isPointSafe(testPt)) {
+                let dist = getDistToWalls(testPt, pocketRoot);
+                let score = dot + dist * 0.5;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestPt = testPt;
+                }
+            }
+        }
+        
+        if (bestPt) {
+            // Check if we are looping back to start (for closed rings)
+            if (slotLoopCount > 3 && bestPt.distTo2D(midPt) < toolOver * 1.5) {
+                slotCenterPts.push(midPt);
+                break;
+            }
+            slotCenterPts.push(bestPt);
+            // Update direction vector
+            let ndx = bestPt.x - currPt.x;
+            let ndy = bestPt.y - currPt.y;
+            let nlen = Math.hypot(ndx, ndy);
+            dirX = ndx / (nlen || 1);
+            dirY = ndy / (nlen || 1);
+            currPt = bestPt;
+        } else {
+            break;
+        }
+        slotLoopCount++;
+    }
+    
+    if (slotCenterPts.length > 0) {
+        let stepSize = toolOver * 0.35;
+        let resampled = resamplePoints(slotCenterPts, stepSize);
+        let m = resampled.length;
+        let tangents = [];
+        let normals = [];
+        for (let j = 0; j < m; j++) {
+            let rp = resampled[j];
+            let Tx, Ty;
+            if (j < m - 1) {
+                let next = resampled[j+1];
+                let dx = next.x - rp.x;
+                let dy = next.y - rp.y;
+                let len = Math.hypot(dx, dy);
+                Tx = dx / (len || 1);
+                Ty = dy / (len || 1);
+            } else if (j > 0) {
+                let prev = resampled[j-1];
+                let dx = rp.x - prev.x;
+                let dy = rp.y - prev.y;
+                let len = Math.hypot(dx, dy);
+                Tx = dx / (len || 1);
+                Ty = dy / (len || 1);
+            } else {
+                Tx = 1;
+                Ty = 0;
+            }
+            tangents.push({ x: Tx, y: Ty });
+            normals.push({ x: -Ty, y: Tx }); // N is CCW of T (pointing to left wall)
+        }
+        
+        let trochoidPath = [];
+        for (let j = 0; j < m; j++) {
+            let rp = resampled[j];
+            let T = tangents[j];
+            let N = normals[j];
+            let cp = getClosestPointOnPoly(rp, pocketRoot);
+            let distToWall = cp ? rp.distTo2D(cp) : toolRadius;
+            let R_path = Math.max(toolRadius / 2, distToWall - toolRadius);
+            
+            // Generate CCW cutting arc starting from the right wall (-N),
+            // swinging forward (+T), and ending at the left wall (+N).
+            let steps = 12;
+            let loopPts = [];
+            for (let k_step = 0; k_step <= steps; k_step++) {
+                let phi = -Math.PI / 2 + (k_step / steps) * Math.PI;
+                let x = rp.x + R_path * Math.cos(phi) * T.x + R_path * Math.sin(phi) * N.x;
+                let y = rp.y + R_path * Math.cos(phi) * T.y + R_path * Math.sin(phi) * N.y;
+                loopPts.push(newPoint(x, y, z));
+            }
+            
+            if (j === 0) {
+                trochoidPath.push(...loopPts);
+            } else {
+                let prevEnd = trochoidPath[trochoidPath.length - 1];
+                let currStart = loopPts[0];
+                // Vertical Z-hop retract
+                trochoidPath.push(newPoint(prevEnd.x, prevEnd.y, z + 0.5));
+                trochoidPath.push(newPoint(currStart.x, currStart.y, z + 0.5));
+                trochoidPath.push(newPoint(currStart.x, currStart.y, z));
+                trochoidPath.push(...loopPts.slice(1));
+            }
+        }
+        if (trochoidPath.length > 0) {
+            branch.trochoidPath = trochoidPath;
+            branch.slotCenterline = resampled;
+        }
+    }
+    return branch;
+}
+
+/**
  * Generates linked spiral morphing and trochoidal peeling segments between concentric offset loops.
  * Walks from the innermost loops outward.
  */
@@ -1102,7 +1304,12 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
 
             // Helper to check if point is inside limitPoly
             let isPointSafe = function(pt) {
-                return limitPoly && pt.isInPolygon(limitPoly);
+                if (limitPoly && limitPoly.length > 0 && pt.isInPolygon(limitPoly)) {
+                    return true;
+                }
+                // Fallback for thin/collapsed slots: check if point is inside the pocket boundary
+                // and at least toolRadius + leave_xy - 0.05 distance from the walls.
+                return pt.isInPolygon(pocketRoot) && getDistToWalls(pt, pocketRoot) >= (toolRadius + leave_xy - 0.05);
             };
 
             // 2. Find closest radius to pocket boundaries (including islands)
@@ -1216,7 +1423,13 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                 // Check starting arc chord length (bypass if it's a full circle)
                 let isFullCircle = (startArc.length >= numPoints - 5);
                 let chordLen = startArc[0].distTo2D(startArc[startArc.length - 1]);
-                if (!isFullCircle && chordLen <= toolDiameter) continue;
+                
+                if (!isFullCircle && chordLen <= toolDiameter) {
+                    // This is a narrow slot branch right at R_0. Process it as a slot branch immediately!
+                    let slotBranch = processSlotBranch(startArc, entryPt, R_0, numPoints, toolRadius, toolOver, z, limitPoly, pocketRoot, isPointSafe);
+                    branches.push(slotBranch);
+                    continue;
+                }
 
                 let branch = {
                     arcs: [ startArc ],
@@ -1297,6 +1510,11 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                             let arcMidPt = bestArc[Math.floor(bestArc.length / 2)];
                             branch.theta_center = Math.atan2(arcMidPt.y - entryPt.y, arcMidPt.x - entryPt.x);
                         } else {
+                            // The slot has narrowed below toolDiameter. Let's trace it and generate slotting path!
+                            let slotBranch = processSlotBranch(bestArc, entryPt, current_R, numPoints, toolRadius, toolOver, z, limitPoly, pocketRoot, isPointSafe);
+                            if (slotBranch.trochoidPath) {
+                                branch.trochoidPath = slotBranch.trochoidPath;
+                            }
                             break;
                         }
                     } else {
@@ -1310,6 +1528,16 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
             }
 
             // 6. Update cleared area in Pass 1 and build combinedPts with retracts, boundary milling, & finishing passes
+            //
+            // We clear the pocket branch-by-branch depth-first. For each branch, we plunge into a safe,
+            // pre-cleared zone along the maximum inscribed circle (R_safe), feed to the start of the first
+            // arc, and then traverse the expanding concentric arcs outward.
+            //
+            // To maintain climb milling (counter-clockwise tool movement) and clean pocket walls:
+            // - After completing arc i to pEnd_i, we mill backward along the right wall contour to pEnd_{i-1}.
+            // - We perform a vertical Z-hop (retract to z+0.5, rapid-travel to pStart_i, plunge back to z).
+            // - We mill forward along the left wall contour from pStart_i to pStart_{i+1} (start of next arc).
+            // - At the tip (outermost arc), we Z-hop back to pEnd_last and perform a finishing pass around the tip.
             for (let branch of branches) {
                 let k = branch.arcs.length;
                 if (k === 0) continue;
@@ -1317,52 +1545,70 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                 // First arc of the branch
                 let firstArc = branch.arcs[0];
                 let startPt = firstArc[0];
+                
+                // Calculate the entry plunge point (plungePt):
+                // To avoid plunging vertically into uncut stock, we place the plunge point at the boundary of
+                // the already cleared Archimedean spiral / inscribed circle (R_safe) along the angle pointing
+                // towards the start of this branch's first arc.
                 let theta_start = Math.atan2(startPt.y - entryPt.y, startPt.x - entryPt.x);
                 let R_safe = R_largest > H_r ? R_largest : H_r;
                 let px = entryPt.x + R_safe * Math.cos(theta_start);
                 let py = entryPt.y + R_safe * Math.sin(theta_start);
                 let plungePt = newPoint(px, py, z);
                 
+                // Position/Feed Sequence:
+                // 1. If we have finished a previous branch, retract vertically to z + 0.5 (Z-hop).
+                // 2. Rapid-travel horizontally at z + 0.5 to the new plungePt.
+                // 3. Plunge vertically down to the cutting depth z.
+                // 4. Feed horizontally at cutting depth z to startPt of the first arc.
                 if (combinedPts.length > 0) {
                     let lastPt = combinedPts[combinedPts.length - 1];
-                    // Retract to z + 0.5
+                    // Retract vertically to Z-hop travel clearance height (z + 0.5)
                     combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
-                    // Move to plungePt at z + 0.5
+                    // Rapid-travel horizontally at clearance height to the safe plunge coordinates
                     combinedPts.push(newPoint(plungePt.x, plungePt.y, z + 0.5));
-                    // Plunge to z
+                    // Plunge vertically to the current layer's cutting depth z
                     combinedPts.push(newPoint(plungePt.x, plungePt.y, z));
                 } else {
+                    // Initial plunge sequence if this is the very first path segment
                     combinedPts.push(newPoint(plungePt.x, plungePt.y, z + 0.5));
                     combinedPts.push(newPoint(plungePt.x, plungePt.y, z));
                 }
                 
-                // Feed to startPt
+                // Feed horizontally from the safe entry plunge point to the start of the first clearing arc
                 combinedPts.push(startPt);
                 
-                // Process all arcs in the branch
+                // Process all concentric arcs in the branch outward
                 for (let i = 0; i < k; i++) {
                     let arc = branch.arcs[i];
                     
-                    // Mill the arc to pEnd_i
+                    // Mill the arc to pEnd_i.
+                    // For the first arc (i = 0), we already pushed startPt, so we push all points.
+                    // For subsequent arcs, we exclude the start point (arc.slice(1)) to prevent duplicate points.
                     if (i > 0) {
                         combinedPts.push(...arc.slice(1));
                     } else {
                         combinedPts.push(...arc);
                     }
                     
-                    // Update cleared area in Pass 1 for this arc
+                    // Update the cleared area tracker in Pass 1 to include the area swept by this arc.
+                    // This ensures any subsequent path planning recognizes this region as empty space.
                     let arcPoly = newPolygon().setOpen().addPoints(arc);
                     let clearedArc = expandToolpath(arcPoly, toolRadius, z);
                     if (clearedArc.length > 0) {
                         cleared.push(...POLY.flatten(clearedArc));
                     }
                     
-                    // Mill back along the right boundary contour to the end of the previous arc (if i > 0)
+                    // --- RIGHT WALL CONTOUR MILLING (if not the first arc) ---
+                    // After milling the arc to its right-hand endpoint (pEnd_i), we mill back along the
+                    // right pocket boundary to the end of the previous arc (pEnd_prev).
+                    // Moving from outer to inner along the right wall maintains climb-milling (material is to the right).
                     if (i > 0) {
                         let pEnd_i = arc[arc.length - 1];
                         let prevArc = branch.arcs[i - 1];
                         let pEnd_prev = prevArc[prevArc.length - 1];
                         
+                        // Find the closest contour loop of the limit polygon to project onto
                         let bestLp = null;
                         let minDistLp = Infinity;
                         if (limitPoly) {
@@ -1376,10 +1622,13 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                         }
                         
                         if (bestLp) {
+                            // projectToSegment and getShortestContourSegment project raw endpoints onto the physical boundary,
+                            // then trace the exact wall contours between them. This forces the toolpath to be perfectly parallel
+                            // and colinear with straight pocket walls, avoiding angular drift.
                             let rightWallPts = getShortestContourSegment(bestLp, pEnd_i, pEnd_prev);
                             combinedPts.push(...rightWallPts.slice(1)); // exclude start to avoid duplicate
                             
-                            // Update cleared area
+                            // Update cleared area tracker
                             let rightWallPoly = newPolygon().setOpen().addPoints(rightWallPts);
                             let clearedRight = expandToolpath(rightWallPoly, toolRadius, z);
                             if (clearedRight.length > 0) {
@@ -1388,20 +1637,27 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                         }
                     }
                     
-                    // If this is not the last arc, Z-hop back to the beginning of the current arc,
-                    // then mill along left boundary contour to the start of the next arc
+                    // --- Z-HOP & LEFT WALL CONTOUR MILLING (if not the last arc) ---
+                    // If we have more arcs to clear in this branch, we need to transition from the right wall
+                    // back to the start of the next arc (which begins on the left wall).
+                    // Rather than dragging the tool across the pocket bottom, we perform a vertical Z-hop retract,
+                    // rapid-travel, plunge, and then mill along the left wall contour to the next start (pStart_next).
                     if (i < k - 1) {
                         let lastPt = combinedPts[combinedPts.length - 1];
                         let pStart_curr = arc[0];
                         let nextArc = branch.arcs[i + 1];
                         let pStart_next = nextArc[0];
                         
-                        // Z-hop retract
+                        // Vertical Z-hop retract sequence:
+                        // 1. Lift vertically by 0.5mm above the current cut depth z.
+                        // 2. Rapid-travel horizontally at clearance height to the start of the current arc.
+                        // 3. Plunge vertically back to cutting depth z.
                         combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
                         combinedPts.push(newPoint(pStart_curr.x, pStart_curr.y, z + 0.5));
                         combinedPts.push(newPoint(pStart_curr.x, pStart_curr.y, z));
                         
-                        // Mill left wall boundary contour
+                        // Mill the left wall boundary contour from pStart_curr to pStart_next.
+                        // Moving from inner to outer along the left wall maintains climb-milling (material is to the left).
                         let bestLp = null;
                         let minDistLp = Infinity;
                         if (limitPoly) {
@@ -1415,10 +1671,11 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                         }
                         
                         if (bestLp) {
+                            // Trace the left wall boundary using segment-projected parallel paths
                             let leftWallPts = getShortestContourSegment(bestLp, pStart_curr, pStart_next);
                             combinedPts.push(...leftWallPts.slice(1)); // exclude start to avoid duplicate
                             
-                            // Update cleared area
+                            // Update cleared area tracker
                             let leftWallPoly = newPolygon().setOpen().addPoints(leftWallPts);
                             let clearedLeft = expandToolpath(leftWallPoly, toolRadius, z);
                             if (clearedLeft.length > 0) {
@@ -1428,45 +1685,70 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                     }
                 }
                 
-                // Last arc tip finishing pass (keep the smaller finishing pass)
-                let lastArc = branch.arcs[k - 1];
-                let pStart_last = lastArc[0];
-                let pEnd_last = lastArc[lastArc.length - 1];
-                
-                let bestLp = null;
-                let minDistLp = Infinity;
-                if (limitPoly) {
-                    for (let lp of limitPoly) {
-                        let dist = pEnd_last.distToPolySegments(lp);
-                        if (dist < minDistLp) {
-                            minDistLp = dist;
-                            bestLp = lp;
+                if (branch.trochoidPath) {
+                    // Z-hop from the end of the last circular arc to the start of the trochoidal slotting path
+                    let lastPt = combinedPts[combinedPts.length - 1];
+                    let tStartPt = branch.trochoidPath[0];
+                    combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
+                    combinedPts.push(newPoint(tStartPt.x, tStartPt.y, z + 0.5));
+                    combinedPts.push(newPoint(tStartPt.x, tStartPt.y, z));
+                    
+                    // Append the trochoidal path (exclude the first point since we plunged to it)
+                    combinedPts.push(...branch.trochoidPath.slice(1));
+                    
+                    // Update cleared area in Pass 1 with the swept area of the slot
+                    let trochoidPoly = newPolygon().setOpen().addPoints(branch.trochoidPath);
+                    let clearedTrochoid = expandToolpath(trochoidPoly, toolRadius, z);
+                    if (clearedTrochoid.length > 0) {
+                        cleared.push(...POLY.flatten(clearedTrochoid));
+                    }
+                } else {
+                    // --- OUTMOST ARC TIP FINISHING PASS ---
+                    // After completing the final arc (lastArc) and milling back along the right wall contour, the tool
+                    // is left at the end of the previous arc (pEnd_{last-1}). We perform a Z-hop back to the tip's end (pEnd_last),
+                    // and then mill along the outer boundary tip contour to the tip's start (pStart_last).
+                    // This clears the remaining boundary stock at the outermost tip of the channel.
+                    let lastArc = branch.arcs[k - 1];
+                    let pStart_last = lastArc[0];
+                    let pEnd_last = lastArc[lastArc.length - 1];
+                    
+                    let bestLp = null;
+                    let minDistLp = Infinity;
+                    if (limitPoly) {
+                        for (let lp of limitPoly) {
+                            let dist = pEnd_last.distToPolySegments(lp);
+                            if (dist < minDistLp) {
+                                minDistLp = dist;
+                                bestLp = lp;
+                            }
                         }
                     }
-                }
-                
-                if (bestLp) {
-                    // If k > 1, the tool is at pEnd_{last-1} after milling back along the right wall.
-                    // We need to Z-hop from pEnd_{last-1} to pEnd_last before tracing the tip.
-                    if (k > 1) {
-                        let lastPt = combinedPts[combinedPts.length - 1];
-                        combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
-                        combinedPts.push(newPoint(pEnd_last.x, pEnd_last.y, z + 0.5));
-                        combinedPts.push(newPoint(pEnd_last.x, pEnd_last.y, z));
-                    }
                     
-                    let tipPts = getShortestContourSegment(bestLp, pEnd_last, pStart_last);
-                    combinedPts.push(...tipPts.slice(1));
-                    
-                    // Update cleared area with tip pass
-                    let tipPoly = newPolygon().setOpen().addPoints(tipPts);
-                    let clearedTip = expandToolpath(tipPoly, toolRadius, z);
-                    if (clearedTip.length > 0) {
-                        cleared.push(...POLY.flatten(clearedTip));
+                    if (bestLp) {
+                        // Z-hop from the inner position (pEnd_{last-1}) back to the outermost tip endpoint (pEnd_last).
+                        // (Skip this Z-hop if the branch only has a single arc, k = 1, as the tool is already at the tip).
+                        if (k > 1) {
+                            let lastPt = combinedPts[combinedPts.length - 1];
+                            combinedPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
+                            combinedPts.push(newPoint(pEnd_last.x, pEnd_last.y, z + 0.5));
+                            combinedPts.push(newPoint(pEnd_last.x, pEnd_last.y, z));
+                        }
+                        
+                        // Trace the outer boundary around the tip from pEnd_last to pStart_last
+                        let tipPts = getShortestContourSegment(bestLp, pEnd_last, pStart_last);
+                        combinedPts.push(...tipPts.slice(1));
+                        
+                        // Update cleared area with tip pass
+                        let tipPoly = newPolygon().setOpen().addPoints(tipPts);
+                        let clearedTip = expandToolpath(tipPoly, toolRadius, z);
+                        if (clearedTip.length > 0) {
+                            cleared.push(...POLY.flatten(clearedTip));
+                        }
                     }
                 }
             }
 
+            // Pack the entire linked sequence of points as a single toolpath segment
             if (combinedPts.length > 1) {
                 classifiedSegments.push({
                     type: "spiral",
@@ -1476,10 +1758,30 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                     n: combinedPts.length
                 });
             }
+
+            for (let branch of branches) {
+                if (branch.slotCenterline && branch.slotCenterline.length > 1) {
+                    classifiedSegments.push({
+                        type: "centerline",
+                        pts: branch.slotCenterline,
+                        isInnermost: true,
+                        isClosed: false,
+                        n: branch.slotCenterline.length
+                    });
+                }
+            }
         }
     }
 
     // --- PASS 2: GEOMETRY GENERATION ---
+    // Convert the raw sequences of point coordinates into Polygon objects for CAM output.
+    //
+    // CRITICAL DETAIL:
+    // We instantiate the newPolygon() as open and copy all points. Then we set 'p.z = z'
+    // on the polygon container. We MUST NOT call 'POLY.setZ([p], z)', because that helper
+    // iterates through all internal points and sets their 'pt.z = z'. Doing so would overwrite
+    // and flatten all the z+0.5 Z-hop retract coordinates back to the cutting depth z, wiping
+    // out vertical moves. Setting 'p.z = z' preserves individual point z-coordinates.
     let resultSegments = [];
     for (let seg of classifiedSegments) {
         let segmentPolys = [];
