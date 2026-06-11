@@ -295,24 +295,24 @@ class OpAdaptive extends CamOp {
                                 .setLayer("adaptive-skeleton", { line: 0x0000ff }, false)
                                 .addPolys(seg.polys);
                         } else if (seg.type === 'slotting-area') {
-                            // Planned slotting area drawn in Dark Orange (0xcc6600) with semi-transparent faces
+                            // Planned slotting area drawn in Dark Orange (0xcc6600) with solid faces
                             layers1
-                                .setLayer("adaptive-area-slotting", { line: 0xcc6600, face: 0xcc6600, opacity: 0.15, fat: 1.5 }, false)
+                                .setLayer("adaptive-area-slotting", { line: 0xcc6600, face: 0xcc6600, fat: 1.5 }, false)
                                 .addAreas(seg.polys, { outline: true });
                         } else if (seg.type === 'peel-area') {
-                            // Planned peeling area drawn in Dark Green (0x009900) with semi-transparent faces
+                            // Planned peeling area drawn in Dark Green (0x009900) with solid faces
                             layers1
-                                .setLayer("adaptive-area-peel", { line: 0x009900, face: 0x009900, opacity: 0.15, fat: 1.5 }, false)
+                                .setLayer("adaptive-area-peel", { line: 0x009900, face: 0x009900, fat: 1.5 }, false)
                                 .addAreas(seg.polys, { outline: true });
                         } else if (seg.type === 'machined-area') {
-                            // Total machined area (actually reachable by the tool) drawn in Light Blue (0x3366cc) with semi-transparent faces
+                            // Total machined area (actually reachable by the tool) drawn in Light Blue (0x3366cc) with solid faces
                             layers1
-                                .setLayer("adaptive-area-machined", { line: 0x3366cc, face: 0x3366cc, opacity: 0.08, fat: 1.5 }, false)
+                                .setLayer("adaptive-area-machined", { line: 0x3366cc, face: 0x3366cc, fat: 1.5 }, false)
                                 .addAreas(seg.polys, { outline: true });
                         } else if (seg.type === 'unreachable-area') {
-                            // Unreachable area drawn in Red (0xcc0000) with semi-transparent faces
+                            // Unreachable area drawn in Red (0xcc0000) with solid faces
                             layers1
-                                .setLayer("adaptive-area-unreachable", { line: 0xcc0000, face: 0xcc0000, opacity: 0.15, fat: 1.5 }, false)
+                                .setLayer("adaptive-area-unreachable", { line: 0xcc0000, face: 0xcc0000, fat: 1.5 }, false)
                                 .addAreas(seg.polys, { outline: true });
                         }
                     }
@@ -1659,24 +1659,6 @@ function resampleDensePolygon(poly, delta_d) {
     return newPoly;
 }
 
-function computePlannedSlottingArea(slotChains, toolRadius, toolOver, z) {
-    let chainPolys = [];
-    let stepSize = toolOver * 0.35;
-    for (let chain of slotChains) {
-        let resampled = resampleChain(chain, stepSize);
-        for (let v of resampled) {
-            let r = v.radius;
-            if (r > 0.01) {
-                let circle = newPolygon().centerCircle(newPoint(v.x, v.y, z), r, 64);
-                chainPolys.push(circle);
-            }
-        }
-    }
-    if (chainPolys.length > 0) {
-        return POLY.union(chainPolys, 0, true);
-    }
-    return [];
-}
 
 function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles, rampContours, plungePoints, bounds, stock, leave_xy, clearFirst, maGraph, op) {
     let N = levels.length;
@@ -1690,6 +1672,7 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
     // start exactly inside the entry holes (e.g. at the helical center point) and step outwards.
 
     let coreSegments = [];
+    let allLimitPolys = [];
 
     let innermostPolys = flatLevels[N - 1];
     for (let poly of innermostPolys) {
@@ -1721,6 +1704,7 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                     let expanded = POLY.expand(core, toolOver);
                     if (expanded) {
                         limitPoly = POLY.flatten(expanded);
+                        allLimitPolys.push(...limitPoly);
                     }
                 }
             }
@@ -2143,7 +2127,7 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
         if (toolCenterArea && toolCenterArea.length > 0) {
             let expanded = POLY.offset(toolCenterArea, toolRadius, { join: 1, arc: arcTol, z });
             if (expanded) {
-                reachableArea = POLY.flatten(expanded);
+                reachableArea = expanded;
             }
         }
         
@@ -2151,18 +2135,46 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
         let unreachableArea = [];
         POLY.subtract([ pocketRoot.clone(true) ], reachableArea, unreachableArea, undefined, undefined, 0);
         
-        let plannedSlottingArea = computePlannedSlottingArea(slotChains, toolRadius, toolOver, z);
         let plannedPeelingArea = [];
-        if (plannedSlottingArea.length > 0 && reachableArea.length > 0) {
-            POLY.subtract(reachableArea, plannedSlottingArea, plannedPeelingArea, undefined, undefined, 0);
-        } else {
-            plannedPeelingArea = reachableArea.map(p => p.clone(true));
+        if (allLimitPolys.length > 0) {
+            let expandedPeel = POLY.offset(allLimitPolys, toolRadius, { join: 1, arc: arcTol, z });
+            if (expandedPeel && expandedPeel.length > 0) {
+                let diff = [];
+                POLY.subtract(reachableArea, expandedPeel, diff, undefined, undefined, 0);
+                POLY.subtract(reachableArea, diff, plannedPeelingArea, undefined, undefined, 0);
+            }
+        }
+
+        let plannedSlottingArea = [];
+        if (reachableArea.length > 0) {
+            if (plannedPeelingArea.length > 0) {
+                POLY.subtract(reachableArea, plannedPeelingArea, plannedSlottingArea, undefined, undefined, 0);
+            } else {
+                plannedSlottingArea = reachableArea.map(p => p.clone(true));
+            }
         }
         
-        POLY.setZ(reachableArea, z);
-        POLY.setZ(unreachableArea, z);
-        POLY.setZ(plannedPeelingArea, z);
+        console.log("CAM-ADAPTIVE-DEBUG:", {
+            z,
+            pocketRoot_inner_count: pocketRoot.inner ? pocketRoot.inner.length : 0,
+            pocketRoot_windings: pocketRoot.isClockwise() + " / " + (pocketRoot.inner || []).map(p => p.isClockwise()).join(","),
+            toolCenterArea_len: toolCenterArea.length,
+            toolCenterArea_inners: toolCenterArea.map(p => p.inner ? p.inner.length : 0),
+            reachableArea_len: reachableArea.length,
+            reachableArea_inners: reachableArea.map(p => p.inner ? p.inner.length : 0),
+            reachableArea_windings: reachableArea.map(p => p.isClockwise() + " / " + (p.inner || []).map(pi => pi.isClockwise()).join(",")),
+            plannedSlottingArea_len: plannedSlottingArea.length,
+            plannedPeelingArea_len: plannedPeelingArea.length,
+            plannedPeelingArea_inners: plannedPeelingArea.map(p => p.inner ? p.inner.length : 0),
+            plannedPeelingArea_windings: plannedPeelingArea.map(p => p.isClockwise() + " / " + (p.inner || []).map(pi => pi.isClockwise()).join(",")),
+            plannedPeelingArea_earcut_lengths: plannedPeelingArea.map(p => p.earcut().length),
+            unreachableArea_len: unreachableArea.length
+        });
+        
+        POLY.setZ(reachableArea, z - 0.02);
+        POLY.setZ(plannedPeelingArea, z - 0.01);
         POLY.setZ(plannedSlottingArea, z);
+        POLY.setZ(unreachableArea, z + 0.01);
         
         if (reachableArea.length > 0) {
             resultSegments.push({ type: "machined-area", polys: reachableArea });
