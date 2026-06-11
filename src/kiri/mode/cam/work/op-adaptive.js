@@ -1470,146 +1470,288 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
                     }
                 }
 
-                if (R_largest > H_r) {
-                    let pitch = toolOver;
-                    let r0 = H_r;
-                    let r1 = R_largest;
-                    let totalAngle = ((r1 - r0) / pitch) * 2 * Math.PI;
-                    let steps = Math.ceil(totalAngle / (Math.PI / 16));
-                    if (steps < 8) steps = 8;
-                    
-                    let spiralPts = [];
-                    for (let step = 0; step <= steps; step++) {
-                        let theta = (step / steps) * totalAngle;
-                        let r = r0 + (pitch / (2 * Math.PI)) * theta;
-                        let x = entryPt.x + r * Math.cos(theta);
-                        let y = entryPt.y + r * Math.sin(theta);
-                        spiralPts.push(newPoint(x, y, z));
-                    }
-                    combinedPts.push(...spiralPts);
-
-                    let closingSteps = 64;
-                    let lastPt = spiralPts[spiralPts.length - 1];
-                    let startAngle = Math.atan2(lastPt.y - entryPt.y, lastPt.x - entryPt.x);
-                    let closingPts = [];
-                    for (let step = 1; step <= closingSteps; step++) {
-                        let theta = startAngle + (step / closingSteps) * 2 * Math.PI;
-                        let x = entryPt.x + r1 * Math.cos(theta);
-                        let y = entryPt.y + r1 * Math.sin(theta);
-                        closingPts.push(newPoint(x, y, z));
-                    }
-                    combinedPts.push(...closingPts);
-                }
-
-                // Generate morphed loops using Ray-Casting Morphing
-                let morphedLoops = [];
-                if (limitPoly && limitPoly.length > 0) {
-                    let delta_d = Math.max(0.05, Math.min(0.5, toolOver * 0.2));
-                    
-                    // Find the outer pocket boundary containing entryPt
-                    let outerPoly = null;
-                    for (let lp of limitPoly) {
-                        if (entryPt.isInPolygon(lp)) {
-                            outerPoly = lp;
-                            break;
-                        }
-                    }
-                    if (!outerPoly) outerPoly = limitPoly[0];
-                    
-                    let resampledLp = resampleDensePolygon(outerPoly, delta_d);
-                    
-                    let R_max_dist = 0;
-                    for (let p of resampledLp.points) {
-                        R_max_dist = Math.max(R_max_dist, entryPt.distTo2D(p));
-                    }
-                    
-                    let d = R_max_dist - R_largest;
-                    if (d > 0) {
-                        let numPasses = Math.ceil(d / toolOver);
-                        if (numPasses < 1) numPasses = 1;
-                        
-                        for (let i = 1; i <= numPasses; i++) {
-                            let t = i / numPasses;
-                            let morphedPts = [];
-                            
-                            for (let p of resampledLp.points) {
-                                let vx = p.x - entryPt.x;
-                                let vy = p.y - entryPt.y;
-                                let r = Math.hypot(vx, vy);
-                                r = Math.max(R_largest, r);
-                                let ux = vx / r;
-                                let uy = vy / r;
-                                
-                                let r_t = (1 - t) * R_largest + t * r;
-                                let mx = entryPt.x + r_t * ux;
-                                let my = entryPt.y + r_t * uy;
-                                morphedPts.push(newPoint(mx, my, z));
-                            }
-                            
-                            let rawLoop = newPolygon(morphedPts);
-                            if (outerPoly.isOpen()) {
-                                rawLoop.setOpen();
-                            } else {
-                                rawLoop.setClosed();
-                            }
-                            
-                            // Clip the morphed loop against limitPoly (retaining only parts inside the pocket)
-                            let clipped = POLY.trimTo([rawLoop], limitPoly);
-                            if (clipped && clipped.length > 0) {
-                                for (let c of clipped) {
-                                    c.setClosed();
-                                }
-                                POLY.setZ(clipped, z);
-                                morphedLoops.push(...clipped);
-                            }
-                        }
-                    }
-                }
-
-                // Link morphed loops to combinedPts
-                let currentPt = combinedPts[combinedPts.length - 1] || entryPt;
-                let remainingLoops = [...morphedLoops];
-                while (remainingLoops.length > 0) {
-                    let bestIdx = -1;
-                    let minDist = Infinity;
-                    let bestStartIdx = -1;
-                    for (let i = 0; i < remainingLoops.length; i++) {
-                        let loop = remainingLoops[i];
-                        for (let j = 0; j < loop.points.length; j++) {
-                            let dist = currentPt.distTo2D(loop.points[j]);
-                            if (dist < minDist) {
-                                minDist = dist;
-                                bestIdx = i;
-                                bestStartIdx = j;
-                            }
-                        }
-                    }
-                    
-                    if (bestIdx !== -1) {
-                        let loop = remainingLoops[bestIdx];
-                        let pts = loop.points;
-                        let rotated = [...pts.slice(bestStartIdx), ...pts.slice(0, bestStartIdx)];
-                        
-                        if (minDist > toolRadius * 2) {
-                            combinedPts.push(newPoint(currentPt.x, currentPt.y, z + 0.5));
-                            combinedPts.push(newPoint(rotated[0].x, rotated[0].y, z + 0.5));
-                            combinedPts.push(newPoint(rotated[0].x, rotated[0].y, z));
-                        }
-                        combinedPts.push(...rotated);
-                        combinedPts.push(rotated[0].clone());
-                        
-                        currentPt = rotated[0];
-                        remainingLoops.splice(bestIdx, 1);
-                    } else {
+                let outerPoly = null;
+                for (let lp of limitPoly) {
+                    if (entryPt.isInPolygon(lp)) {
+                        outerPoly = lp;
                         break;
                     }
                 }
-            }
+                if (!outerPoly) outerPoly = limitPoly[0];
 
-            if (combinedPts.length > 1) {
-                coreSegments.push({ type: "spiral", pts: combinedPts, helicalCircles: helicalCircles.filter(c => c.bounds.center().distTo2D(entryPt) < 0.1), rampContours: rampContours.filter(c => c.first().distTo2D(entryPt) < 0.1), plungePoints: plungePoints.filter(c => c.bounds.center().distTo2D(entryPt) < 0.1) });
-                let clearedCore = expandToolpath(newPolygon().setOpen().addPoints(combinedPts), toolRadius, z);
+                let pitch = toolOver;
+                let r0 = H_r;
+
+                // 1. Generate Archimedean spiral up to R_largest, then a 360-degree closing circle
+                let spiralPts = [];
+                let totalAngle = ((R_largest - r0) / pitch) * 2 * Math.PI;
+                let steps = Math.ceil(totalAngle / (Math.PI / 16));
+                if (steps < 8) steps = 8;
+                for (let step = 0; step <= steps; step++) {
+                    let theta = (step / steps) * totalAngle;
+                    let r = r0 + (pitch / (2 * Math.PI)) * theta;
+                    let x = entryPt.x + r * Math.cos(theta);
+                    let y = entryPt.y + r * Math.sin(theta);
+                    spiralPts.push(newPoint(x, y, z));
+                }
+
+                let closingSteps = 64;
+                let lastPt = spiralPts[spiralPts.length - 1];
+                let startAngle = Math.atan2(lastPt.y - entryPt.y, lastPt.x - entryPt.x);
+                for (let step = 1; step <= closingSteps; step++) {
+                    let theta = startAngle + (step / closingSteps) * 2 * Math.PI;
+                    let x = entryPt.x + R_largest * Math.cos(theta);
+                    let y = entryPt.y + R_largest * Math.sin(theta);
+                    spiralPts.push(newPoint(x, y, z));
+                }
+
+                // Add the core spiral to coreSegments
+                coreSegments.push({
+                    type: "spiral",
+                    pts: spiralPts,
+                    helicalCircles: helicalCircles.filter(c => c.bounds.center().distTo2D(entryPt) < 0.1),
+                    rampContours: rampContours.filter(c => c.first().distTo2D(entryPt) < 0.1),
+                    plungePoints: plungePoints.filter(c => c.bounds.center().distTo2D(entryPt) < 0.1)
+                });
+                let clearedCore = expandToolpath(newPolygon().setOpen().addPoints(spiralPts), toolRadius, z);
                 if (clearedCore.length > 0) cleared.push(...POLY.flatten(clearedCore));
+
+                // 2. Corner Detection via Radial Ray-Casting
+                let N_samples = 128;
+                let widths = [];
+                for (let i = 0; i < N_samples; i++) {
+                    let theta = (i / N_samples) * 2 * Math.PI;
+                    let dist = rayIntersectPolygon(entryPt, theta, outerPoly);
+                    let w = dist - R_largest;
+                    widths.push({ theta, w });
+                }
+
+                let active = [];
+                for (let i = 0; i < N_samples; i++) {
+                    if (widths[i].w >= toolRadius) {
+                        active.push(i);
+                    }
+                }
+
+                let intervals = [];
+                if (active.length > 0) {
+                    if (active.length === N_samples) {
+                        intervals.push({ indices: Array.from({ length: N_samples }, (_, i) => i) });
+                    } else {
+                        // Find first inactive index to anchor search
+                        let startIdx = 0;
+                        for (let i = 0; i < N_samples; i++) {
+                            if (widths[i].w < toolRadius) {
+                                startIdx = i;
+                                break;
+                            }
+                        }
+
+                        let currentInterval = null;
+                        for (let step = 0; step < N_samples; step++) {
+                            let idx = (startIdx + step) % N_samples;
+                            let item = widths[idx];
+                            if (item.w >= toolRadius) {
+                                if (!currentInterval) {
+                                    currentInterval = { indices: [idx] };
+                                } else {
+                                    currentInterval.indices.push(idx);
+                                }
+                            } else {
+                                if (currentInterval) {
+                                    intervals.push(currentInterval);
+                                    currentInterval = null;
+                                }
+                            }
+                        }
+                        if (currentInterval) {
+                            intervals.push(currentInterval);
+                        }
+                    }
+                }
+
+                // 3. Segmented circle arc offsetting in each corner
+                for (let interval of intervals) {
+                    let step = 1;
+                    let slotThreshold = toolRadius + toolOver + leave_xy;
+                    let branchArcs = [];
+
+                    while (true) {
+                        let offsetPts = [];
+                        let K_blend = 6;
+                        let R_prev = R_largest + (step - 1) * toolOver;
+                        let R_curr = R_largest + step * toolOver;
+
+                        // 1. Ease-in: gradually spiral outward from R_prev to R_curr
+                        let firstIdx = interval.indices[0];
+                        for (let i = 0; i < K_blend; i++) {
+                            let idx = (firstIdx - K_blend + i + N_samples) % N_samples;
+                            let theta = widths[idx].theta;
+                            let r = R_prev + (i / K_blend) * (R_curr - R_prev);
+                            let ox = entryPt.x + r * Math.cos(theta);
+                            let oy = entryPt.y + r * Math.sin(theta);
+                            offsetPts.push(newPoint(ox, oy, z));
+                        }
+
+                        // 2. Main corner arc
+                        for (let idx of interval.indices) {
+                            let theta = widths[idx].theta;
+                            let ox = entryPt.x + R_curr * Math.cos(theta);
+                            let oy = entryPt.y + R_curr * Math.sin(theta);
+                            offsetPts.push(newPoint(ox, oy, z));
+                        }
+
+                        // 3. Ease-out: gradually spiral inward from R_curr to R_prev
+                        let lastIdx = interval.indices[interval.indices.length - 1];
+                        for (let i = 0; i < K_blend; i++) {
+                            let idx = (lastIdx + 1 + i) % N_samples;
+                            let theta = widths[idx].theta;
+                            let r = R_curr - ((i + 1) / K_blend) * (R_curr - R_prev);
+                            let ox = entryPt.x + r * Math.cos(theta);
+                            let oy = entryPt.y + r * Math.sin(theta);
+                            offsetPts.push(newPoint(ox, oy, z));
+                        }
+
+                        let offsetPoly = newPolygon(offsetPts).setOpen();
+                        let clipped = offsetPoly.cut([outerPoly], true);
+                        if (!clipped || clipped.length === 0) {
+                            break;
+                        }
+
+                        // Take the longest clipped arc as the primary arc for this step
+                        clipped.sort((a, b) => b.first().distTo2D(b.last()) - a.first().distTo2D(a.last()));
+                        let bestArc = clipped[0];
+                        let dist = bestArc.first().distTo2D(bestArc.last());
+                        if (dist < slotThreshold) {
+                            // Qualifies for slotting, stop offsetting
+                            break;
+                        }
+                        branchArcs.push(bestArc);
+                        step++;
+                    }
+
+                    let k = branchArcs.length;
+                    if (k > 0) {
+                        let branchPts = [];
+                        let firstArc = branchArcs[0];
+                        let startPt = firstArc.points[0];
+                        let theta_start = Math.atan2(startPt.y - entryPt.y, startPt.x - entryPt.x);
+                        let R_safe = R_largest;
+                        let px = entryPt.x + R_safe * Math.cos(theta_start);
+                        let py = entryPt.y + R_safe * Math.sin(theta_start);
+                        let plungePt = newPoint(px, py, z);
+
+                        // Safe entry plunge sequence
+                        branchPts.push(newPoint(plungePt.x, plungePt.y, z + 0.5));
+                        branchPts.push(newPoint(plungePt.x, plungePt.y, z));
+                        branchPts.push(startPt);
+
+                        for (let i = 0; i < k; i++) {
+                            let arc = branchArcs[i];
+                            if (i > 0) {
+                                branchPts.push(...arc.points.slice(1));
+                            } else {
+                                branchPts.push(...arc.points);
+                            }
+
+                            // Mill back along the right wall contour (climb conventional return)
+                            if (i > 0) {
+                                let pEnd_i = arc.last();
+                                let prevArc = branchArcs[i - 1];
+                                let pEnd_prev = prevArc.last();
+
+                                let bestLp = null;
+                                let minDistLp = Infinity;
+                                if (limitPoly) {
+                                    for (let lp of limitPoly) {
+                                        let dist = pEnd_i.distTo2D(lp.bounds.center()); // approximate using center for loop choice
+                                        let loopDist = pEnd_i.distToPolySegments(lp);
+                                        if (loopDist < minDistLp) {
+                                            minDistLp = loopDist;
+                                            bestLp = lp;
+                                        }
+                                    }
+                                }
+
+                                if (bestLp) {
+                                    let rightWallPts = getShortestContourSegment(bestLp, pEnd_i, pEnd_prev);
+                                    branchPts.push(...rightWallPts.slice(1));
+                                }
+                            }
+
+                            // Z-hop to start of current arc, then mill left wall to start of next
+                            if (i < k - 1) {
+                                let lastPt = branchPts[branchPts.length - 1];
+                                let pStart_curr = arc.first();
+                                let nextArc = branchArcs[i + 1];
+                                let pStart_next = nextArc.first();
+
+                                branchPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
+                                branchPts.push(newPoint(pStart_curr.x, pStart_curr.y, z + 0.5));
+                                branchPts.push(newPoint(pStart_curr.x, pStart_curr.y, z));
+
+                                let bestLp = null;
+                                let minDistLp = Infinity;
+                                if (limitPoly) {
+                                    for (let lp of limitPoly) {
+                                        let loopDist = pStart_curr.distToPolySegments(lp);
+                                        if (loopDist < minDistLp) {
+                                            minDistLp = loopDist;
+                                            bestLp = lp;
+                                        }
+                                    }
+                                }
+
+                                if (bestLp) {
+                                    let leftWallPts = getShortestContourSegment(bestLp, pStart_curr, pStart_next);
+                                    branchPts.push(...leftWallPts.slice(1));
+                                }
+                            }
+                        }
+
+                        // Outer boundary arc tip finishing pass
+                        let lastArc = branchArcs[k - 1];
+                        let pStart_last = lastArc.first();
+                        let pEnd_last = lastArc.last();
+
+                        let bestLp = null;
+                        let minDistLp = Infinity;
+                        if (limitPoly) {
+                            for (let lp of limitPoly) {
+                                let loopDist = pEnd_last.distToPolySegments(lp);
+                                if (loopDist < minDistLp) {
+                                    minDistLp = loopDist;
+                                    bestLp = lp;
+                                }
+                            }
+                        }
+
+                        if (bestLp) {
+                            if (k > 1) {
+                                let lastPt = branchPts[branchPts.length - 1];
+                                branchPts.push(newPoint(lastPt.x, lastPt.y, z + 0.5));
+                                branchPts.push(newPoint(pEnd_last.x, pEnd_last.y, z + 0.5));
+                                branchPts.push(newPoint(pEnd_last.x, pEnd_last.y, z));
+                            }
+
+                            let tipPts = getShortestContourSegment(bestLp, pEnd_last, pStart_last);
+                            branchPts.push(...tipPts.slice(1));
+                        }
+
+                        // Register the branch toolpath
+                        coreSegments.push({
+                            type: "spiral",
+                            pts: branchPts
+                        });
+
+                        // Expand cleared region with branch toolpath
+                        let branchPoly = newPolygon().setOpen().addPoints(branchPts);
+                        let clearedBranch = expandToolpath(branchPoly, toolRadius, z);
+                        if (clearedBranch.length > 0) {
+                            cleared.push(...POLY.flatten(clearedBranch));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1794,6 +1936,113 @@ function rotatePolyToPoint(poly, targetPt) {
         if (dist < minDist) { minDist = dist; closestIndex = i; }
     }
     if (closestIndex > 0) poly.points = [...pts.slice(closestIndex), ...pts.slice(0, closestIndex)];
+}
+function findSegmentIntersection(p1, p2, p3, p4) {
+    let dx1 = p2.x - p1.x;
+    let dy1 = p2.y - p1.y;
+    let dx2 = p4.x - p3.x;
+    let dy2 = p4.y - p3.y;
+    let det = dx2 * dy1 - dy2 * dx1;
+    if (Math.abs(det) < 1e-9) return null;
+    let t = (dx2 * (p3.y - p1.y) - dy2 * (p3.x - p1.x)) / det;
+    let u = (dx1 * (p3.y - p1.y) - dy1 * (p3.x - p1.x)) / det;
+    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+        return {
+            x: p1.x + t * dx1,
+            y: p1.y + t * dy1,
+            t: t,
+            u: u
+        };
+    }
+    return null;
+}
+
+function findPolyIntersections(polyA, polyB, z) {
+    let inters = [];
+    let ptsA = polyA.points;
+    let ptsB = polyB.points;
+    let nA = ptsA.length;
+    let nB = ptsB.length;
+    for (let i = 0; i < nA - 1; i++) {
+        let p1 = ptsA[i];
+        let p2 = ptsA[i + 1];
+        for (let j = 0; j < nB; j++) {
+            let p3 = ptsB[j];
+            let p4 = ptsB[(j + 1) % nB];
+            let inter = findSegmentIntersection(p1, p2, p3, p4);
+            if (inter) {
+                inters.push({
+                    pt: newPoint(inter.x, inter.y, z),
+                    idxA: i + inter.t,
+                    idxB: j + inter.u
+                });
+            }
+        }
+    }
+    return inters;
+}
+
+function getPointAtFractionalIndex(poly, idx) {
+    let pts = poly.points;
+    let i = Math.floor(idx);
+    let t = idx - i;
+    if (i >= pts.length - 1) return pts[pts.length - 1].clone();
+    if (i < 0) return pts[0].clone();
+    let p1 = pts[i];
+    let p2 = pts[i + 1];
+    return newPoint(p1.x + t * (p2.x - p1.x), p1.y + t * (p2.y - p1.y), p1.z);
+}
+
+function extractSpiralSegment(fullSpiral, sa, sb) {
+    let pts = [];
+    let rev = false;
+    if (sa > sb) {
+        let tmp = sa;
+        sa = sb;
+        sb = tmp;
+        rev = true;
+    }
+    let p1 = getPointAtFractionalIndex(fullSpiral, sa);
+    pts.push(p1);
+    let idxStart = Math.ceil(sa);
+    let idxEnd = Math.floor(sb);
+    for (let i = idxStart; i <= idxEnd; i++) {
+        pts.push(fullSpiral.points[i].clone());
+    }
+    let p2 = getPointAtFractionalIndex(fullSpiral, sb);
+    if (pts[pts.length - 1].distTo2D(p2) > 0.001) {
+        pts.push(p2);
+    }
+    if (rev) {
+        pts.reverse();
+    }
+    return pts;
+}
+function rayIntersectPolygon(origin, theta, poly) {
+    let ux = Math.cos(theta);
+    let uy = Math.sin(theta);
+    let pts = poly.points;
+    let n = pts.length;
+    let minDist = Infinity;
+    for (let i = 0; i < n; i++) {
+        let p1 = pts[i];
+        let p2 = pts[(i + 1) % n];
+        let vx = p2.x - p1.x;
+        let vy = p2.y - p1.y;
+        
+        let det = vx * uy - vy * ux;
+        if (Math.abs(det) < 1e-9) continue;
+        
+        let d = (vx * (p1.y - origin.y) - vy * (p1.x - origin.x)) / det;
+        let t = (ux * (p1.y - origin.y) - uy * (p1.x - origin.x)) / det;
+        
+        if (d >= 0 && t >= 0 && t <= 1) {
+            if (d < minDist) {
+                minDist = d;
+            }
+        }
+    }
+    return minDist;
 }
 
 export { OpAdaptive };
