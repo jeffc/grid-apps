@@ -137,7 +137,7 @@ class OpAdaptive extends CamOp {
                     outerBoundary = baseShadow;
                 } else {
                     // "clear margin" or "allow entry in stock": Expand part shadow by 1.5x the tool diameter
-                    // to provide enough physical width for multiple concentric passes and trochoidal peeling.
+                    // to provide enough physical width for multiple concentric passes and trochoidal slotting.
                     let expanded = POLY.expand(baseShadow, D * 1.5);
                     if (expanded) {
                         outerBoundary = POLY.flatten(expanded);
@@ -232,92 +232,126 @@ class OpAdaptive extends CamOp {
                 let levels = [ [ poly.clone(true) ] ];
                 levels.push(...nestedLevels);
                 
-                // Generate linked spiral and peeling paths
-                let pocketSegments = generateLinkedToolpath(
-                    levels, toolRadius, toolOver, z,
-                    helicalCircles, rampContours, plungePoints, bounds, stock,
-                    leave_xy, op.clearFirst ?? true, maGraph
-                );
-                allSegments.push(...pocketSegments);
-            }
-
-            // Draw visual layers for preview
-            // If there are no segments, output a single empty slice with the outline
-            if (allSegments.length === 0) {
-                let slice = newSlice(z);
-                let layers = slice.output();
-                
-                // Pocket boundary drawn as a faint/dark outline
-                layers
-                    .setLayer(op.rename ?? "adaptive", { line: 0x555555 }, false)
-                    .addPolys(cutRegion);
-                    
-                addSlices(slice);
-                this.sliceOut.push(slice);
-            } else {
-                for (let seg of allSegments) {
-                    if (seg.polys.length === 0) continue;
-                    
+                    // Add linked peel and slotting paths
+                    let pocketSegments = generateLinkedToolpath(
+                        levels, toolRadius, toolOver, z,
+                        helicalCircles, rampContours, plungePoints, bounds, stock,
+                        leave_xy, op.clearFirst ?? true, maGraph, op
+                    );
+                    allSegments.push(...pocketSegments);
+                }
+    
+                // Draw visual layers for preview
+                // If there are no segments, output a single empty slice with the outline
+                if (allSegments.length === 0) {
                     let slice = newSlice(z);
                     let layers = slice.output();
                     
-                    // Pocket boundary drawn as a faint/dark outline on every slice segment
+                    // Pocket boundary drawn as a faint/dark outline
                     layers
                         .setLayer(op.rename ?? "adaptive", { line: 0x555555 }, false)
                         .addPolys(cutRegion);
-
-                    // Add entry indicators associated with this specific segment
-                    if (seg.helicalCircles && seg.helicalCircles.length > 0) {
-                        layers
-                            .setLayer("helical-entry", { line: 0xff0000 }, false)
-                            .addPolys(seg.helicalCircles);
-                        slice.helicalCircles = seg.helicalCircles.map(c => c.clone(true));
-                    }
-                    if (seg.rampContours && seg.rampContours.length > 0) {
-                        layers
-                            .setLayer("ramp-entry", { line: 0xffff00 }, false)
-                            .addPolys(seg.rampContours);
-                        slice.rampContours = seg.rampContours.map(c => c.clone(true));
-                    }
-                    if (seg.plungePoints && seg.plungePoints.length > 0) {
-                        layers
-                            .setLayer("plunge-entry", { line: 0x00ffff }, false)
-                            .addPolys(seg.plungePoints);
-                        slice.plungePoints = seg.plungePoints.map(p => p.clone(true));
-                    }
-
-                    // Add the actual path of this segment to the appropriate layer
-                    if (seg.type === 'peel') {
-                        // Trochoidal peeling loops drawn in Orange (0xffa500)
-                        layers
-                            .setLayer("adaptive-peel", { line: 0xffa500 }, false)
-                            .addPolys(seg.polys);
-                        slice.camLines = seg.polys;
-                    } else if (seg.type === 'centerline') {
-                        // Slot centerline drawn in Magenta (0xff00ff)
-                        layers
-                            .setLayer("adaptive-centerline", { line: 0xff00ff }, false)
-                            .addPolys(seg.polys);
-                        // Do not set slice.camLines so it is not emitted to G-code
-                    } else if (seg.type === 'skeleton') {
-                        // MAT skeleton debug layer drawn in Blue (0x0000ff)
-                        layers
-                            .setLayer("adaptive-skeleton", { line: 0x0000ff }, false)
-                            .addPolys(seg.polys);
-                        // Do not set slice.camLines so it is not emitted to G-code
-                    } else {
-                        // Spiral morphing toolpath drawn in Green (0x00ff00)
-                        layers
-                            .setLayer("adaptive-spiral", { line: 0x00ff00 }, false)
-                            .addPolys(seg.polys);
-                        slice.camLines = seg.polys;
-                    }
-
-                    // Add slice to widget slices
+                        
                     addSlices(slice);
                     this.sliceOut.push(slice);
+                } else {
+                    // Partition the visualization at each Z-level into exactly two slice layers (slider ticks)
+                    // to cleanly separate planning/geometry analysis from toolpath execution.
+                    
+                    // --- TICK 1: PLANNING & GEOMETRY LAYERS ---
+                    // Contains the high-level planning partition areas, raw pocket boundaries, MAT skeleton,
+                    // and entry point geometry. This slice has no camLines, so it is purely visual and emits no G-code.
+                    let slice1 = newSlice(z);
+                    let layers1 = slice1.output();
+                    
+                    // Draw pocket boundary outline
+                    layers1
+                        .setLayer(op.rename ?? "adaptive", { line: 0x555555 }, false)
+                        .addPolys(cutRegion);
+                        
+                    // Draw helical, ramp, and plunge entry indicators
+                    if (helicalCircles.length > 0) {
+                        layers1
+                            .setLayer("helical-entry", { line: 0xff0000 }, false)
+                            .addPolys(helicalCircles);
+                    }
+                    if (rampContours.length > 0) {
+                        layers1
+                            .setLayer("ramp-entry", { line: 0xffff00 }, false)
+                            .addPolys(rampContours);
+                    }
+                    if (plungePoints.length > 0) {
+                        layers1
+                            .setLayer("plunge-entry", { line: 0x00ffff }, false)
+                            .addPolys(plungePoints);
+                    }
+                    
+                    // Draw skeleton, planned area, and machined area visual overlays
+                    for (let seg of allSegments) {
+                        if (seg.polys.length === 0) continue;
+                        if (seg.type === 'skeleton') {
+                            // MAT skeleton debug layer drawn in Blue (0x0000ff)
+                            layers1
+                                .setLayer("adaptive-skeleton", { line: 0x0000ff }, false)
+                                .addPolys(seg.polys);
+                        } else if (seg.type === 'slotting-area') {
+                            // Planned slotting area drawn in Dark Orange (0xcc6600) with semi-transparent faces
+                            layers1
+                                .setLayer("adaptive-area-slotting", { line: 0xcc6600, face: 0xcc6600, opacity: 0.15, fat: 1.5 }, false)
+                                .addAreas(seg.polys, { outline: true });
+                        } else if (seg.type === 'peel-area') {
+                            // Planned peeling area drawn in Dark Green (0x009900) with semi-transparent faces
+                            layers1
+                                .setLayer("adaptive-area-peel", { line: 0x009900, face: 0x009900, opacity: 0.15, fat: 1.5 }, false)
+                                .addAreas(seg.polys, { outline: true });
+                        } else if (seg.type === 'machined-area') {
+                            // Total machined area (actually reachable by the tool) drawn in Light Blue (0x3366cc) with semi-transparent faces
+                            layers1
+                                .setLayer("adaptive-area-machined", { line: 0x3366cc, face: 0x3366cc, opacity: 0.08, fat: 1.5 }, false)
+                                .addAreas(seg.polys, { outline: true });
+                        } else if (seg.type === 'unreachable-area') {
+                            // Unreachable area drawn in Red (0xcc0000) with semi-transparent faces
+                            layers1
+                                .setLayer("adaptive-area-unreachable", { line: 0xcc0000, face: 0xcc0000, opacity: 0.15, fat: 1.5 }, false)
+                                .addAreas(seg.polys, { outline: true });
+                        }
+                    }
+                    
+                    addSlices(slice1);
+                    this.sliceOut.push(slice1);
+                    
+                    // --- TICK 2: TOOLPATH EXECUTION LAYERS ---
+                    // Contains actual peeling and slotting G-code toolpaths.
+                    // This slice contains the emittable camLines and entry circles for prepare.
+                    let slice2 = newSlice(z);
+                    let layers2 = slice2.output();
+                    
+                    slice2.helicalCircles = helicalCircles.map(c => c.clone(true));
+                    slice2.rampContours = rampContours.map(c => c.clone(true));
+                    slice2.plungePoints = plungePoints.map(p => p.clone(true));
+                    
+                    let camLines = [];
+                    for (let seg of allSegments) {
+                        if (seg.polys.length === 0) continue;
+                        if (seg.type === 'slotting') {
+                            // Trochoidal slotting loops drawn in Orange (0xffa500)
+                            layers2
+                                .setLayer("adaptive-cutting-slot", { line: 0xffa500 }, false)
+                                .addPolys(seg.polys);
+                            camLines.push(...seg.polys);
+                        } else if (seg.type === 'peel') {
+                            // Peeling (core spiral and ease-in/ease-out passes) drawn in Green (0x00ff00)
+                            layers2
+                                .setLayer("adaptive-cutting-peel", { line: 0x00ff00 }, false)
+                                .addPolys(seg.polys);
+                            camLines.push(...seg.polys);
+                        }
+                    }
+                    slice2.camLines = camLines;
+                    
+                    addSlices(slice2);
+                    this.sliceOut.push(slice2);
                 }
-            }
 
             index++;
             progress(index / total, "slicing adaptive");
@@ -1310,7 +1344,7 @@ function isChainClockwise(chain) {
  *    to prevent the tool from oscillating into the walls.
  * 8. Connects successive loops using 0.5mm Z-hop retracts to protect surface finish and minimize tool wear.
  */
-function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments, entryPt) {
+function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, entryPt) {
     let slotSegments = [];
     let stepSize = toolOver * 0.35;
     
@@ -1508,15 +1542,8 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
         
         if (trochoidPath.length > 0) {
             slotSegments.push({
-                type: "peel",
+                type: "slotting",
                 pts: trochoidPath
-            });
-            classifiedSegments.push({
-                type: "centerline",
-                pts: resampled.map(p => newPoint(p.x, p.y, z)),
-                isInnermost: true,
-                isClosed: false,
-                n: resampled.length
             });
         }
     }
@@ -1534,11 +1561,11 @@ function sortSegments(segments, startPt, clearFirst) {
         let minDist = Infinity;
         let shouldReverse = false;
         
-        let hasCoresLeft = clearFirst && remaining.some(s => s.type === "spiral");
+        let hasCoresLeft = clearFirst && remaining.some(s => s.type === "peel");
         
         for (let i = 0; i < remaining.length; i++) {
             let seg = remaining[i];
-            if (hasCoresLeft && seg.type !== "spiral") continue;
+            if (hasCoresLeft && seg.type !== "peel") continue;
             
             let firstPt = seg.pts[0];
             let dist = currentPt.distTo2D(firstPt);
@@ -1632,7 +1659,26 @@ function resampleDensePolygon(poly, delta_d) {
     return newPoly;
 }
 
-function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles, rampContours, plungePoints, bounds, stock, leave_xy, clearFirst, maGraph) {
+function computePlannedSlottingArea(slotChains, toolRadius, toolOver, z) {
+    let chainPolys = [];
+    let stepSize = toolOver * 0.35;
+    for (let chain of slotChains) {
+        let resampled = resampleChain(chain, stepSize);
+        for (let v of resampled) {
+            let r = v.radius;
+            if (r > 0.01) {
+                let circle = newPolygon().centerCircle(newPoint(v.x, v.y, z), r, 64);
+                chainPolys.push(circle);
+            }
+        }
+    }
+    if (chainPolys.length > 0) {
+        return POLY.union(chainPolys, 0, true);
+    }
+    return [];
+}
+
+function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles, rampContours, plungePoints, bounds, stock, leave_xy, clearFirst, maGraph, op) {
     let N = levels.length;
     if (N === 0) return [];
     
@@ -1644,7 +1690,6 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
     // start exactly inside the entry holes (e.g. at the helical center point) and step outwards.
 
     let coreSegments = [];
-    let classifiedSegments = [];
 
     let innermostPolys = flatLevels[N - 1];
     for (let poly of innermostPolys) {
@@ -1735,7 +1780,7 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
 
                 // Add the core spiral to coreSegments
                 coreSegments.push({
-                    type: "spiral",
+                    type: "peel",
                     pts: spiralPts,
                     helicalCircles: helicalCircles.filter(c => c.bounds.center().distTo2D(entryPt) < 0.1),
                     rampContours: rampContours.filter(c => c.first().distTo2D(entryPt) < 0.1),
@@ -1968,7 +2013,7 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
 
                         // Register the branch toolpath
                         coreSegments.push({
-                            type: "spiral",
+                            type: "peel",
                             pts: branchPts
                         });
 
@@ -1986,8 +2031,10 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
 
     let pocketRoot = levels[0][0];
     let slotSegments = [];
+    let slotChains = [];
     if (pocketRoot && maGraph) {
-        slotSegments = generateSlotToolpaths(extractSlotChains(maGraph, toolRadius, toolOver, leave_xy), toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments, helicalCircles[0]?.bounds.center() || plungePoints[0]?.bounds.center() || newPoint(0, 0, z));
+        slotChains = extractSlotChains(maGraph, toolRadius, toolOver, leave_xy);
+        slotSegments = generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, helicalCircles[0]?.bounds.center() || plungePoints[0]?.bounds.center() || newPoint(0, 0, z));
         for (let seg of slotSegments) {
             let exp = expandToolpath(newPolygon().setOpen().addPoints(seg.pts), toolRadius, z);
             if (exp) cleared.push(...POLY.flatten(exp));
@@ -2080,11 +2127,54 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
         p.z = z;
         resultSegments.push({ type: seg.type, polys: [ p ], helicalCircles: seg.helicalCircles, rampContours: seg.rampContours, plungePoints: seg.plungePoints });
     }
-    for (let seg of classifiedSegments) {
-        if (seg.type === "centerline") {
-            let p = newPolygon().setOpen().addPoints(seg.pts);
-            p.z = z;
-            resultSegments.push({ type: seg.type, polys: [ p ] });
+    // Centerline is removed
+    
+    // Add planned peeling and slotting areas representing the algorithm's planning partition,
+    // as well as the total machined area that is physically reachable by the tool.
+    if (pocketRoot) {
+        // Calculate the total machined area (what is actually reachable by the tool).
+        // This is computed by offsetting the pocket inward by (toolRadius + leave_xy) to find the 
+        // safe area for the tool center, and then offsetting it back outward by toolRadius.
+        // We use JoinType.jtRound (1) and the process tolerance to ensure high-resolution rounded corners.
+        let tolerance = op?.tolerance || 0.005;
+        let arcTol = tolerance * 1000;
+        let toolCenterArea = POLY.offset([ pocketRoot.clone(true) ], -(toolRadius + leave_xy), { join: 1, arc: arcTol, z });
+        let reachableArea = [];
+        if (toolCenterArea && toolCenterArea.length > 0) {
+            let expanded = POLY.offset(toolCenterArea, toolRadius, { join: 1, arc: arcTol, z });
+            if (expanded) {
+                reachableArea = POLY.flatten(expanded);
+            }
+        }
+        
+        // Calculate the unreachable area (parts of the pocket that cannot be reached by the tool)
+        let unreachableArea = [];
+        POLY.subtract([ pocketRoot.clone(true) ], reachableArea, unreachableArea, undefined, undefined, 0);
+        
+        let plannedSlottingArea = computePlannedSlottingArea(slotChains, toolRadius, toolOver, z);
+        let plannedPeelingArea = [];
+        if (plannedSlottingArea.length > 0 && reachableArea.length > 0) {
+            POLY.subtract(reachableArea, plannedSlottingArea, plannedPeelingArea, undefined, undefined, 0);
+        } else {
+            plannedPeelingArea = reachableArea.map(p => p.clone(true));
+        }
+        
+        POLY.setZ(reachableArea, z);
+        POLY.setZ(unreachableArea, z);
+        POLY.setZ(plannedPeelingArea, z);
+        POLY.setZ(plannedSlottingArea, z);
+        
+        if (reachableArea.length > 0) {
+            resultSegments.push({ type: "machined-area", polys: reachableArea });
+        }
+        if (unreachableArea.length > 0) {
+            resultSegments.push({ type: "unreachable-area", polys: unreachableArea });
+        }
+        if (plannedPeelingArea.length > 0) {
+            resultSegments.push({ type: "peel-area", polys: plannedPeelingArea });
+        }
+        if (plannedSlottingArea.length > 0) {
+            resultSegments.push({ type: "slotting-area", polys: plannedSlottingArea });
         }
     }
     
