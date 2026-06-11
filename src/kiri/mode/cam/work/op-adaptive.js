@@ -1001,12 +1001,161 @@ function mergeNearbyChains(chains, gapThreshold) {
     return merged;
 }
 
+/**
+ * Adjusts an open centerline chain so that it begins and ends exactly at the safe physical
+ * limit radius (limitRadius = toolRadius + leave_xy) inside pocket corners/coves.
+ *
+ * For a round tool milling into a corner, going beyond the point where the inscribed radius
+ * equals toolRadius + leave_xy causes the tool to gouge the pocket walls. Conversely, stopping
+ * short leaves uncut stock.
+ *
+ * This function:
+ * 1. Checks if the chain is a closed loop. If so, returns it unmodified.
+ * 2. Processes the start (chain[0]) of the open chain:
+ *    - If start radius >= limitRadius, searches the neighbors of the start vertex in the original
+ *      unfiltered MAT graph to find any neighbor that goes deeper into the corner (radius < limitRadius).
+ *      If found, it uses linear interpolation along that edge to locate the exact coordinate where
+ *      the radius is equal to limitRadius, and prepends this new point.
+ *    - If start radius < limitRadius, the chain has already crossed the limit. It scans forward
+ *      to find the crossing segment, interpolates the point at limitRadius, and truncates the prefix.
+ * 3. Processes the end (chain[chain.length - 1]) of the open chain:
+ *    - If end radius >= limitRadius, searches original neighbors for a corner-heading node, and
+ *      interpolates to append the exact limit point.
+ *    - If end radius < limitRadius, scans backward to find the crossing segment, and truncates the suffix.
+ */
+function adjustChainToLimit(chain, limitRadius) {
+    if (chain.length < 2) return chain;
+    
+    // Check if the chain is a closed loop
+    let isClosed = Math.hypot(chain[0].x - chain[chain.length - 1].x, chain[0].y - chain[chain.length - 1].y) < 0.1;
+    if (isClosed) return chain;
+
+    // 1. Process start of the chain (chain[0])
+    let v_start = chain[0];
+    if (v_start.radius >= limitRadius) {
+        let next_in_chain = chain[1];
+        let n_corner = null;
+        for (let n of (v_start.neighbors || [])) {
+            if (n.key !== next_in_chain.key && n.radius < limitRadius && !chain.some(item => item.key === n.key)) {
+                n_corner = n;
+                break;
+            }
+        }
+        if (n_corner) {
+            let t = (v_start.radius - limitRadius) / (v_start.radius - n_corner.radius);
+            t = Math.max(0, Math.min(1, t));
+            chain.unshift({
+                x: v_start.x + t * (n_corner.x - v_start.x),
+                y: v_start.y + t * (n_corner.y - v_start.y),
+                radius: limitRadius,
+                key: `start_limit_${v_start.key}_${n_corner.key}`,
+                neighbors: [v_start]
+            });
+        }
+    } else {
+        // Truncate start of chain
+        let cutIdx = -1;
+        for (let i = 0; i < chain.length - 1; i++) {
+            if (chain[i].radius < limitRadius && chain[i+1].radius >= limitRadius) {
+                cutIdx = i;
+                break;
+            }
+        }
+        if (cutIdx !== -1) {
+            let p1 = chain[cutIdx];
+            let p2 = chain[cutIdx + 1];
+            let t = (p2.radius - limitRadius) / (p2.radius - p1.radius);
+            t = Math.max(0, Math.min(1, t));
+            let p_limit = {
+                x: p2.x + t * (p1.x - p2.x),
+                y: p2.y + t * (p1.y - p2.y),
+                radius: limitRadius,
+                key: `start_trunc_${p1.key}_${p2.key}`,
+                neighbors: [p2]
+            };
+            chain.splice(0, cutIdx + 1);
+            chain.unshift(p_limit);
+        } else {
+            return [];
+        }
+    }
+
+    if (chain.length < 2) return chain;
+
+    // 2. Process end of the chain (chain[chain.length - 1])
+    let v_end = chain[chain.length - 1];
+    if (v_end.radius >= limitRadius) {
+        let prev_in_chain = chain[chain.length - 2];
+        let n_corner = null;
+        for (let n of (v_end.neighbors || [])) {
+            if (n.key !== prev_in_chain.key && n.radius < limitRadius && !chain.some(item => item.key === n.key)) {
+                n_corner = n;
+                break;
+            }
+        }
+        if (n_corner) {
+            let t = (v_end.radius - limitRadius) / (v_end.radius - n_corner.radius);
+            t = Math.max(0, Math.min(1, t));
+            chain.push({
+                x: v_end.x + t * (n_corner.x - v_end.x),
+                y: v_end.y + t * (n_corner.y - v_end.y),
+                radius: limitRadius,
+                key: `end_limit_${v_end.key}_${n_corner.key}`,
+                neighbors: [v_end]
+            });
+        }
+    } else {
+        // Truncate end of chain
+        let cutIdx = -1;
+        for (let i = chain.length - 1; i > 0; i--) {
+            if (chain[i].radius < limitRadius && chain[i-1].radius >= limitRadius) {
+                cutIdx = i - 1;
+                break;
+            }
+        }
+        if (cutIdx !== -1) {
+            let p1 = chain[cutIdx];
+            let p2 = chain[cutIdx + 1];
+            let t = (p1.radius - limitRadius) / (p1.radius - p2.radius);
+            t = Math.max(0, Math.min(1, t));
+            let p_limit = {
+                x: p1.x + t * (p2.x - p1.x),
+                y: p1.y + t * (p2.y - p1.y),
+                radius: limitRadius,
+                key: `end_trunc_${p1.key}_${p2.key}`,
+                neighbors: [p1]
+            };
+            chain.splice(cutIdx + 1);
+            chain.push(p_limit);
+        } else {
+            return [];
+        }
+    }
+
+    return chain;
+}
+
+/**
+ * Extracts slotting chains from the Medial Axis Transform (MAT) graph.
+ *
+ * The algorithm preserves corner branches by only filtering out areas that are too wide
+ * (radius < slotThreshold). The lower bound (radius >= minRadius) is NOT filtered here
+ * so that branches leading all the way to corner vertices (radius 0) are kept intact
+ * in the adjacency graph during tracing.
+ *
+ * The chains are traced by following unvisited edges in the filtered adjacency map.
+ * Once traced, the chains are post-processed via `adjustChainToLimit` to precisely
+ * truncate/extend their endpoints to the physical limit radius (toolRadius + leave_xy).
+ *
+ * To prevent cross-merging separate corner branches (which causes self-intersections,
+ * loops jumping across stock, and wrong cutting orientations), the mergeNearbyChains step
+ * is bypassed, and the clean topological slot chains are returned directly.
+ */
 function extractSlotChains(maGraph, toolRadius, toolOver, leave_xy) {
     let slotThreshold = toolRadius + toolOver + leave_xy;
     let edges = maGraph.edges;
     let slotEdges = edges.filter(e => {
-        let minRadius = toolRadius + leave_xy - 0.05;
-        return e.radius < slotThreshold && e.radius >= minRadius;
+        return e.radius < slotThreshold;
     });
     
     let slotAdj = new Map();
@@ -1071,7 +1220,17 @@ function extractSlotChains(maGraph, toolRadius, toolOver, leave_xy) {
         slotChains.push(chain);
     }
     
-    return mergeNearbyChains(slotChains, toolRadius * 2);
+    // Post-process chains to extend/truncate to limitRadius
+    let limitRadius = toolRadius + leave_xy;
+    let adjustedChains = [];
+    for (let chain of slotChains) {
+        let adj = adjustChainToLimit(chain, limitRadius);
+        if (adj && adj.length >= 2) {
+            adjustedChains.push(adj);
+        }
+    }
+    
+    return adjustedChains;
 }
 
 function resampleChain(chain, stepSize) {
@@ -1130,70 +1289,129 @@ function isChainClockwise(chain) {
     return sum > 0;
 }
 
+/**
+ * Generates trochoidal slotting toolpaths from a set of centerline chains.
+ *
+ * This function:
+ * 1. Sequences the chains starting from the entry point (`entryPt`) to ensure a continuous
+ *    and logically directed progression of cut.
+ * 2. Orients each chain from closest (already cut/cleared) to furthest (uncut stock) points.
+ *    This ensures that:
+ *    - The tool moves forward into uncut stock rather than backwards.
+ *    - The trochoidal loops face forward (into stock).
+ *    - Z-hop connections happen behind the tool (in cleared areas) and do not plunge in stock.
+ * 3. Rotates and directs closed loops clockwise to enforce climb milling.
+ * 4. Resamples the sorted chains at `stepSize` to get evenly spaced points.
+ * 5. Computes the tangent `T` and normal `N` vectors along each resampled chain.
+ * 6. Sweeps counterclockwise (CCW) from `-N` (Right Wall) to `+N` (Left Wall) to generate
+ *    each trochoidal loop, ensuring a safe climb-milling engagement.
+ * 7. Caps the loop radius `R_path` using `Math.max(0, Math.min(toolRadius / 2, distToWall - toolRadius - leave_xy))`.
+ *    If `R_path <= 0.01` (e.g. at the corner tangent point), it generates a single centerline point
+ *    to prevent the tool from oscillating into the walls.
+ * 8. Connects successive loops using 0.5mm Z-hop retracts to protect surface finish and minimize tool wear.
+ */
 function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cleared, classifiedSegments, entryPt) {
     let slotSegments = [];
     let stepSize = toolOver * 0.35;
     
-    let processedChains = [];
+    // Filter out any chains that are too short to be valid
+    let validChains = [];
     for (let chain of slotChains) {
-        if (chain.length < 2) continue;
+        if (chain.length >= 2) {
+            validChains.push(chain);
+        }
+    }
+    
+    // Sort and orient the chains sequentially from the current tool position (starting at entryPt)
+    let processedChains = [];
+    let currentPt = entryPt || newPoint(0, 0, z);
+    let remaining = [...validChains];
+    
+    while (remaining.length > 0) {
+        let bestIdx = -1;
+        let minDist = Infinity;
+        let shouldReverse = false;
+        let bestRotateIdx = -1;
         
-        let pStart = chain[0];
-        let pEnd = chain[chain.length - 1];
-        let isClosedLoop = Math.hypot(pStart.x - pEnd.x, pStart.y - pEnd.y) < 0.1;
-        
-        if (entryPt) {
-            let bestIdx = -1;
-            let minDist = Infinity;
-            for (let i = 0; i < chain.length; i++) {
-                let p = chain[i];
-                let dist = Math.hypot(entryPt.x - p.x, entryPt.y - p.y);
-                if (dist < minDist) {
-                    minDist = dist;
+        for (let i = 0; i < remaining.length; i++) {
+            let chain = remaining[i];
+            let pStart = chain[0];
+            let pEnd = chain[chain.length - 1];
+            let isClosed = Math.hypot(pStart.x - pEnd.x, pStart.y - pEnd.y) < 0.1;
+            
+            if (isClosed) {
+                // For closed loops, find the point closest to our current position to start the loop
+                let localMin = Infinity;
+                let localIdx = -1;
+                for (let j = 0; j < chain.length; j++) {
+                    let d = Math.hypot(currentPt.x - chain[j].x, currentPt.y - chain[j].y);
+                    if (d < localMin) {
+                        localMin = d;
+                        localIdx = j;
+                    }
+                }
+                if (localMin < minDist) {
+                    minDist = localMin;
                     bestIdx = i;
+                    bestRotateIdx = localIdx;
+                }
+            } else {
+                // For open chains, measure distance from current position to both ends
+                let dStart = Math.hypot(currentPt.x - pStart.x, currentPt.y - pStart.y);
+                let dEnd = Math.hypot(currentPt.x - pEnd.x, currentPt.y - pEnd.y);
+                
+                if (dStart < minDist) {
+                    minDist = dStart;
+                    bestIdx = i;
+                    shouldReverse = false;
+                    bestRotateIdx = -1;
+                }
+                if (dEnd < minDist) {
+                    minDist = dEnd;
+                    bestIdx = i;
+                    shouldReverse = true;
+                    bestRotateIdx = -1;
                 }
             }
+        }
+        
+        if (bestIdx !== -1) {
+            let chain = remaining[bestIdx];
+            let pStart = chain[0];
+            let pEnd = chain[chain.length - 1];
+            let isClosed = Math.hypot(pStart.x - pEnd.x, pStart.y - pEnd.y) < 0.1;
             
-            if (isClosedLoop) {
-                let rotated = [...chain.slice(bestIdx), ...chain.slice(0, bestIdx)];
+            if (isClosed) {
+                // Rotate the closed loop and force it to be Clockwise (CW) for climb-milling outer walls
+                let rotated = [...chain.slice(bestRotateIdx), ...chain.slice(0, bestRotateIdx)];
                 rotated.push({ ...rotated[0] });
                 if (!isChainClockwise(rotated)) {
                     rotated.reverse();
                 }
                 processedChains.push(rotated);
+                currentPt = rotated[rotated.length - 1];
             } else {
-                if (minDist < toolRadius * 2) {
-                    if (bestIdx === 0) {
-                        processedChains.push(chain);
-                    } else if (bestIdx === chain.length - 1) {
-                        processedChains.push([...chain].reverse());
-                    } else {
-                        let chain1 = chain.slice(0, bestIdx + 1).reverse();
-                        let chain2 = chain.slice(bestIdx);
-                        processedChains.push(chain1, chain2);
-                    }
-                } else {
-                    processedChains.push(chain);
+                // For open chains, reverse if the end of the chain was closer to our position
+                let ordered = [...chain];
+                if (shouldReverse) {
+                    ordered.reverse();
                 }
+                processedChains.push(ordered);
+                currentPt = ordered[ordered.length - 1];
             }
+            remaining.splice(bestIdx, 1);
         } else {
-            if (isClosedLoop) {
-                let rotated = [...chain];
-                if (!isChainClockwise(rotated)) {
-                    rotated.reverse();
-                }
-                processedChains.push(rotated);
-            } else {
-                processedChains.push(chain);
-            }
+            break;
         }
     }
     
     for (let chain of processedChains) {
+        // Resample the chain to ensure smooth and even step-overs
         let resampled = resampleChain(chain, stepSize);
         let m = resampled.length;
         if (m < 2) continue;
         
+        // Calculate tangent (T) and normal (N) vectors at each point along the chain
         let tangents = [];
         let normals = [];
         for (let j = 0; j < m; j++) {
@@ -1239,13 +1457,14 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
                 Ty = 0;
             }
             tangents.push({ x: Tx, y: Ty });
-            normals.push({ x: -Ty, y: Tx });
+            normals.push({ x: -Ty, y: Tx }); // N points 90 degrees left of T
         }
         
         let trochoidPath = [];
         for (let j = 0; j < m; j++) {
             let rp = resampled[j];
             
+            // Skip points that are already fully cleared by previous operations
             if (isPointCleared(rp, cleared, toolRadius)) {
                 continue;
             }
@@ -1253,22 +1472,31 @@ function generateSlotToolpaths(slotChains, toolRadius, toolOver, z, leave_xy, cl
             let T = tangents[j];
             let N = normals[j];
             let distToWall = rp.radius;
-            let R_path = Math.max(toolRadius / 2, distToWall - toolRadius - leave_xy);
             
-            let steps = 12;
+            // Safe capping: the maximum safe loop radius is distToWall - toolRadius - leave_xy.
+            // If the loop radius is forced larger, the tool will gouge the walls of the pocket/channel.
+            let R_path = Math.max(0, Math.min(toolRadius / 2, distToWall - toolRadius - leave_xy));
+            
             let loopPts = [];
-            for (let k_step = 0; k_step <= steps; k_step++) {
-                let phi = Math.PI / 2 - (k_step / steps) * Math.PI;
-                let x = rp.x + R_path * Math.cos(phi) * T.x + R_path * Math.sin(phi) * N.x;
-                let y = rp.y + R_path * Math.cos(phi) * T.y + R_path * Math.sin(phi) * N.y;
-                loopPts.push(newPoint(x, y, z));
+            if (R_path > 0.01) {
+                // Generate a counterclockwise (CCW) loop from -N (right wall) to +N (left wall)
+                let steps = 12;
+                for (let k_step = 0; k_step <= steps; k_step++) {
+                    let phi = -Math.PI / 2 + (k_step / steps) * Math.PI;
+                    let x = rp.x + R_path * Math.cos(phi) * T.x + R_path * Math.sin(phi) * N.x;
+                    let y = rp.y + R_path * Math.cos(phi) * T.y + R_path * Math.sin(phi) * N.y;
+                    loopPts.push(newPoint(x, y, z));
+                }
+            } else {
+                // If the loop radius is near-zero (in corners), just output the centerline point
+                loopPts.push(newPoint(rp.x, rp.y, z));
             }
             
             if (trochoidPath.length === 0) {
                 trochoidPath.push(...loopPts);
             } else {
                 // Successive trochoids are linked via Z-hop retracts (raise by 0.5mm, move, plunge)
-                // to protect the surface finish and reduce tool wear as intended.
+                // in already cleared areas to protect the surface finish and minimize tool wear.
                 let prevEnd = trochoidPath[trochoidPath.length - 1];
                 let currStart = loopPts[0];
                 trochoidPath.push(newPoint(prevEnd.x, prevEnd.y, z + 0.5));
