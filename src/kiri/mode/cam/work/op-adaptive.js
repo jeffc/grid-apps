@@ -183,7 +183,8 @@ class OpAdaptive extends CamOp {
                 if (poly.open) continue;
 
                 // --- ENTRY POINT SELECTION & SIZING ---
-                let maGraph = buildMATGraph(poly);
+                let slotThreshold = toolRadius + toolOver + leave_xy;
+                let maGraph = buildMATGraph(poly, slotThreshold);
                 let bestVertex = null;
                 let maxRadius = -1;
                 for (let v of maGraph.vertices.values()) {
@@ -930,7 +931,7 @@ function getShortestContourSegment(lp, pStart, pEnd) {
     return result;
 }
 
-function buildMATGraph(pocketRoot) {
+function buildMATGraph(pocketRoot, slotThreshold) {
     let out = pocketRoot.points.map(p => ({ x: p.x * 1000 | 0, y: p.y * 1000 | 0 }));
     let inr = (pocketRoot.inner ?? []).map(hole => hole.points.map(p => ({ x: p.x * 1000 | 0, y: p.y * 1000 | 0 })));
     
@@ -946,10 +947,7 @@ function buildMATGraph(pocketRoot) {
     let edges = [];
     let key = (x, y) => `${x.toFixed(4)},${y.toFixed(4)}`;
     
-    function getOrCreateVertex(p) {
-        let x = p.x / 1000;
-        let y = p.y / 1000;
-        let radius = p.radius / 1000;
+    function getOrCreateVertex(x, y, radius) {
         let k = key(x, y);
         if (!vertices.has(k)) {
             vertices.set(k, {
@@ -964,19 +962,51 @@ function buildMATGraph(pocketRoot) {
     }
     
     for (let seg of rawMa) {
-        let v0 = getOrCreateVertex(seg.point0);
-        let v1 = getOrCreateVertex(seg.point1);
+        let p0 = { x: seg.point0.x / 1000, y: seg.point0.y / 1000, radius: seg.point0.radius / 1000 };
+        let p1 = { x: seg.point1.x / 1000, y: seg.point1.y / 1000, radius: seg.point1.radius / 1000 };
         
-        if (v0.key === v1.key) continue;
+        let r0 = p0.radius;
+        let r1 = p1.radius;
         
-        if (!v0.neighbors.includes(v1)) {
-            v0.neighbors.push(v1);
+        let crosses = slotThreshold !== undefined && ((r0 < slotThreshold && r1 > slotThreshold) || (r1 < slotThreshold && r0 > slotThreshold));
+        
+        if (crosses && Math.abs(r1 - r0) > 0.0001) {
+            let t = (slotThreshold - r0) / (r1 - r0);
+            t = Math.max(0, Math.min(1, t));
+            let cx = p0.x + t * (p1.x - p0.x);
+            let cy = p0.y + t * (p1.y - p0.y);
+            let cr = slotThreshold;
+            
+            let v0 = getOrCreateVertex(p0.x, p0.y, r0);
+            let vc = getOrCreateVertex(cx, cy, cr);
+            let v1 = getOrCreateVertex(p1.x, p1.y, r1);
+            
+            if (v0.key !== vc.key) {
+                if (!v0.neighbors.includes(vc)) v0.neighbors.push(vc);
+                if (!vc.neighbors.includes(v0)) vc.neighbors.push(v0);
+                edges.push({ v0, v1: vc, radius: (v0.radius + vc.radius) / 2 });
+            }
+            
+            if (vc.key !== v1.key) {
+                if (!vc.neighbors.includes(v1)) vc.neighbors.push(v1);
+                if (!v1.neighbors.includes(vc)) v1.neighbors.push(vc);
+                edges.push({ v0: vc, v1, radius: (vc.radius + v1.radius) / 2 });
+            }
+        } else {
+            let v0 = getOrCreateVertex(p0.x, p0.y, r0);
+            let v1 = getOrCreateVertex(p1.x, p1.y, r1);
+            
+            if (v0.key === v1.key) continue;
+            
+            if (!v0.neighbors.includes(v1)) {
+                v0.neighbors.push(v1);
+            }
+            if (!v1.neighbors.includes(v0)) {
+                v1.neighbors.push(v0);
+            }
+            
+            edges.push({ v0, v1, radius: (v0.radius + v1.radius) / 2 });
         }
-        if (!v1.neighbors.includes(v0)) {
-            v1.neighbors.push(v0);
-        }
-        
-        edges.push({ v0, v1, radius: (v0.radius + v1.radius) / 2 });
     }
     
     return { vertices, edges };
@@ -2135,41 +2165,41 @@ function generateLinkedToolpath(levels, toolRadius, toolOver, z, helicalCircles,
         let unreachableArea = [];
         POLY.subtract([ pocketRoot.clone(true) ], reachableArea, unreachableArea, undefined, undefined, 0);
         
-        let plannedPeelingArea = [];
-        if (allLimitPolys.length > 0) {
-            let expandedPeel = POLY.offset(allLimitPolys, toolRadius, { join: 1, arc: arcTol, z });
-            if (expandedPeel && expandedPeel.length > 0) {
-                let diff = [];
-                POLY.subtract(reachableArea, expandedPeel, diff, undefined, undefined, 0);
-                POLY.subtract(reachableArea, diff, plannedPeelingArea, undefined, undefined, 0);
+        let slotThreshold = toolRadius + toolOver + leave_xy;
+        let peelingCore = POLY.offset([ pocketRoot.clone(true) ], -slotThreshold, { join: 1, arc: arcTol, z });
+        
+        let actualPeeledArea = [];
+        if (peelingCore && peelingCore.length > 0) {
+            let expanded = POLY.offset(peelingCore, slotThreshold, { join: 1, arc: arcTol, z });
+            if (expanded) {
+                actualPeeledArea = expanded;
             }
+        }
+
+        let plannedPeelingArea = [];
+        if (actualPeeledArea.length > 0) {
+            let diff = [];
+            POLY.subtract(reachableArea, actualPeeledArea, diff, undefined, undefined, 0);
+            POLY.subtract(reachableArea, diff, plannedPeelingArea, undefined, undefined, 0);
         }
 
         let plannedSlottingArea = [];
         if (reachableArea.length > 0) {
             if (plannedPeelingArea.length > 0) {
-                POLY.subtract(reachableArea, plannedPeelingArea, plannedSlottingArea, undefined, undefined, 0);
+                let temp = [];
+                POLY.subtract(reachableArea, plannedPeelingArea, temp, undefined, undefined, 0);
+                for (let p of temp) {
+                    if (Math.abs(p.area()) >= 1.0) {
+                        if (p.inner) {
+                            p.inner = p.inner.filter(pi => Math.abs(pi.area()) >= 1.0);
+                        }
+                        plannedSlottingArea.push(p);
+                    }
+                }
             } else {
                 plannedSlottingArea = reachableArea.map(p => p.clone(true));
             }
         }
-        
-        console.log("CAM-ADAPTIVE-DEBUG:", {
-            z,
-            pocketRoot_inner_count: pocketRoot.inner ? pocketRoot.inner.length : 0,
-            pocketRoot_windings: pocketRoot.isClockwise() + " / " + (pocketRoot.inner || []).map(p => p.isClockwise()).join(","),
-            toolCenterArea_len: toolCenterArea.length,
-            toolCenterArea_inners: toolCenterArea.map(p => p.inner ? p.inner.length : 0),
-            reachableArea_len: reachableArea.length,
-            reachableArea_inners: reachableArea.map(p => p.inner ? p.inner.length : 0),
-            reachableArea_windings: reachableArea.map(p => p.isClockwise() + " / " + (p.inner || []).map(pi => pi.isClockwise()).join(",")),
-            plannedSlottingArea_len: plannedSlottingArea.length,
-            plannedPeelingArea_len: plannedPeelingArea.length,
-            plannedPeelingArea_inners: plannedPeelingArea.map(p => p.inner ? p.inner.length : 0),
-            plannedPeelingArea_windings: plannedPeelingArea.map(p => p.isClockwise() + " / " + (p.inner || []).map(pi => pi.isClockwise()).join(",")),
-            plannedPeelingArea_earcut_lengths: plannedPeelingArea.map(p => p.earcut().length),
-            unreachableArea_len: unreachableArea.length
-        });
         
         POLY.setZ(reachableArea, z - 0.02);
         POLY.setZ(plannedPeelingArea, z - 0.01);
