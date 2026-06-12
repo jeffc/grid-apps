@@ -524,6 +524,9 @@ class OpArea extends CamOp {
             return;
         }
 
+        let sr_type = (op.mode === 'clear' ? op.sr_type_clear : op.sr_type_surf) || op.sr_type || 'concentric';
+        let spiral = sr_type === 'spiral' || sr_type === 'concentric spiral';
+
         // process areas as pockets
         while (areas?.length) {
             let min = {
@@ -558,7 +561,8 @@ class OpArea extends CamOp {
                     easeDown: op.down && process.easeDown ? op.down : 0,
                     outline: op.drape || op.mode === 'trace',
                     progress: (n,m) => progress(n/m, "area"),
-                    slices: min.area.filter(slice => slice.camLines)
+                    slices: min.area.filter(slice => slice.camLines),
+                    spiral
                 });
             } else {
                 break;

@@ -89,24 +89,31 @@ class OpLevel extends CamOp {
     prepare(ops, progress) {
         let { layers, skip, stepOver } = this;
         let { printPoint } = ops;
-        let { newLayer, tip2tipEmit, camOut } = ops;
+        let { newLayer, tip2tipEmit, camOut, zSafe, tool } = ops;
 
         if (skip) {
             return;
         }
 
+        let spiral = this.op.sr_type === 'spiral' || this.op.sr_type === 'concentric spiral';
+        let layer_index = 0;
         for (let lines of layers) {
             lines = lines.map(p => { return { first: p.first(), last: p.last(), poly: p } });
+            if (spiral && layer_index > 0) {
+                camOut(printPoint.clone().setZ(zSafe), 0);
+                newLayer();
+            }
             printPoint = tip2tipEmit(lines, printPoint, (el, point, count) => {
                 let poly = el.poly;
                 if (poly.last() === point) {
                     poly.reverse();
                 }
                 poly.forEachPoint((point, pidx) => {
-                    camOut(point.clone(), true, stepOver);
+                    camOut(point.clone(), pidx === 0 ? 0 : true, stepOver);
                 }, false);
             });
             newLayer();
+            layer_index++;
         }
     }
 }
