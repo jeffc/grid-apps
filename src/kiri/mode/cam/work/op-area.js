@@ -12,6 +12,7 @@ import { polygons as POLY } from '../../../../geo/polygons.js';
 import { util as base_util } from '../../../../geo/base.js';
 import { tip2tipJoin } from '../../../../geo/paths.js';
 import { CAM } from './init-work.js';
+import { adaptiveClear } from './adaptive.js';
 
 const DEG2RAD = Math.PI / 180;
 const clib = self.ClipperLib;
@@ -264,6 +265,91 @@ class OpArea extends CamOp {
                 }
                 proc += pinc;
                 progress(proc, 'clear');
+            } else
+            if (mode === 'adaptive') {
+                let zMov = flatOff ?? 0;
+                let zs_down = flats ?
+                    flats.filter(z => z <= zTop && z >= zBottom).map(v => v + zMov) :
+                    down ? base_util.lerp(zTop, zBottom, down) : [ bounds.min.z ];
+                let zroc = 0;
+                let zinc_down = 1 / zs_down.length;
+                let lzo;
+
+                if (!zs_down.length) break;
+
+                outer: for (;;)
+                z_step_down: for (let z of zs_down) {
+                    let slice = newLayer(z);
+                    let layers = slice.output();
+                    let shadow = await shadowAt(z + 0.01);
+                    let tool_shadow = [
+                        ...POLY.offset(shadow, [  ts_off ], { count: 1, z, ...offopt }),
+                        ...POLY.offset(shadow, [ -ts_off ], { count: 1, z, ...offopt }),
+                    ];
+                    if (op.omitthru) {
+                        shadow = omitMatching(shadow, thruHoles);
+                    }
+                    let clip = [];
+                    if (op.ignore) {
+                        clip = [ area ];
+                    } else {
+                        POLY.subtract([ area ], shadow, clip, undefined, undefined, 0);
+                    }
+                    
+                    let outs = adaptiveClear(clip, toolDiam, toolOver, {
+                        z: z - zMov,
+                        direction,
+                        leave_xy: op.leave_xy ?? 0,
+                        finish_cut: op.finish_cut ?? 0,
+                        walls: op.walls,
+                        steps: op.steps
+                    });
+
+                    if (outs.length === 0) {
+                        if (bounds && lzo > bounds.min.z) {
+                            zs_down = [ bounds.min.z ];
+                            bounds = undefined;
+                            continue outer;
+                        }
+                        break outer;
+                    }
+                    if (op.omitouter) {
+                        outs = omitOuter(outs);
+                    } else if (op.omitinner) {
+                        outs = omitInner(outs);
+                    }
+                    if (tabs.length) outs = cutTabs(tabs, outs);
+                    if (op.leave_z) {
+                        for (let out of outs)
+                            for (let p of out.points)
+                                p.z += op.leave_z;
+                    }
+                    if (tabs.length) {
+                        let tab_shadows = tabs.filter(t => t.top >= z).map(t => t.poly);
+                        if (tab_shadows) tool_shadow.push(...tab_shadows);
+                    }
+                    POLY.setWinding(outs, direction === 'climb');
+                    slice.tool_shadow = [ area, ...shadow, ...tool_shadow ];
+                    slice.camLines = outs;
+                    zroc += zinc_down;
+                    lzo = z;
+                    progress(proc + (pinc * zroc), 'adaptive');
+                    if (devel) layers
+                        .setLayer("base", { line: 0xff0000 }, false)
+                        .addPolys(shadowBase)
+                        .setLayer("shadow", { line: 0x00ff00 }, false)
+                        .addPolys(shadow)
+                        .setLayer("tool shadow", { line: 0x44ff88 }, false)
+                        .addPolys(tool_shadow);
+                    layers
+                        .setLayer(rename ?? "adaptive", { line: color }, false)
+                        .addPolys(outs);
+                    if (z === zs_down.peek()) {
+                        break outer;
+                    }
+                }
+                proc += pinc;
+                progress(proc, 'adaptive');
             } else
             if (mode === 'trace') {
                 let { tr_over, tr_offz, tr_type  } = op;

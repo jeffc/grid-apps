@@ -14,6 +14,7 @@ import { OpLevel } from '../work/op-level.js';
 import { OpLoop } from '../work/op-loop.js';
 import { OpOutline } from '../work/op-outline.js';
 import { OpPocket } from '../work/op-pocket.js';
+import { OpAdaptive } from '../work/op-adaptive.js';
 import { OpRegister } from '../work/op-register.js';
 import { OpRough } from '../work/op-rough.js';
 import { OpShadow } from '../work/op-shadow.js';
@@ -35,6 +36,7 @@ export const ops = {
     "loop":      OpLoop,
     "outline":   OpOutline,
     "pocket":    OpPocket,
+    "adaptive":  OpAdaptive,
     "register":  OpRegister,
     "rough":     OpRough,
     "shadow":    OpShadow,

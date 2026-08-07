@@ -203,6 +203,14 @@ const opAddPocket = () => {
     opAdd(rec);
 };
 
+const opAddAdaptive = () => {
+    traceDone();
+    surfaceDone();
+    let rec = env.popOp.adaptive.new();
+    rec.surfaces = { /* widget.id: [ faces... ] */ };
+    opAdd(rec);
+};
+
 const opAddHelical = () => {
     traceDone();
     surfaceDone();
@@ -842,6 +850,7 @@ export function init() {
             case "drill": return opAddDrill();
             case "trace": return opAddTrace();
             case "pocket": return opAddPocket();
+            case "adaptive": return opAddAdaptive();
             case "helical": return opAddHelical();
             case "area": return opAddArea();
             case "flip":
