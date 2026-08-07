@@ -351,7 +351,31 @@ class OpArea extends CamOp {
                                 mat_lines.push(p0, p1);
                             }
                             if (mat_lines.length) {
-                                layers.setLayer("MAT", { line: 0xff00ff }, false)
+                                layers.setLayer("MAT", { line: 0x555555 }, false)
+                                      .addLines(mat_lines);
+                            }
+                        }
+                        if (opt.mat_wide_lines && opt.mat_wide_lines.length) {
+                            let mat_lines = [];
+                            for (let { point0, point1 } of opt.mat_wide_lines) {
+                                let p0 = newPoint(point0.x, point0.y, z);
+                                let p1 = newPoint(point1.x, point1.y, z);
+                                mat_lines.push(p0, p1);
+                            }
+                            if (mat_lines.length) {
+                                layers.setLayer("MAT wide", { line: 0x00ffff }, false)
+                                      .addLines(mat_lines);
+                            }
+                        }
+                        if (opt.mat_narrow_lines && opt.mat_narrow_lines.length) {
+                            let mat_lines = [];
+                            for (let { point0, point1 } of opt.mat_narrow_lines) {
+                                let p0 = newPoint(point0.x, point0.y, z);
+                                let p1 = newPoint(point1.x, point1.y, z);
+                                mat_lines.push(p0, p1);
+                            }
+                            if (mat_lines.length) {
+                                layers.setLayer("MAT narrow", { line: 0xff00ff }, false)
                                       .addLines(mat_lines);
                             }
                         }
@@ -359,7 +383,7 @@ class OpArea extends CamOp {
                             for (let node of opt.max_nodes) {
                                 let center = newPoint(node.x, node.y, z);
                                 let circle = newPolygon().centerCircle(center, node.radius, 36);
-                                layers.setLayer("MAT", { line: 0xff00ff }, false)
+                                layers.setLayer("largest_circle", { line: 0xffff00 }, false)
                                       .addPoly(circle);
                             }
                         }
