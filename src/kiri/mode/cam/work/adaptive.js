@@ -12,6 +12,17 @@ class MATNode {
         this.neighbors = new Set();
         this.chamberId = null;
         this.isGenerator = false;
+        this.metaNode = null; // References the MetaNode this node belongs to
+    }
+}
+
+class MetaNode {
+    constructor(id, strategy, generator = null) {
+        this.id = id;
+        this.strategy = strategy; // 'chamber' or 'corridor'
+        this.generator = generator; // generator object or null
+        this.nodes = []; // MATNodes belonging to this meta-node
+        this.neighbors = new Set(); // Connected MetaNodes
     }
 }
 
@@ -79,8 +90,8 @@ export function buildMATGraph(segments, toolRadius, scale = 1000) {
  * 
  * The radius R (distance to the walls) is:
  *   R(s) = s * sin(alpha / 2)
- * The spatial gradient G is:
- *   G = |dR / ds| = sin(alpha / 2)
+ * The spatial gradient G = |dR/ds| is:
+ *   G = sin(alpha / 2)
  * 
  * Setting G = 0.5 gives:
  *   sin(alpha / 2) = 0.5  =>  alpha / 2 = 30°  =>  alpha = 60°
@@ -133,90 +144,123 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         options.generators = [];
         options.chamber_areas = [];
         options.corridor_areas = [];
+        options.meta_graph = [];
+        options.meta_walks = [];
         return polygons;
     }
 
     // 2. Build the un-split topological graph in workspace units
     let mat_graph = buildMATGraph(mat_segments, addedRadius, scale);
 
-    // 3. Find candidate maximum-radius nodes
-    let localMaxNodes = [];
-    for (let node of mat_graph) {
-        if (node.radius < threshold) continue;
-        let isMax = true;
-        for (let n of node.neighbors) {
-            if (n.radius > node.radius) {
-                isMax = false;
-                break;
-            }
-        }
-        if (isMax) {
-            localMaxNodes.push(node);
-        }
-    }
+    // Group mat_graph into connected components of nodes (each represents a disjoint pocket)
+    let unvisitedNodes = new Set(mat_graph);
+    let pocket_components = [];
 
-    // 4. Group adjacent max nodes into Chamber Generators (Points or Lines)
-    let generators = [];
-    let visitedMax = new Set();
-    let generatorIdCounter = 0;
-
-    for (let startNode of localMaxNodes) {
-        if (visitedMax.has(startNode)) continue;
-
-        let genNodes = [];
+    while (unvisitedNodes.size > 0) {
+        let startNode = unvisitedNodes.values().next().value;
+        let component = [];
         let queue = [ startNode ];
-        visitedMax.add(startNode);
+        let visited = new Set([ startNode ]);
 
         while (queue.length > 0) {
-            let node = queue.shift();
-            genNodes.push(node);
+            let curr = queue.shift();
+            component.push(curr);
+            unvisitedNodes.delete(curr);
 
-            for (let n of node.neighbors) {
-                // If adjacent neighbor has the same radius (flat spine) and is a max candidate
-                if (!visitedMax.has(n) && Math.abs(n.radius - node.radius) < 1e-5 && localMaxNodes.includes(n)) {
-                    visitedMax.add(n);
-                    queue.push(n);
+            for (let neighbor of curr.neighbors) {
+                if (!visited.has(neighbor)) {
+                    visited.add(neighbor);
+                    queue.push(neighbor);
                 }
             }
         }
-
-        let genId = ++generatorIdCounter;
-        for (let node of genNodes) {
-            node.isGenerator = true;
-            node.chamberId = genId;
-        }
-
-        generators.push({
-            id: genId,
-            nodes: genNodes
-        });
+        pocket_components.push(component);
     }
 
-    // Fallback: If the entire pocket is a narrow slot/corridor (no nodes above threshold),
-    // select the node with the absolute maximum radius as a fallback Point Generator.
-    if (generators.length === 0 && mat_graph.length > 0) {
-        let absMaxNode = mat_graph[0];
-        for (let node of mat_graph) {
-            if (node.radius > absMaxNode.radius) {
-                absMaxNode = node;
-            } else if (node.radius === absMaxNode.radius) {
-                // Deterministic tie-breaker
-                if (node.x > absMaxNode.x) {
-                    absMaxNode = node;
-                } else if (node.x === absMaxNode.x && node.y > absMaxNode.y) {
-                    absMaxNode = node;
+    // 3. Scan each disjoint pocket component to identify generators
+    let generators = [];
+    let generatorIdCounter = 0;
+
+    for (let pocket_component of pocket_components) {
+        // A. Find local maximum nodes inside this component
+        let localMaxNodes = [];
+        for (let node of pocket_component) {
+            if (node.radius < threshold) continue;
+            let isMax = true;
+            for (let n of node.neighbors) {
+                if (n.radius > node.radius) {
+                    isMax = false;
+                    break;
                 }
+            }
+            if (isMax) {
+                localMaxNodes.push(node);
             }
         }
 
-        let genId = ++generatorIdCounter;
-        absMaxNode.isGenerator = true;
-        absMaxNode.chamberId = genId;
+        // B. Group adjacent max nodes into Chamber Generators (Points or Lines)
+        let pocket_generators = [];
+        let visitedMax = new Set();
 
-        generators.push({
-            id: genId,
-            nodes: [ absMaxNode ]
-        });
+        for (let startNode of localMaxNodes) {
+            if (visitedMax.has(startNode)) continue;
+
+            let genNodes = [];
+            let queue = [ startNode ];
+            visitedMax.add(startNode);
+
+            while (queue.length > 0) {
+                let node = queue.shift();
+                genNodes.push(node);
+
+                for (let n of node.neighbors) {
+                    if (!visitedMax.has(n) && Math.abs(n.radius - node.radius) < 1e-5 && localMaxNodes.includes(n)) {
+                        visitedMax.add(n);
+                        queue.push(n);
+                    }
+                }
+            }
+
+            let genId = ++generatorIdCounter;
+            for (let node of genNodes) {
+                node.isGenerator = true;
+                node.chamberId = genId;
+            }
+
+            pocket_generators.push({
+                id: genId,
+                nodes: genNodes
+            });
+        }
+
+        // Fallback: If this specific disjoint pocket is a narrow slot/corridor (no nodes above threshold),
+        // select the node with the absolute maximum radius within this component as a fallback Point Generator.
+        if (pocket_generators.length === 0 && pocket_component.length > 0) {
+            let absMaxNode = pocket_component[0];
+            for (let node of pocket_component) {
+                if (node.radius > absMaxNode.radius) {
+                    absMaxNode = node;
+                } else if (node.radius === absMaxNode.radius) {
+                    // Deterministic tie-breaker
+                    if (node.x > absMaxNode.x) {
+                        absMaxNode = node;
+                    } else if (node.x === absMaxNode.x && node.y > absMaxNode.y) {
+                        absMaxNode = node;
+                    }
+                }
+            }
+
+            let genId = ++generatorIdCounter;
+            absMaxNode.isGenerator = true;
+            absMaxNode.chamberId = genId;
+
+            pocket_generators.push({
+                id: genId,
+                nodes: [ absMaxNode ]
+            });
+        }
+
+        generators.push(...pocket_generators);
     }
 
     // 5. Run BFS Chamber Expansion (classify nodes into chambers)
@@ -358,11 +402,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         corridor_capsules.push(...makeTaperedCapsule(seg.point0, seg.point1));
     }
 
-    // Pass the computed results back via options object for visualization/processing
-    options.chamber_lines = chamber_lines;
-    options.corridor_lines = corridor_lines;
-    options.mat_lines = mat_lines;
-
     // Union all capsules and intersect (clip) them against the original pocket boundary
     // to prevent visual overflow/spillage into part walls or outside the stock boundaries.
     let raw_chamber_area = chamber_capsules.length ? POLY.union(chamber_capsules, 0.00001, true) : [];
@@ -370,9 +409,203 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
     options.chamber_areas = raw_chamber_area.length ? POLY.trimTo(raw_chamber_area, polygons) : [];
     options.corridor_areas = raw_corridor_area.length ? POLY.trimTo(raw_corridor_area, polygons) : [];
+
+    // 8. Build the Meta-Graph of chambers and corridors
+    let metaNodes = [];
+    let metaNodeIdCounter = 0;
+
+    // A. Create Chamber MetaNodes
+    for (let gen of generators) {
+        let meta = new MetaNode(++metaNodeIdCounter, 'chamber', gen);
+        // Find all MATNodes in this chamber
+        for (let node of mat_graph) {
+            if (node.chamberId === gen.id) {
+                node.metaNode = meta;
+                meta.nodes.push(node);
+            }
+        }
+        metaNodes.push(meta);
+    }
+
+    // B. Create Corridor MetaNodes (identify connected components of corridor nodes)
+    let visitedCorridor = new Set();
+    for (let startNode of mat_graph) {
+        if (startNode.chamberId !== null || visitedCorridor.has(startNode)) {
+            continue;
+        }
+
+        let meta = new MetaNode(++metaNodeIdCounter, 'corridor', null);
+        let queue = [ startNode ];
+        visitedCorridor.add(startNode);
+
+        while (queue.length > 0) {
+            let node = queue.shift();
+            node.metaNode = meta;
+            meta.nodes.push(node);
+
+            for (let neighbor of node.neighbors) {
+                if (neighbor.chamberId === null && !visitedCorridor.has(neighbor)) {
+                    visitedCorridor.add(neighbor);
+                    queue.push(neighbor);
+                }
+            }
+        }
+        metaNodes.push(meta);
+    }
+
+    // C. Establish Edges in the Meta-Graph
+    for (let node of mat_graph) {
+        for (let neighbor of node.neighbors) {
+            if (node.metaNode && neighbor.metaNode && node.metaNode !== neighbor.metaNode) {
+                node.metaNode.neighbors.add(neighbor.metaNode);
+                neighbor.metaNode.neighbors.add(node.metaNode);
+            }
+        }
+    }
+
+    // D. Calculate Centers for all MetaNodes
+    let metaCenters = new Map();
+    for (let m of metaNodes) {
+        let cx = 0, cy = 0;
+        if (m.strategy === 'chamber') {
+            for (let n of m.generator.nodes) {
+                cx += n.x;
+                cy += n.y;
+            }
+            cx /= m.generator.nodes.length;
+            cy /= m.generator.nodes.length;
+        } else {
+            for (let n of m.nodes) {
+                cx += n.x;
+                cy += n.y;
+            }
+            cx /= m.nodes.length;
+            cy /= m.nodes.length;
+        }
+        metaCenters.set(m.id, { x: cx, y: cy });
+    }
+
+    // 9. Pick the starting generator for each disconnected pocket component
+    let unvisitedMeta = new Set(metaNodes);
+    let all_walks = [];
+    let active_generators = [];
+
+    while (unvisitedMeta.size > 0) {
+        // Trace a single connected component of the meta-graph
+        let startNode = unvisitedMeta.values().next().value;
+        let component = [];
+        let queue = [ startNode ];
+        let visitedComp = new Set([ startNode ]);
+
+        while (queue.length > 0) {
+            let curr = queue.shift();
+            component.push(curr);
+            unvisitedMeta.delete(curr);
+
+            for (let neighbor of curr.neighbors) {
+                if (!visitedComp.has(neighbor)) {
+                    visitedComp.add(neighbor);
+                    queue.push(neighbor);
+                }
+            }
+        }
+
+        // Find all standard generators within this component
+        let componentGenerators = [];
+        for (let m of component) {
+            if (m.strategy === 'chamber' && m.generator) {
+                componentGenerators.push(m.generator);
+            }
+        }
+
+        // Pick the largest generator within this connected component
+        let largestGen = null;
+        let largestSize = -1;
+
+        for (let gen of componentGenerators) {
+            let size = 0;
+            if (gen.nodes.length > 1) {
+                // Line Generator path length
+                for (let i = 0; i < gen.nodes.length - 1; i++) {
+                    size += dist2D(gen.nodes[i], gen.nodes[i+1]);
+                }
+            } else {
+                // Point Generator diameter
+                size = 2 * gen.nodes[0].radius;
+            }
+
+            if (size > largestSize) {
+                largestSize = size;
+                largestGen = gen;
+            }
+        }
+
+        if (largestGen) {
+            active_generators.push(largestGen);
+            
+            // Run DFS on this component starting from the largest generator's MetaNode
+            let startMetaNode = component.find(m => m.strategy === 'chamber' && m.generator.id === largestGen.id);
+            if (startMetaNode) {
+                let walk = [];
+                let visitedDFS = new Set();
+
+                function dfs(curr) {
+                    visitedDFS.add(curr);
+                    let center = metaCenters.get(curr.id);
+                    walk.push({
+                        id: curr.id,
+                        strategy: curr.strategy,
+                        first: true,
+                        x: center.x,
+                        y: center.y
+                    });
+
+                    for (let neighbor of curr.neighbors) {
+                        if (!visitedDFS.has(neighbor)) {
+                            dfs(neighbor);
+                            // Add the backtrack move
+                            walk.push({
+                                id: curr.id,
+                                strategy: curr.strategy,
+                                first: false,
+                                x: center.x,
+                                y: center.y
+                            });
+                        }
+                    }
+                }
+
+                dfs(startMetaNode);
+                all_walks.push(walk);
+            }
+        }
+    }
+
+    options.chamber_lines = chamber_lines;
+    options.corridor_lines = corridor_lines;
+    options.mat_lines = mat_lines;
+
+    // Package meta-graph for clean options serialization
+    options.meta_graph = metaNodes.map(m => {
+        let center = metaCenters.get(m.id);
+        return {
+            id: m.id,
+            strategy: m.strategy,
+            x: center.x,
+            y: center.y,
+            generator: m.generator ? {
+                type: m.generator.nodes.length > 1 ? 'line' : 'point',
+                nodes: m.generator.nodes.map(n => ({ x: n.x, y: n.y, radius: n.radius }))
+            } : null,
+            nodes: m.nodes.map(n => ({ x: n.x, y: n.y, radius: n.radius })),
+            neighbors: Array.from(m.neighbors).map(n => n.id)
+        };
+    });
+
+    options.meta_walks = all_walks;
     
-    // Package generators for clean rendering
-    options.generators = generators.map(g => {
+    // Only package active start generators (one per disjoint pocket) to be rendered
+    options.generators = active_generators.map(g => {
         return {
             type: g.nodes.length > 1 ? 'line' : 'point',
             nodes: g.nodes.map(n => ({ x: n.x, y: n.y, radius: n.radius }))
