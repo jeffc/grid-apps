@@ -355,37 +355,59 @@ class OpArea extends CamOp {
                                       .addLines(mat_lines);
                             }
                         }
-                        if (opt.mat_wide_lines && opt.mat_wide_lines.length) {
+                        if (opt.chamber_lines && opt.chamber_lines.length) {
                             let mat_lines = [];
-                            for (let { point0, point1 } of opt.mat_wide_lines) {
+                            for (let { point0, point1 } of opt.chamber_lines) {
                                 let p0 = newPoint(point0.x, point0.y, z);
                                 let p1 = newPoint(point1.x, point1.y, z);
                                 mat_lines.push(p0, p1);
                             }
                             if (mat_lines.length) {
-                                layers.setLayer("MAT wide", { line: 0x00ffff }, false)
+                                layers.setLayer("chamber", { line: 0x00ffff }, false)
                                       .addLines(mat_lines);
                             }
                         }
-                        if (opt.mat_narrow_lines && opt.mat_narrow_lines.length) {
+                        if (opt.corridor_lines && opt.corridor_lines.length) {
                             let mat_lines = [];
-                            for (let { point0, point1 } of opt.mat_narrow_lines) {
+                            for (let { point0, point1 } of opt.corridor_lines) {
                                 let p0 = newPoint(point0.x, point0.y, z);
                                 let p1 = newPoint(point1.x, point1.y, z);
                                 mat_lines.push(p0, p1);
                             }
                             if (mat_lines.length) {
-                                layers.setLayer("MAT narrow", { line: 0xff00ff }, false)
+                                layers.setLayer("corridor", { line: 0xff00ff }, false)
                                       .addLines(mat_lines);
                             }
                         }
-                        if (opt.max_nodes && opt.max_nodes.length) {
-                            for (let node of opt.max_nodes) {
-                                let center = newPoint(node.x, node.y, z);
-                                let circle = newPolygon().centerCircle(center, node.radius, 36);
-                                layers.setLayer("largest_circle", { line: 0xffff00 }, false)
-                                      .addPoly(circle);
+                        if (opt.generators && opt.generators.length) {
+                            for (let g of opt.generators) {
+                                if (g.type === 'point') {
+                                    let node = g.nodes[0];
+                                    let center = newPoint(node.x, node.y, z);
+                                    let circle = newPolygon().centerCircle(center, node.radius, 36);
+                                    layers.setLayer("generators", { line: 0xffff00 }, false)
+                                          .addPoly(circle);
+                                } else {
+                                    let lines = [];
+                                    for (let i = 0; i < g.nodes.length - 1; i++) {
+                                        let p0 = newPoint(g.nodes[i].x, g.nodes[i].y, z);
+                                        let p1 = newPoint(g.nodes[i+1].x, g.nodes[i+1].y, z);
+                                        lines.push(p0, p1);
+                                    }
+                                    if (lines.length) {
+                                        layers.setLayer("generators", { line: 0xffff00 }, false)
+                                              .addLines(lines);
+                                    }
+                                }
                             }
+                        }
+                        if (opt.chamber_areas && opt.chamber_areas.length) {
+                            layers.setLayer("chamber area", { face: 0x00ffff, opacity: 0.15 }, false)
+                                  .addAreas(opt.chamber_areas);
+                        }
+                        if (opt.corridor_areas && opt.corridor_areas.length) {
+                            layers.setLayer("corridor area", { face: 0xff00ff, opacity: 0.15 }, false)
+                                  .addAreas(opt.corridor_areas);
                         }
                     }
                     layers
