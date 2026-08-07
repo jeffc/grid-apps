@@ -34,6 +34,284 @@ function dist2D(u, v) {
 }
 
 /**
+ * Finds the intersection of a 2D ray with a polygon.
+ * Returns the closest intersection point along the ray (t > 0).
+ */
+function getRayIntersection(center, dx, dy, poly) {
+    let pts = poly.points;
+    let best_t = Infinity;
+    let best_pt = null;
+
+    for (let i = 0; i < pts.length; i++) {
+        let p0 = pts[i];
+        let p1 = pts[(i + 1) % pts.length];
+
+        let vx = p1.x - p0.x;
+        let vy = p1.y - p0.y;
+
+        let det = -dx * vy + dy * vx;
+        if (Math.abs(det) < 1e-9) continue;
+
+        let t = ((p0.x - center.x) * vy - (p0.y - center.y) * vx) / det;
+        let u = (dx * (p0.y - center.y) - dy * (p0.x - center.x)) / det;
+
+        if (t > 0 && u >= 0 && u <= 1) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = { x: center.x + t * dx, y: center.y + t * dy };
+            }
+        }
+    }
+    return best_pt || (pts.length ? pts[0] : center); // fallback
+}
+
+/**
+ * Local vertex snapping filter: snaps wobbly boundary vertices back to the pocket walls.
+ * If a vertex is near a corner vertex of the wall, it snaps directly to the corner vertex
+ * to preserve sharp geometry. Otherwise, it snaps to the closest wall segment.
+ */
+function snapPolygonToWalls(poly, wallPolygons, tolerance = 0.15) {
+    let pts = poly.points;
+    let newPts = [];
+
+    for (let pt of pts) {
+        let bestSegDist = Infinity;
+        let bestSegProj = null;
+
+        // 1. Find the closest projection point on the wall segments
+        for (let wallPoly of wallPolygons) {
+            let wallPts = wallPoly.points;
+            for (let i = 0; i < wallPts.length; i++) {
+                let a = wallPts[i];
+                let b = wallPts[(i + 1) % wallPts.length];
+
+                let vx = b.x - a.x;
+                let vy = b.y - a.y;
+                let len2 = vx * vx + vy * vy;
+
+                let projX, projY, dist;
+                if (len2 < 1e-9) {
+                    projX = a.x;
+                    projY = a.y;
+                } else {
+                    let t = ((pt.x - a.x) * vx + (pt.y - a.y) * vy) / len2;
+                    t = Math.max(0, Math.min(1, t));
+                    projX = a.x + t * vx;
+                    projY = a.y + t * vy;
+                }
+
+                dist = Math.hypot(pt.x - projX, pt.y - projY);
+                if (dist < bestSegDist) {
+                    bestSegDist = dist;
+                    bestSegProj = { x: projX, y: projY };
+                }
+            }
+
+            // Handle inner loops (islands)
+            if (wallPoly.inner) {
+                for (let innerPoly of wallPoly.inner) {
+                    let innerPts = innerPoly.points;
+                    for (let i = 0; i < innerPts.length; i++) {
+                        let a = innerPts[i];
+                        let b = innerPts[(i + 1) % innerPts.length];
+
+                        let vx = b.x - a.x;
+                        let vy = b.y - a.y;
+                        let len2 = vx * vx + vy * vy;
+
+                        let projX, projY, dist;
+                        if (len2 < 1e-9) {
+                            projX = a.x;
+                            projY = a.y;
+                        } else {
+                            let t = ((pt.x - a.x) * vx + (pt.y - a.y) * vy) / len2;
+                            t = Math.max(0, Math.min(1, t));
+                            projX = a.x + t * vx;
+                            projY = a.y + t * vy;
+                        }
+
+                        dist = Math.hypot(pt.x - projX, pt.y - projY);
+                        if (dist < bestSegDist) {
+                            bestSegDist = dist;
+                            bestSegProj = { x: projX, y: projY };
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Find the closest corner vertex of the wall polygons
+        let bestVertexDist = Infinity;
+        let bestVertex = null;
+
+        for (let wallPoly of wallPolygons) {
+            let wallPts = wallPoly.points;
+            for (let wp of wallPts) {
+                let dist = Math.hypot(pt.x - wp.x, pt.y - wp.y);
+                if (dist < bestVertexDist) {
+                    bestVertexDist = dist;
+                    bestVertex = wp;
+                }
+            }
+
+            if (wallPoly.inner) {
+                for (let innerPoly of wallPoly.inner) {
+                    let innerPts = innerPoly.points;
+                    for (let wp of innerPts) {
+                        let dist = Math.hypot(pt.x - wp.x, pt.y - wp.y);
+                        if (dist < bestVertexDist) {
+                            bestVertexDist = dist;
+                            bestVertex = wp;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Choose the snapping target: snap directly to the corner vertex if near a corner
+        if (bestVertexDist < tolerance && (bestVertexDist < bestSegDist + 0.02 || bestVertexDist < 0.05)) {
+            newPts.push(newPoint(bestVertex.x, bestVertex.y, pt.z));
+        } else if (bestSegDist < tolerance && bestSegProj) {
+            newPts.push(newPoint(bestSegProj.x, bestSegProj.y, pt.z));
+        } else {
+            newPts.push(pt.clone());
+        }
+    }
+
+    return newPolygon().addPoints(newPts);
+}
+
+/**
+ * Generates a continuous spiral path that morphs from the center generator to the chamber boundary.
+ * Uses global interpolation between a circle and the target offset shapes to distribute the morph
+ * smoothly across the entire spiral.
+ */
+function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, z, toolRadius, options) {
+    let loops = [ chamberBoundary.clone() ];
+    let current = chamberBoundary;
+    
+    // Find the center point of the generator
+    let genCenter = { x: 0, y: 0 };
+    for (let n of generator.nodes) {
+        genCenter.x += n.x;
+        genCenter.y += n.y;
+    }
+    genCenter.x /= generator.nodes.length;
+    genCenter.y /= generator.nodes.length;
+
+    // Calculate maximum safe helix radius
+    // Limit to 0.95 * toolRadius (helix diameter of 1.9 * toolRadius) to ensure 
+    // the inner cut edge overlaps the center point and leaves no standing post.
+    let matRadius = generator.nodes[0].radius;
+    let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
+    
+    while (true) {
+        let next = POLY.offset([ current ], -targetStepover, { z: z });
+        if (next.length === 0) {
+            break;
+        }
+        // Filter for the loop that contains the generator center
+        let pPt = newPoint(genCenter.x, genCenter.y, z);
+        let match = next.find(p => pPt.inPolygon(p));
+        if (!match) {
+            // Fallback: take the largest one
+            let largest = next[0];
+            for (let p of next) {
+                if (p.area() > Math.abs(largest.area())) largest = p;
+            }
+            match = largest;
+        }
+        current = match.clean(true, null, 0.02); // minor clean to keep offset curves smooth
+        loops.push(current);
+    }
+    
+    loops.reverse();
+
+    // Duplicate the final loop (outer boundary) to act as a 360-degree cleanup pass
+    // that starts and ends at angle 0 with perfect continuity, avoiding any gashes/jumps.
+    loops.push(loops[loops.length - 1].clone());
+
+    // Generate helical entry points
+    let path_pts = [];
+    let H = options.down ?? 2.0; // clearance height / Z stepdown
+    let zStart = z + H;
+
+    if (helixRadius > 0.05) {
+        let rampAngle = 3 * Math.PI / 180; // 3-degree ramp angle
+        let pitch = 2 * Math.PI * helixRadius * Math.tan(rampAngle);
+        let numTurns = Math.max(1, H / pitch);
+        let totalRad = numTurns * 2 * Math.PI;
+
+        let numSteps = Math.ceil(72 * numTurns);
+        for (let j = 0; j <= numSteps; j++) {
+            let u = j / numSteps;
+            // End exactly at angle 0 for continuity
+            let theta = ccw ? (-totalRad * (1 - u)) : (totalRad * (1 - u));
+            
+            let px = genCenter.x + helixRadius * Math.cos(theta);
+            let py = genCenter.y + helixRadius * Math.sin(theta);
+            let pz = zStart - H * u;
+            path_pts.push(newPoint(px, py, pz));
+        }
+
+        // Filter out wobbly innermost loops that are smaller than the helix circle
+        let minLoopArea = Math.PI * helixRadius * helixRadius;
+        loops = loops.filter(p => p.area() > minLoopArea * 1.05);
+
+        // Prepend the helix end circle as the innermost loop for clean, smooth transition
+        let helixCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), helixRadius, 72);
+        loops.unshift(helixCircle);
+    } else {
+        // Plunge straight down
+        path_pts.push(newPoint(genCenter.x, genCenter.y, zStart));
+        path_pts.push(newPoint(genCenter.x, genCenter.y, z));
+
+        // Add a tiny circle at the center as the innermost loop for clean center-start
+        let tinyCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), 0.01, 8);
+        loops.unshift(tinyCircle);
+    }
+    
+    let numSteps = 72; // 5-degree steps
+    let N = loops.length - 2; // Total loops excluding the final cleanup pass loop
+    
+    for (let i = 0; i < loops.length - 1; i++) {
+        let l0 = loops[i];
+        let l1 = loops[i+1];
+        
+        let isCleanup = (i === loops.length - 2); // Final 360-degree cleanup loop
+        
+        for (let j = 0; j < numSteps; j++) {
+            let u = j / numSteps;
+            let theta = ccw ? (u * 2 * Math.PI) : ((1 - u) * 2 * Math.PI);
+            let dx = Math.cos(theta);
+            let dy = Math.sin(theta);
+            
+            let p0 = getRayIntersection(genCenter, dx, dy, l0);
+            let p1 = getRayIntersection(genCenter, dx, dy, l1);
+            
+            // Local blended point between loop i and loop i+1
+            let px_loc = (1 - u) * p0.x + u * p1.x;
+            let py_loc = (1 - u) * p0.y + u * p1.y;
+            
+            // Circle projection point at current angle
+            let p_circle = getRayIntersection(genCenter, dx, dy, loops[0]);
+            
+            // Global weight to morph from circle (loop 0) to actual offset shapes (loop N)
+            // Goes from 0 (at loop 0 start) to 1 (at loop N start)
+            let t = isCleanup ? 1.0 : Math.min(1.0, (i + u) / Math.max(1, N));
+            
+            // Apply global interpolation
+            let px = (1 - t) * p_circle.x + t * px_loc;
+            let py = (1 - t) * p_circle.y + t * py_loc;
+            
+            path_pts.push(newPoint(px, py, z));
+        }
+    }
+    
+    return newPolygon().addPoints(path_pts).setOpen();
+}
+
+/**
  * Builds a Medial Axis Transform (MAT) graph from flat segments returned by JSPoly.
  * The graph nodes operate in normal workspace units (unscaled) and include toolRadius.
  * 
@@ -110,6 +388,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let toolRadius = toolDiam / 2;
     let threshold = 1.25 * toolDiam;
     let gradientLimit = 0.5; // Corresponds exactly to a 60-degree corner angle
+
+    // Compute target stepover from Tool Engagement Angle (TEA)
+    // Formula: stepover = toolDiam * Math.sin(TEA / 2) * Math.sin(TEA / 2)
+    let teaRad = (options.tea ?? 60) * Math.PI / 180;
+    let targetStepover = toolDiam * Math.sin(teaRad / 2) * Math.sin(teaRad / 2);
     
     // Check if we are clearing a pocket around a part profile (has holes)
     // or just clearing empty stock above the part (no holes).
@@ -612,6 +895,83 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         };
     });
 
-    // Return the original polygons to prevent the slice loop from breaking
+    // 10. Generate the actual toolpaths for chambers
+    let toolpaths = [];
+    let ccw = (options.direction === 'climb');
+
+    for (let walk of all_walks) {
+        for (let step of walk) {
+            if (step.first) {
+                if (step.strategy === 'chamber') {
+                    let m = metaNodes.find(node => node.id === step.id);
+                    if (m && m.generator) {
+                        // Calculate boundary for this specific chamber MetaNode
+                        let m_capsules = [];
+                        let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
+
+                        if (chamberNodes.length === 1) {
+                            let n = chamberNodes[0];
+                            m_capsules.push(newPolygon().centerCircle(newPoint(n.x, n.y, z), n.radius, 12));
+                        } else {
+                            let chamberEdges = new Set();
+                            for (let node of chamberNodes) {
+                                for (let neighbor of node.neighbors) {
+                                    if (neighbor.chamberId === m.generator.id) {
+                                        let key = node.x < neighbor.x ? 
+                                            `${node.x},${node.y}:${neighbor.x},${neighbor.y}` : 
+                                            `${neighbor.x},${neighbor.y}:${node.x},${node.y}`;
+                                        if (!chamberEdges.has(key)) {
+                                            chamberEdges.add(key);
+                                            m_capsules.push(...makeTaperedCapsule(node, neighbor));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let m_union = m_capsules.length ? POLY.union(m_capsules, 0.00001, true) : [];
+                        
+                        // CRITICAL: Clip the chamber capsules to offset_polygons (the tool center boundary)
+                        // rather than polygons (the physical stock walls). This prevents tool gouging and
+                        // guarantees the outer loops are mitered correctly according to the tool offset.
+                        let B_m = m_union.length ? POLY.trimTo(m_union, offset_polygons) : [];
+
+                        if (B_m.length > 0) {
+                            // Snap both the outer boundary and the inner hole boundaries (if any exist) to offset_polygons
+                            let targetPoly = B_m[0];
+                            let snappedBoundary = snapPolygonToWalls(targetPoly, offset_polygons, 0.15);
+                            if (targetPoly.inner) {
+                                snappedBoundary.inner = targetPoly.inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
+                            }
+                            
+                            let spiral = generateChamberSpiral(snappedBoundary, m.generator, targetStepover, ccw, z, toolRadius, options);
+                            toolpaths.push(spiral);
+                        }
+                    }
+                } else if (step.strategy === 'corridor') {
+                    // Output individual corridor lines as separate open polygons
+                    let m = metaNodes.find(node => node.id === step.id);
+                    if (m) {
+                        for (let seg of corridor_lines) {
+                            let n0 = mat_graph.find(n => n.x === seg.point0.x && n.y === seg.point0.y);
+                            let n1 = mat_graph.find(n => n.x === seg.point1.x && n.y === seg.point1.y);
+                            if (n0 && n1 && n0.metaNode === m && n1.metaNode === m) {
+                                toolpaths.push(newPolygon().addPoints([
+                                    newPoint(seg.point0.x, seg.point0.y, z),
+                                    newPoint(seg.point1.x, seg.point1.y, z)
+                                ]).setOpen());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (toolpaths.length > 0) {
+        return toolpaths;
+    }
+
+    // Return the original polygons as fallback to prevent G-code errors
     return polygons;
 }

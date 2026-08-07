@@ -597,6 +597,7 @@ export const conf = {
                 camAdaptiveOmitThru: false,
                 camAdaptiveZBottom: 0,
                 camAdaptiveZTop: 0,
+                camAdaptiveTEA: 60,
                 camRegisterOffset: 10,
                 camRegisterSpeed: 1000,
                 camRegisterThru: 5,

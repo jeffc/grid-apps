@@ -36,6 +36,7 @@ class OpAdaptive extends CamOp {
             plunge: op.plunge,
             mode: 'adaptive',
             over: op.step,
+            tea: op.tea,
             down: op.down,
             expand: 0,
             smooth: 0,

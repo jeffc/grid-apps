@@ -302,7 +302,9 @@ class OpArea extends CamOp {
                         leave_xy: op.leave_xy ?? 0,
                         finish_cut: op.finish_cut ?? 0,
                         walls: op.walls,
-                        steps: op.steps
+                        steps: op.steps,
+                        tea: op.tea,
+                        down: op.down
                     };
                     let outs = adaptiveClear(clip, toolDiam, toolOver, opt);
 
