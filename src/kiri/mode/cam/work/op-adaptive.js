@@ -24,7 +24,8 @@ class OpAdaptive extends CamOp {
             shadowBase = [ newPolygon().centerRectangle(stock.center, stock.x, stock.y) ];
         }
 
-        let areas = POLY.flatten(POLY.expand(shadowBase, tool.fluteDiameter() / 2 - 0.001));
+        let expand_dist = op.all ? (tool.fluteDiameter() / 2 - 0.001) : (tool.fluteDiameter() + 0.1);
+        let areas = POLY.flatten(POLY.expand(shadowBase, expand_dist));
 
         let adaptiveConfig = {
             rename: op.rename ?? "adaptive",

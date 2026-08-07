@@ -296,14 +296,15 @@ class OpArea extends CamOp {
                         POLY.subtract([ area ], shadow, clip, undefined, undefined, 0);
                     }
                     
-                    let outs = adaptiveClear(clip, toolDiam, toolOver, {
+                    let opt = {
                         z: z - zMov,
                         direction,
                         leave_xy: op.leave_xy ?? 0,
                         finish_cut: op.finish_cut ?? 0,
                         walls: op.walls,
                         steps: op.steps
-                    });
+                    };
+                    let outs = adaptiveClear(clip, toolDiam, toolOver, opt);
 
                     if (outs.length === 0) {
                         if (bounds && lzo > bounds.min.z) {
@@ -334,13 +335,35 @@ class OpArea extends CamOp {
                     zroc += zinc_down;
                     lzo = z;
                     progress(proc + (pinc * zroc), 'adaptive');
-                    if (devel) layers
-                        .setLayer("base", { line: 0xff0000 }, false)
-                        .addPolys(shadowBase)
-                        .setLayer("shadow", { line: 0x00ff00 }, false)
-                        .addPolys(shadow)
-                        .setLayer("tool shadow", { line: 0x44ff88 }, false)
-                        .addPolys(tool_shadow);
+                    if (devel) {
+                        layers
+                            .setLayer("base", { line: 0xff0000 }, false)
+                            .addPolys(shadowBase)
+                            .setLayer("shadow", { line: 0x00ff00 }, false)
+                            .addPolys(shadow)
+                            .setLayer("tool shadow", { line: 0x44ff88 }, false)
+                            .addPolys(tool_shadow);
+                        if (opt.mat_lines && opt.mat_lines.length) {
+                            let mat_lines = [];
+                            for (let { point0, point1 } of opt.mat_lines) {
+                                let p0 = newPoint(point0.x, point0.y, z);
+                                let p1 = newPoint(point1.x, point1.y, z);
+                                mat_lines.push(p0, p1);
+                            }
+                            if (mat_lines.length) {
+                                layers.setLayer("MAT", { line: 0xff00ff }, false)
+                                      .addLines(mat_lines);
+                            }
+                        }
+                        if (opt.max_nodes && opt.max_nodes.length) {
+                            for (let node of opt.max_nodes) {
+                                let center = newPoint(node.x, node.y, z);
+                                let circle = newPolygon().centerCircle(center, node.radius, 36);
+                                layers.setLayer("MAT", { line: 0xff00ff }, false)
+                                      .addPoly(circle);
+                            }
+                        }
+                    }
                     layers
                         .setLayer(rename ?? "adaptive", { line: color }, false)
                         .addPolys(outs);
