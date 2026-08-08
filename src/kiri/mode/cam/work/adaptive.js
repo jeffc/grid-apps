@@ -805,11 +805,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         metaNodes.push(meta);
     }
 
-    /**
-     * Extracts the centerline skeleton "spine" of a MetaNode.
-     * Sorts the chained segment paths by length descending to ensure the main trunk
-     * is chosen and short corner branch anomalies are ignored.
-     */
     function getMetaSpine(m, z) {
         if (m.strategy === 'chamber' || m.strategy === 'entry') {
             return m.generator.nodes.map(n => newPoint(n.x, n.y, z));
@@ -878,6 +873,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             }
         }
     }
+
 
     // Calculate Centers for all MetaNodes
     let metaCenters = new Map();
@@ -1203,8 +1199,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     for (let walk of all_walks) {
         if (walk.length === 0) continue;
         
-        let startStep = walk[0];
-        let startMetaNode = metaNodes.find(node => node.id === startStep.id);
         let metaSpines = new Map(); // Cache spines in their first traversed direction
         let helicalEntryAdded = false; // Tracks if helical plunge has been generated for this component
 
@@ -1245,185 +1239,184 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             }
             return helixPts;
         }
-        
-        if (startMetaNode && startMetaNode.strategy === 'chamber') {
-            clearedMetaNodes.add(startMetaNode.id);
-            
-            let m_capsules = [];
-            let chamberNodes = mat_graph.filter(node => node.chamberId === startMetaNode.generator.id);
-            if (chamberNodes.length === 1) {
-                m_capsules.push(newPolygon().centerCircle(newPoint(chamberNodes[0].x, chamberNodes[0].y, z), chamberNodes[0].radius, 12));
-            } else {
-                for (let node of chamberNodes) {
-                    for (let neighbor of node.neighbors) {
-                        if (neighbor.chamberId === startMetaNode.generator.id) {
-                            m_capsules.push(...makeTaperedCapsule(node, neighbor));
-                        }
-                    }
-                }
-            }
-            let B_m = POLY.trimTo(POLY.union(m_capsules, 0.00001, true), offset_polygons);
-            if (B_m.length > 0) {
-                let snapped = snapPolygonToWalls(B_m[0], offset_polygons, 0.15);
-                if (B_m[0].inner) {
-                    snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
-                }
-                let spiral = generateChamberSpiral(snapped, startMetaNode.generator, targetStepover, ccw, z, toolRadius, options);
 
-                let ptsArray = spiral.points;
-                if (!helicalEntryAdded && ptsArray.length > 0) {
-                    let firstPt = ptsArray[0];
-                    let entryPts = makeHelicalEntry(firstPt, startMetaNode.generator.nodes[0]);
-                    ptsArray = [ ...entryPts, ...ptsArray ];
-                    helicalEntryAdded = true;
-                }
-
-                let oriented = pushPoints(ptsArray, true);
-                if (oriented && oriented.length > 0) {
-                    startStep.start_x = oriented[0].x;
-                    startStep.start_y = oriented[0].y;
-                    startStep.end_x = oriented[oriented.length - 1].x;
-                    startStep.end_y = oriented[oriented.length - 1].y;
-                }
-                
-                let spine = startMetaNode.spine;
-                metaSpines.set(startMetaNode.id, spine);
-            }
-        } else if (startMetaNode && startMetaNode.strategy === 'entry') {
-            clearedMetaNodes.add(startMetaNode.id);
-            
-            let centerPt = startMetaNode.spine[0];
-            let entryPts = makeHelicalEntry(centerPt, startMetaNode.generator.nodes[0]);
-            helicalEntryAdded = true;
-
-            let oriented = pushPoints(entryPts, true);
-            if (oriented && oriented.length > 0) {
-                startStep.start_x = oriented[0].x;
-                startStep.start_y = oriented[0].y;
-                startStep.end_x = oriented[oriented.length - 1].x;
-                startStep.end_y = oriented[oriented.length - 1].y;
-            }
-
-            let spine = startMetaNode.spine;
-            metaSpines.set(startMetaNode.id, spine);
-        }
-
-        for (let i = 1; i < walk.length; i++) {
+        for (let i = 0; i < walk.length; i++) {
             let step = walk[i];
             let m = metaNodes.find(node => node.id === step.id);
             if (!m) continue;
 
             let oriented = null;
 
-            if (step.first) {
-                if (!clearedMetaNodes.has(m.id)) {
-                    clearedMetaNodes.add(m.id);
-                    
-                    if (m.strategy === 'chamber') {
-                        let m_capsules = [];
-                        let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
-                        if (chamberNodes.length === 1) {
-                            m_capsules.push(newPolygon().centerCircle(newPoint(chamberNodes[0].x, chamberNodes[0].y, z), chamberNodes[0].radius, 12));
-                        } else {
-                            for (let node of chamberNodes) {
-                                for (let neighbor of node.neighbors) {
-                                    if (neighbor.chamberId === m.generator.id) {
-                                        m_capsules.push(...makeTaperedCapsule(node, neighbor));
-                                    }
-                                }
-                            }
-                        }
-                        let B_m = POLY.trimTo(POLY.union(m_capsules, 0.00001, true), offset_polygons);
-                        if (B_m.length > 0) {
-                            let snapped = snapPolygonToWalls(B_m[0], offset_polygons, 0.15);
-                            if (B_m[0].inner) {
-                                snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
-                            }
-                            let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius, options);
-                            
-                            let ptsArray = spiral.points;
-                            if (ptsArray.length > 0) {
-                                let enterPt = !step.resolvedEnterEnd ? m.spine[0] : m.spine[m.spine.length - 1];
-                                let dStart = Math.hypot(ptsArray[0].x - enterPt.x, ptsArray[0].y - enterPt.y);
-                                let dEnd = Math.hypot(ptsArray[ptsArray.length - 1].x - enterPt.x, ptsArray[ptsArray.length - 1].y - enterPt.y);
-                                if (dEnd < dStart) {
-                                    ptsArray.reverse();
-                                }
-                            }
-
-                            if (!helicalEntryAdded && ptsArray.length > 0) {
-                                let entryPts = makeHelicalEntry(ptsArray[0], m.generator.nodes[0]);
-                                ptsArray = [ ...entryPts, ...ptsArray ];
-                                helicalEntryAdded = true;
-                            }
-
-                            oriented = pushPoints(ptsArray, true);
-                        }
-                        
-                        let spine = m.spine;
-                        metaSpines.set(m.id, spine);
-                    } else if (m.strategy === 'entry') {
-                        let centerPt = m.spine[0];
-                        let entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
-                        helicalEntryAdded = true;
-
-                        oriented = pushPoints(entryPts, true);
-                        
-                        let spine = m.spine;
-                        metaSpines.set(m.id, spine);
-                    } else if (m.strategy === 'corridor') {
-                        let segs = [];
-                        for (let seg of corridor_lines) {
-                            let n0 = mat_graph.find(n => n.x === seg.point0.x && n.y === seg.point0.y);
-                            let n1 = mat_graph.find(n => n.x === seg.point1.x && n.y === seg.point1.y);
-                            if (n0 && n1 && n0.metaNode === m && n1.metaNode === m) {
-                                segs.push({ p0: seg.point0, p1: seg.point1 });
-                            }
-                        }
-                        let paths = chainSegments(segs);
-                        let allTrochPts = [];
-                        for (let p of paths) {
-                            for (let idx = 0; idx < p.length - 1; idx++) {
-                                allTrochPts.push(...generateTrochoidSegment(p[idx], p[idx+1], targetStepover, toolRadius, ccw, z));
-                            }
-                        }
-
-                        if (allTrochPts.length > 0) {
-                            let enterPt = !step.resolvedEnterEnd ? m.spine[0] : m.spine[m.spine.length - 1];
-                            let dStart = Math.hypot(allTrochPts[0].x - enterPt.x, allTrochPts[0].y - enterPt.y);
-                            let dEnd = Math.hypot(allTrochPts[allTrochPts.length - 1].x - enterPt.x, allTrochPts[allTrochPts.length - 1].y - enterPt.y);
-                            if (dEnd < dStart) {
-                                allTrochPts.reverse();
-                            }
-                        }
-
-                        if (!helicalEntryAdded && allTrochPts.length > 0) {
-                            let fakeNode = { x: allTrochPts[0].x, y: allTrochPts[0].y, radius: m.nodes[0].radius };
-                            let entryPts = makeHelicalEntry(allTrochPts[0], fakeNode);
-                            allTrochPts = [ ...entryPts, ...allTrochPts ];
-                            helicalEntryAdded = true;
-                        }
-
-                        oriented = pushPoints(allTrochPts, true);
-                        
-                        let spine = m.spine;
-                        metaSpines.set(m.id, spine);
-                    }
-                } else {
-                    let spine = m.spine;
-                    let orientedSpine = spine.slice();
-                    if (step.resolvedEnterEnd) {
-                        orientedSpine.reverse();
-                    }
-                    oriented = pushPoints(orientedSpine, false, true);
-                }
-            } else {
-                let spine = m.spine;
-                let orientedSpine = spine.slice();
+            if (step.first === false) {
+                // Do a z-hop and insert its spine points in the proper order
+                let orientedSpine = m.spine.slice();
                 if (step.resolvedEnterEnd) {
                     orientedSpine.reverse();
                 }
                 oriented = pushPoints(orientedSpine, false, true);
+            } else {
+                // First-time visit
+                if (m.strategy === 'chamber') {
+                    let m_capsules = [];
+                    let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
+                    if (chamberNodes.length === 1) {
+                        m_capsules.push(newPolygon().centerCircle(newPoint(chamberNodes[0].x, chamberNodes[0].y, z), chamberNodes[0].radius, 12));
+                    } else {
+                        for (let node of chamberNodes) {
+                            for (let neighbor of node.neighbors) {
+                                if (neighbor.chamberId === m.generator.id) {
+                                    m_capsules.push(...makeTaperedCapsule(node, neighbor));
+                                }
+                            }
+                        }
+                    }
+                    let B_m = POLY.trimTo(POLY.union(m_capsules, 0.00001, true), offset_polygons);
+                    if (B_m.length > 0) {
+                        let snapped = snapPolygonToWalls(B_m[0], offset_polygons, 0.15);
+                        if (B_m[0].inner) {
+                            snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
+                        }
+                        let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius, options);
+                        
+                        let ptsArray = spiral.points;
+                        if (ptsArray.length > 0) {
+                            let enterPt = !step.resolvedEnterEnd ? m.spine[0] : m.spine[m.spine.length - 1];
+                            let dStart = Math.hypot(ptsArray[0].x - enterPt.x, ptsArray[0].y - enterPt.y);
+                            let dEnd = Math.hypot(ptsArray[ptsArray.length - 1].x - enterPt.x, ptsArray[ptsArray.length - 1].y - enterPt.y);
+                            if (dEnd < dStart) {
+                                ptsArray.reverse();
+                            }
+                        }
+
+                        if (!helicalEntryAdded && ptsArray.length > 0) {
+                            let entryPts = makeHelicalEntry(ptsArray[0], m.generator.nodes[0]);
+                            ptsArray = [ ...entryPts, ...ptsArray ];
+                            helicalEntryAdded = true;
+                        }
+
+                        oriented = pushPoints(ptsArray, true);
+                    }
+                    metaSpines.set(m.id, m.spine);
+                } else if (m.strategy === 'entry') {
+                    let centerPt = m.spine[0];
+                    let entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
+                    helicalEntryAdded = true;
+
+                    oriented = pushPoints(entryPts, true);
+                    metaSpines.set(m.id, m.spine);
+                } else if (m.strategy === 'corridor') {
+                    // Start a new point list C
+                    let C = [];
+
+                    // Helper to get oriented spine points with radius
+                    function getOrientedSpine(stepNode, stepWalk) {
+                        let orientedSpine = stepNode.spine.slice();
+                        if (stepWalk.resolvedEnterEnd) {
+                            orientedSpine.reverse();
+                        }
+                        return orientedSpine.map(pt => {
+                            let p = pt.clone();
+                            let closest = stepNode.nodes[0];
+                            let bestD = Infinity;
+                            for (let n of stepNode.nodes) {
+                                let d = Math.hypot(n.x - p.x, n.y - p.y);
+                                if (d < bestD) {
+                                    bestD = d;
+                                    closest = n;
+                                }
+                            }
+                            p.radius = closest.radius;
+                            return p;
+                        });
+                    }
+
+                    // Add points in the corridor to C
+                    C.push(...getOrientedSpine(m, step));
+
+                    // Keep iterating until we hit a "not first time" node or a non-corridor node
+                    let nextIdx = i + 1;
+                    while (nextIdx < walk.length) {
+                        let nextStep = walk[nextIdx];
+                        let nextM = metaNodes.find(node => node.id === nextStep.id);
+                        if (nextM && nextM.strategy === 'corridor' && nextStep.first === true) {
+                            C.push(...getOrientedSpine(nextM, nextStep));
+                            i = nextIdx; // Advance outer loop index
+                            nextIdx++;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Add the first point of the next meta-node to C
+                    if (i + 1 < walk.length) {
+                        let nextStep = walk[i + 1];
+                        let nextM = metaNodes.find(node => node.id === nextStep.id);
+                        if (nextM) {
+                            let nextOriented = nextM.spine.slice();
+                            if (nextStep.resolvedEnterEnd) {
+                                nextOriented.reverse();
+                            }
+                            if (nextOriented.length > 0) {
+                                let nextPt = nextOriented[0].clone();
+                                let closest = (nextM.strategy === 'chamber' || nextM.strategy === 'entry') ?
+                                    nextM.generator.nodes[0] : nextM.nodes[0];
+                                if (nextM.strategy === 'corridor') {
+                                    let bestD = Infinity;
+                                    for (let n of nextM.nodes) {
+                                        let d = Math.hypot(n.x - nextPt.x, n.y - nextPt.y);
+                                        if (d < bestD) {
+                                            bestD = d;
+                                            closest = n;
+                                        }
+                                    }
+                                }
+                                nextPt.radius = closest.radius;
+                                C.push(nextPt);
+                            }
+                        }
+                    }
+
+                    // Compute target stepover S and resample C to form D
+                    let S = targetStepover;
+                    let D = [];
+                    for (let j = 0; j < C.length; j++) {
+                        let p0 = C[j];
+                        D.push(p0);
+                        if (j < C.length - 1) {
+                            let p1 = C[j+1];
+                            let dx = p1.x - p0.x;
+                            let dy = p1.y - p0.y;
+                            let d = Math.hypot(dx, dy);
+                            if (d > S) {
+                                let steps = Math.floor(d / S);
+                                for (let k = 1; k <= steps; k++) {
+                                    let dist = k * S;
+                                    if (dist >= d - 0.001) break;
+                                    let t = dist / d;
+                                    let interpPt = newPoint(p0.x + dx * t, p0.y + dy * t, p0.z);
+                                    interpPt.radius = p0.radius + (p1.radius - p0.radius) * t;
+                                    D.push(interpPt);
+                                }
+                            }
+                        }
+                    }
+
+                    // Use D as the input path for trochoid generation
+                    let allTrochPts = [];
+                    for (let idx = 0; idx < D.length - 1; idx++) {
+                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z));
+                    }
+
+                    if (!helicalEntryAdded && allTrochPts.length > 0) {
+                        let fakeNode = { x: allTrochPts[0].x, y: allTrochPts[0].y, radius: m.nodes[0].radius };
+                        let entryPts = makeHelicalEntry(allTrochPts[0], fakeNode);
+                        allTrochPts = [ ...entryPts, ...allTrochPts ];
+                        helicalEntryAdded = true;
+                    }
+
+                    oriented = pushPoints(allTrochPts, true);
+                    metaSpines.set(m.id, m.spine);
+                }
             }
 
             if (oriented && oriented.length > 0) {
@@ -1439,6 +1432,19 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             pts = [];
         }
     }
+
+    console.log(`=== [MAT Debug] Walk Step Toolpath Endpoints ===`);
+    for (let walk of all_walks) {
+        for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
+            let step = walk[stepIndex];
+            let startStr = (step.start_x !== undefined && step.start_y !== undefined) ? 
+                `(${step.start_x.toFixed(4)}, ${step.start_y.toFixed(4)})` : 'undefined';
+            let endStr = (step.end_x !== undefined && step.end_y !== undefined) ? 
+                `(${step.end_x.toFixed(4)}, ${step.end_y.toFixed(4)})` : 'undefined';
+            console.log(`  Step ${stepIndex}: Node ID: ${step.id}, Strategy: ${step.strategy}, First/Cut Visit: ${step.first}, Start: ${startStr}, End: ${endStr}`);
+        }
+    }
+    console.log(`===============================================`);
 
     if (toolpaths.length > 0) {
         return toolpaths;
