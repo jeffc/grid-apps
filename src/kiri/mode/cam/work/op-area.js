@@ -304,7 +304,10 @@ class OpArea extends CamOp {
                         walls: op.walls,
                         steps: op.steps,
                         tea: op.tea,
-                        down: op.down
+                        down: op.down,
+                        // zTop is required by adaptiveClear to calculate the safe helical entry starting height
+                        zTop: workarea.top_z,
+                        entry_helix_angle: op.entry_helix_angle
                     };
                     let outs = adaptiveClear(clip, toolDiam, toolOver, opt);
 
@@ -424,8 +427,13 @@ class OpArea extends CamOp {
                                         let w0 = walk[i];
                                         let w1 = walk[i+1];
                                         
-                                        let p0 = newPoint(w0.x, w0.y, z + 0.1);
-                                        let p1 = newPoint(w1.x, w1.y, z + 0.1);
+                                        let w0_end_x = w0.end_x ?? w0.x;
+                                        let w0_end_y = w0.end_y ?? w0.y;
+                                        let w1_start_x = w1.start_x ?? w1.x;
+                                        let w1_start_y = w1.start_y ?? w1.y;
+
+                                        let p0 = newPoint(w0_end_x, w0_end_y, z + 0.1);
+                                        let p1 = newPoint(w1_start_x, w1_start_y, z + 0.1);
 
                                         // The segment is a backtrack if the target node w1 is NOT being visited for the first time
                                         let isBacktrack = !w1.first;
@@ -436,8 +444,8 @@ class OpArea extends CamOp {
                                             walk_first_lines.push(p0, p1);
                                         }
 
-                                        let dx = w1.x - w0.x;
-                                        let dy = w1.y - w0.y;
+                                        let dx = w1_start_x - w0_end_x;
+                                        let dy = w1_start_y - w0_end_y;
                                         let len = Math.hypot(dx, dy);
                                         if (len > 3.0) {
                                             let ux = dx / len;
@@ -445,8 +453,8 @@ class OpArea extends CamOp {
                                             let nx = -uy;
                                             let ny = ux;
 
-                                            let mx = (w0.x + w1.x) / 2;
-                                            let my = (w0.y + w1.y) / 2;
+                                            let mx = (w0_end_x + w1_start_x) / 2;
+                                            let my = (w0_end_y + w1_start_y) / 2;
                                             let pm = newPoint(mx, my, z + 0.15);
 
                                             let pw1 = newPoint(

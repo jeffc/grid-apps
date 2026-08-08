@@ -19,10 +19,12 @@ class MATNode {
 class MetaNode {
     constructor(id, strategy, generator = null) {
         this.id = id;
-        this.strategy = strategy; // 'chamber' or 'corridor'
+        this.strategy = strategy; // 'chamber', 'entry', or 'corridor'
         this.generator = generator; // generator object or null
         this.nodes = []; // MATNodes belonging to this meta-node
         this.neighbors = new Set(); // Connected MetaNodes
+        this.connections = []; // Connections: { neighbor: MetaNode, myEnd: boolean, itsEnd: boolean }
+        this.spine = []; // Precomputed ordered list of skeleton points (workspace coordinates)
     }
 }
 
@@ -200,8 +202,6 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     genCenter.y /= generator.nodes.length;
 
     // Calculate maximum safe helix radius
-    // Limit to 0.95 * toolRadius (helix diameter of 1.9 * toolRadius) to ensure 
-    // the inner cut edge overlaps the center point and leaves no standing post.
     let matRadius = generator.nodes[0].radius;
     let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
     
@@ -210,11 +210,9 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
         if (next.length === 0) {
             break;
         }
-        // Filter for the loop that contains the generator center
         let pPt = newPoint(genCenter.x, genCenter.y, z);
         let match = next.find(p => pPt.inPolygon(p));
         if (!match) {
-            // Fallback: take the largest one
             let largest = next[0];
             for (let p of next) {
                 if (p.area() > Math.abs(largest.area())) largest = p;
@@ -231,42 +229,13 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     // that starts and ends at angle 0 with perfect continuity, avoiding any gashes/jumps.
     loops.push(loops[loops.length - 1].clone());
 
-    // Generate helical entry points
     let path_pts = [];
-    let H = options.down ?? 2.0; // clearance height / Z stepdown
-    let zStart = z + H;
-
     if (helixRadius > 0.05) {
-        let rampAngle = 3 * Math.PI / 180; // 3-degree ramp angle
-        let pitch = 2 * Math.PI * helixRadius * Math.tan(rampAngle);
-        let numTurns = Math.max(1, H / pitch);
-        let totalRad = numTurns * 2 * Math.PI;
-
-        let numSteps = Math.ceil(72 * numTurns);
-        for (let j = 0; j <= numSteps; j++) {
-            let u = j / numSteps;
-            // End exactly at angle 0 for continuity
-            let theta = ccw ? (-totalRad * (1 - u)) : (totalRad * (1 - u));
-            
-            let px = genCenter.x + helixRadius * Math.cos(theta);
-            let py = genCenter.y + helixRadius * Math.sin(theta);
-            let pz = zStart - H * u;
-            path_pts.push(newPoint(px, py, pz));
-        }
-
-        // Filter out wobbly innermost loops that are smaller than the helix circle
         let minLoopArea = Math.PI * helixRadius * helixRadius;
         loops = loops.filter(p => p.area() > minLoopArea * 1.05);
-
-        // Prepend the helix end circle as the innermost loop for clean, smooth transition
         let helixCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), helixRadius, 72);
         loops.unshift(helixCircle);
     } else {
-        // Plunge straight down
-        path_pts.push(newPoint(genCenter.x, genCenter.y, zStart));
-        path_pts.push(newPoint(genCenter.x, genCenter.y, z));
-
-        // Add a tiny circle at the center as the innermost loop for clean center-start
         let tinyCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), 0.01, 8);
         loops.unshift(tinyCircle);
     }
@@ -312,13 +281,123 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
 }
 
 /**
+ * Generates D-shaped trochoidal cutting paths along a single corridor segment A -> B.
+ * Resamples the segment into sub-segments of length no more than targetStepover,
+ * ensuring the start (A) and end (B) points are exactly preserved.
+ */
+function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
+    let pts = [];
+    let L = Math.hypot(B.x - A.x, B.y - A.y);
+    if (L < 1e-4) return [];
+
+    let dx = (B.x - A.x) / L;
+    let dy = (B.y - A.y) / L;
+    let n = { x: -dy, y: dx };
+
+    let N = Math.ceil(L / targetStepover);
+    let S = L / N;
+
+    for (let i = 0; i < N; i++) {
+        let s0 = i * S;
+        let s1 = (i + 1) * S;
+
+        let p0 = {
+            x: A.x + s0 * dx,
+            y: A.y + s0 * dy,
+            radius: A.radius + (s0 / L) * (B.radius - A.radius)
+        };
+        let p1 = {
+            x: A.x + s1 * dx,
+            y: A.y + s1 * dy,
+            radius: A.radius + (s1 / L) * (B.radius - A.radius)
+        };
+
+        let W = Math.max(0.05, p1.radius - toolRadius);
+
+        let arcPts = [];
+        let steps = 16;
+        for (let k = 0; k <= steps; k++) {
+            let u = k / steps;
+            let theta = ccw ? (-Math.PI/2 + u * Math.PI) : (Math.PI/2 - u * Math.PI);
+            
+            let px = p0.x + W * n.x * Math.sin(theta) + S * dx * Math.cos(theta);
+            let py = p0.y + W * n.y * Math.sin(theta) + S * dy * Math.cos(theta);
+            arcPts.push(newPoint(px, py, z));
+        }
+
+        pts.push(...arcPts);
+
+        let W_next;
+        if (i < N - 1) {
+            let s2 = (i + 2) * S;
+            let r2 = A.radius + (Math.min(L, s2) / L) * (B.radius - A.radius);
+            W_next = Math.max(0.05, r2 - toolRadius);
+        } else {
+            W_next = Math.max(0.05, B.radius - toolRadius);
+        }
+
+        let nextStartPt = ccw ?
+            { x: p1.x - W_next * n.x, y: p1.y - W_next * n.y } :
+            { x: p1.x + W_next * n.x, y: p1.y + W_next * n.y };
+
+        let lastPt = arcPts[arcPts.length - 1];
+        pts.push(newPoint(lastPt.x, lastPt.y, z + 0.1));
+        pts.push(newPoint(nextStartPt.x, nextStartPt.y, z + 0.1));
+        pts.push(newPoint(nextStartPt.x, nextStartPt.y, z));
+    }
+
+    return pts;
+}
+
+/**
+ * Chains segments into continuous skeleton paths (greedy search)
+ */
+function chainSegments(segs) {
+    let paths = [];
+    let unvisited = new Set(segs);
+    while (unvisited.size > 0) {
+        let startSeg = unvisited.values().next().value;
+        unvisited.delete(startSeg);
+        let currentPath = [ startSeg.p0, startSeg.p1 ];
+        let growing = true;
+        while (growing) {
+            growing = false;
+            let endPt = currentPath[currentPath.length - 1];
+            let startPt = currentPath[0];
+            for (let s of unvisited) {
+                if (Math.hypot(s.p0.x - endPt.x, s.p0.y - endPt.y) < 1e-4) {
+                    currentPath.push(s.p1);
+                    unvisited.delete(s);
+                    growing = true;
+                    break;
+                }
+                if (Math.hypot(s.p1.x - endPt.x, s.p1.y - endPt.y) < 1e-4) {
+                    currentPath.push(s.p0);
+                    unvisited.delete(s);
+                    growing = true;
+                    break;
+                }
+                if (Math.hypot(s.p0.x - startPt.x, s.p0.y - startPt.y) < 1e-4) {
+                    currentPath.unshift(s.p1);
+                    unvisited.delete(s);
+                    growing = true;
+                    break;
+                }
+                if (Math.hypot(s.p1.x - startPt.x, s.p1.y - startPt.y) < 1e-4) {
+                    currentPath.unshift(s.p0);
+                    unvisited.delete(s);
+                    growing = true;
+                    break;
+                }
+            }
+        }
+        paths.push(currentPath);
+    }
+    return paths;
+}
+
+/**
  * Builds a Medial Axis Transform (MAT) graph from flat segments returned by JSPoly.
- * The graph nodes operate in normal workspace units (unscaled) and include toolRadius.
- * 
- * @param {Object[]} segments - Flat segments array from JSPoly
- * @param {number} toolRadius - Tool radius to add back to node radii
- * @param {number} scale - Scaling factor used for integer precision
- * @returns {MATNode[]} List of unique graph nodes in workspace units
  */
 export function buildMATGraph(segments, toolRadius, scale = 1000) {
     const nodeMap = new Map();
@@ -350,62 +429,23 @@ export function buildMATGraph(segments, toolRadius, scale = 1000) {
  * ─────────────────────────────────────────────────────────────────────────────
  * ADAPTIVE PATH PLANNING: MAT GRAPH CLASSIFICATION ALGORITHM
  * ─────────────────────────────────────────────────────────────────────────────
- * 
- * This algorithm segments the Medial Axis Transform (MAT) graph of a pocket
- * into "Chambers" (wide regions cleared via morphing spirals) and "Corridors"
- * (narrow slots cleared via trochoidal loops).
- * 
- * TRIGONOMETRIC BASIS OF THE 0.5 GRADIENT THRESHOLD:
- * The gradient G = |dR/ds| along a MAT branch represents the rate of change
- * of the inscribed circle radius R relative to the distance s along the bisector.
- * For any corner of angle alpha:
- * 
- *             /
- *            /  ) alpha/2
- *  ---------C─────────────── (Bisector / MAT)
- *            \  ) alpha/2
- *             \
- * 
- * The radius R (distance to the walls) is:
- *   R(s) = s * sin(alpha / 2)
- * The spatial gradient G = |dR/ds| is:
- *   G = sin(alpha / 2)
- * 
- * Setting G = 0.5 gives:
- *   sin(alpha / 2) = 0.5  =>  alpha / 2 = 30°  =>  alpha = 60°
- * 
- * Therefore:
- *   - G >= 0.5 corresponds to corners with angle alpha >= 60° (e.g., 90° square
- *     corners have G ≈ 0.707). These are open corners that a tool can safely
- *     expand into using a morphing spiral.
- *   - G < 0.5 corresponds to corners with angle alpha < 60° (acute angles,
- *     tapers, or slots where G = 0). These narrow slots pinch the cutter,
- *     requiring trochoidal slotting to prevent excessive tool engagement.
- * 
- * ─────────────────────────────────────────────────────────────────────────────
  */
 export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let toolRadius = toolDiam / 2;
     let threshold = 1.25 * toolDiam;
-    let gradientLimit = 0.5; // Corresponds exactly to a 60-degree corner angle
+    let gradientLimit = 0.5;
 
-    // Compute target stepover from Tool Engagement Angle (TEA)
-    // Formula: stepover = toolDiam * Math.sin(TEA / 2) * Math.sin(TEA / 2)
     let teaRad = (options.tea ?? 60) * Math.PI / 180;
     let targetStepover = toolDiam * Math.sin(teaRad / 2) * Math.sin(teaRad / 2);
     
-    // Check if we are clearing a pocket around a part profile (has holes)
-    // or just clearing empty stock above the part (no holes).
     let has_profile = polygons.some(p => p.inner && p.inner.length > 0);
     let addedRadius = has_profile ? toolRadius : 0;
 
-    // Pre-process: offset polygons inward by tool radius to collapse narrow areas
     let offset_polygons = POLY.offset(polygons, [ -toolRadius ], { z: options.z });
     
     let mat_segments = [];
     let scale = 1000;
 
-    // 1. Gather all raw MAT segments
     for (let poly of offset_polygons) {
         try {
             let scaled = poly.clone(true).scale({ x: scale, y: scale, z: scale });
@@ -432,10 +472,32 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         return polygons;
     }
 
-    // 2. Build the un-split topological graph in workspace units
     let mat_graph = buildMATGraph(mat_segments, addedRadius, scale);
 
-    // Group mat_graph into connected components of nodes (each represents a disjoint pocket)
+    // Heal numerical gaps in the MAT graph by connecting close endpoints safely.
+    // We connect points if and only if they are within each others' radius (d <= u.radius && d <= v.radius),
+    // which mathematically guarantees the connection lies entirely within the allowable pocket area
+    // without crossing any walls or boundaries.
+    let endpoints = mat_graph.filter(n => n.neighbors.size <= 1);
+    for (let i = 0; i < endpoints.length; i++) {
+        let u = endpoints[i];
+        let best_v = null;
+        let best_d = Infinity;
+        for (let j = i + 1; j < endpoints.length; j++) {
+            let v = endpoints[j];
+            if (u.neighbors.has(v)) continue;
+            let d = dist2D(u, v);
+            if (d <= u.radius && d <= v.radius && d < best_d) {
+                best_d = d;
+                best_v = v;
+            }
+        }
+        if (best_v) {
+            u.neighbors.add(best_v);
+            best_v.neighbors.add(u);
+        }
+    }
+
     let unvisitedNodes = new Set(mat_graph);
     let pocket_components = [];
 
@@ -460,12 +522,10 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         pocket_components.push(component);
     }
 
-    // 3. Scan each disjoint pocket component to identify generators
     let generators = [];
     let generatorIdCounter = 0;
 
     for (let pocket_component of pocket_components) {
-        // A. Find local maximum nodes inside this component
         let localMaxNodes = [];
         for (let node of pocket_component) {
             if (node.radius < threshold) continue;
@@ -481,7 +541,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             }
         }
 
-        // B. Group adjacent max nodes into Chamber Generators (Points or Lines)
         let pocket_generators = [];
         let visitedMax = new Set();
 
@@ -512,19 +571,21 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
             pocket_generators.push({
                 id: genId,
-                nodes: genNodes
+                nodes: genNodes,
+                type: 'chamber'
             });
         }
 
-        // Fallback: If this specific disjoint pocket is a narrow slot/corridor (no nodes above threshold),
-        // select the node with the absolute maximum radius within this component as a fallback Point Generator.
+        // Fallback: If this component has no standard chambers (no nodes above threshold),
+        // we create a special topological 'entry' node.
+        // To guarantee clean loop breaking and prevent leaving uncut regions, the entry node
+        // contains strictly the one absolute maximum node.
         if (pocket_generators.length === 0 && pocket_component.length > 0) {
             let absMaxNode = pocket_component[0];
             for (let node of pocket_component) {
                 if (node.radius > absMaxNode.radius) {
                     absMaxNode = node;
                 } else if (node.radius === absMaxNode.radius) {
-                    // Deterministic tie-breaker
                     if (node.x > absMaxNode.x) {
                         absMaxNode = node;
                     } else if (node.x === absMaxNode.x && node.y > absMaxNode.y) {
@@ -534,22 +595,23 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             }
 
             let genId = ++generatorIdCounter;
+            let genNodes = [ absMaxNode ];
             absMaxNode.isGenerator = true;
             absMaxNode.chamberId = genId;
 
             pocket_generators.push({
                 id: genId,
-                nodes: [ absMaxNode ]
+                nodes: genNodes,
+                type: 'entry'
             });
         }
 
         generators.push(...pocket_generators);
     }
 
-    // 5. Run BFS Chamber Expansion (classify nodes into chambers)
-    for (let gen of generators) {
+    // 5. Run BFS Chamber Expansion (restricted to standard 'chamber' generators)
+    for (let gen of generators.filter(g => g.type === 'chamber')) {
         let queue = [];
-        // Seed queue with all nodes in this generator
         for (let node of gen.nodes) {
             for (let neighbor of node.neighbors) {
                 if (neighbor.chamberId === null) {
@@ -562,17 +624,14 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             let { node, fromNode } = queue.shift();
             if (node.chamberId !== null) continue;
 
-            // Calculate spatial gradient along this MAT segment
             let ds = dist2D(fromNode, node);
             let dR = Math.abs(fromNode.radius - node.radius);
             let G = ds > 1e-6 ? dR / ds : 0;
 
-            // Stop expansion if we hit a narrow slot (low gradient + narrow radius)
             if (G < gradientLimit && node.radius < threshold) {
                 continue;
             }
 
-            // Otherwise, group this node into the chamber and queue its neighbors
             node.chamberId = gen.id;
             for (let neighbor of node.neighbors) {
                 if (neighbor.chamberId === null) {
@@ -586,8 +645,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let chamber_lines = [];
     let corridor_lines = [];
     let mat_lines = [];
-
-    // Track unique edges to prevent double rendering
     let renderedEdges = new Set();
 
     for (let node of mat_graph) {
@@ -605,7 +662,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
             mat_lines.push(segment);
 
-            // An edge is chamber if both connected nodes belong to the same chamber
             if (node.chamberId !== null && node.chamberId === neighbor.chamberId) {
                 chamber_lines.push(segment);
             } else {
@@ -614,7 +670,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         }
     }
 
-    // 7. Generate area polygons (tapered capsules) for chambers and corridors
+    // 7. Generate area polygons (tapered capsules)
     let z = options.z;
     let chamber_capsules = [];
     let corridor_capsules = [];
@@ -647,15 +703,13 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         return POLY.union([ poly, c0, c1 ], 0.00001, true);
     }
 
-    // Subdivides a long MAT segment into smaller sub-segments of max length (e.g. 1.0mm)
-    // to prevent trapezoidal gaps when offsetting at 45 degrees to the axes.
     function makeTaperedCapsule(p0, p1) {
         let dx = p1.x - p0.x;
         let dy = p1.y - p0.y;
         let len = Math.hypot(dx, dy);
         
         let sub_capsules = [];
-        let max_len = 1.0; // 1mm maximum length for high-precision envelope tracking
+        let max_len = 1.0;
         let num_subs = Math.ceil(len / max_len);
         
         for (let i = 0; i < num_subs; i++) {
@@ -685,22 +739,20 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         corridor_capsules.push(...makeTaperedCapsule(seg.point0, seg.point1));
     }
 
-    // Union all capsules and intersect (clip) them against the original pocket boundary
-    // to prevent visual overflow/spillage into part walls or outside the stock boundaries.
     let raw_chamber_area = chamber_capsules.length ? POLY.union(chamber_capsules, 0.00001, true) : [];
     let raw_corridor_area = corridor_capsules.length ? POLY.union(corridor_capsules, 0.00001, true) : [];
 
     options.chamber_areas = raw_chamber_area.length ? POLY.trimTo(raw_chamber_area, polygons) : [];
     options.corridor_areas = raw_corridor_area.length ? POLY.trimTo(raw_corridor_area, polygons) : [];
 
-    // 8. Build the Meta-Graph of chambers and corridors
+    // 8. Build the Meta-Graph of chambers, entries, and corridors
     let metaNodes = [];
     let metaNodeIdCounter = 0;
 
-    // A. Create Chamber MetaNodes
+    // A. Create Chamber and Entry MetaNodes
     for (let gen of generators) {
-        let meta = new MetaNode(++metaNodeIdCounter, 'chamber', gen);
-        // Find all MATNodes in this chamber
+        let strategy = gen.type; // 'chamber' or 'entry'
+        let meta = new MetaNode(++metaNodeIdCounter, strategy, gen);
         for (let node of mat_graph) {
             if (node.chamberId === gen.id) {
                 node.metaNode = meta;
@@ -710,7 +762,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         metaNodes.push(meta);
     }
 
-    // B. Create Corridor MetaNodes (identify connected components of corridor nodes)
+    // B. Create Corridor MetaNodes.
+    // To ensure every Corridor MetaNode contains strictly a single, non-branching chain
+    // of nodes, we stop growing the corridor component whenever we encounter a branching
+    // junction node (node.neighbors.size > 2). Junction nodes themselves are packaged
+    // into their own separate size-1 Corridor MetaNodes.
     let visitedCorridor = new Set();
     for (let startNode of mat_graph) {
         if (startNode.chamberId !== null || visitedCorridor.has(startNode)) {
@@ -718,39 +774,116 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         }
 
         let meta = new MetaNode(++metaNodeIdCounter, 'corridor', null);
-        let queue = [ startNode ];
-        visitedCorridor.add(startNode);
+        
+        if (startNode.neighbors.size > 2) {
+            // Junction node: put only this node in the meta-node and stop
+            startNode.metaNode = meta;
+            meta.nodes.push(startNode);
+            visitedCorridor.add(startNode);
+        } else {
+            // Regular corridor node: grow component until we hit a junction or chamber
+            let queue = [ startNode ];
+            visitedCorridor.add(startNode);
 
-        while (queue.length > 0) {
-            let node = queue.shift();
-            node.metaNode = meta;
-            meta.nodes.push(node);
+            while (queue.length > 0) {
+                let node = queue.shift();
+                node.metaNode = meta;
+                meta.nodes.push(node);
 
-            for (let neighbor of node.neighbors) {
-                if (neighbor.chamberId === null && !visitedCorridor.has(neighbor)) {
-                    visitedCorridor.add(neighbor);
-                    queue.push(neighbor);
+                for (let neighbor of node.neighbors) {
+                    if (neighbor.chamberId === null && !visitedCorridor.has(neighbor)) {
+                        if (neighbor.neighbors.size > 2) {
+                            // Stop growing before entering the junction node
+                            continue;
+                        }
+                        visitedCorridor.add(neighbor);
+                        queue.push(neighbor);
+                    }
                 }
             }
         }
         metaNodes.push(meta);
     }
 
-    // C. Establish Edges in the Meta-Graph
+    /**
+     * Extracts the centerline skeleton "spine" of a MetaNode.
+     * Sorts the chained segment paths by length descending to ensure the main trunk
+     * is chosen and short corner branch anomalies are ignored.
+     */
+    function getMetaSpine(m, z) {
+        if (m.strategy === 'chamber' || m.strategy === 'entry') {
+            return m.generator.nodes.map(n => newPoint(n.x, n.y, z));
+        } else {
+            let segs = [];
+            for (let seg of corridor_lines) {
+                let n0 = mat_graph.find(n => n.x === seg.point0.x && n.y === seg.point0.y);
+                let n1 = mat_graph.find(n => n.x === seg.point1.x && n.y === seg.point1.y);
+                if (n0 && n1 && n0.metaNode === m && n1.metaNode === m) {
+                    segs.push({ p0: seg.point0, p1: seg.point1 });
+                }
+            }
+            let paths = chainSegments(segs);
+            if (paths.length > 0) {
+                paths.sort((a, b) => b.length - a.length);
+                return paths[0].map(pt => newPoint(pt.x, pt.y, z));
+            }
+            return m.nodes.map(n => newPoint(n.x, n.y, z));
+        }
+    }
+
+    // Precompute spines for all meta-nodes immediately after construction
+    for (let m of metaNodes) {
+        m.spine = getMetaSpine(m, z);
+    }
+
+    // Establish Connections (Meta-Edges) in the Meta-Graph
     for (let node of mat_graph) {
         for (let neighbor of node.neighbors) {
             if (node.metaNode && neighbor.metaNode && node.metaNode !== neighbor.metaNode) {
                 node.metaNode.neighbors.add(neighbor.metaNode);
                 neighbor.metaNode.neighbors.add(node.metaNode);
+
+                let mu = node.metaNode;
+                let mv = neighbor.metaNode;
+
+                let spineU = mu.spine;
+                let myEnd = false; // false = begin, true = end
+                if (spineU.length > 1) {
+                    let d0 = dist2D(node, spineU[0]);
+                    let dK = dist2D(node, spineU[spineU.length - 1]);
+                    myEnd = dK < d0;
+                }
+
+                let spineV = mv.spine;
+                let itsEnd = false; // false = begin, true = end
+                if (spineV.length > 1) {
+                    let d0 = dist2D(neighbor, spineV[0]);
+                    let dK = dist2D(neighbor, spineV[spineV.length - 1]);
+                    itsEnd = dK < d0;
+                }
+
+                let exists = mu.connections.push !== undefined && mu.connections.some(c => c.neighbor === mv && c.myEnd === myEnd && c.itsEnd === itsEnd);
+                if (!exists) {
+                    mu.connections.push({
+                        neighbor: mv,
+                        myEnd: myEnd,
+                        itsEnd: itsEnd
+                    });
+                    mv.connections.push({
+                        neighbor: mu,
+                        myEnd: itsEnd,
+                        itsEnd: myEnd
+                    });
+                }
             }
         }
     }
 
-    // D. Calculate Centers for all MetaNodes
+    // Calculate Centers for all MetaNodes
     let metaCenters = new Map();
     for (let m of metaNodes) {
         let cx = 0, cy = 0;
-        if (m.strategy === 'chamber') {
+        if (m.strategy === 'chamber' || m.strategy === 'entry') {
             for (let n of m.generator.nodes) {
                 cx += n.x;
                 cy += n.y;
@@ -774,7 +907,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let active_generators = [];
 
     while (unvisitedMeta.size > 0) {
-        // Trace a single connected component of the meta-graph
         let startNode = unvisitedMeta.values().next().value;
         let component = [];
         let queue = [ startNode ];
@@ -793,27 +925,23 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             }
         }
 
-        // Find all standard generators within this component
         let componentGenerators = [];
         for (let m of component) {
-            if (m.strategy === 'chamber' && m.generator) {
+            if ((m.strategy === 'chamber' || m.strategy === 'entry') && m.generator) {
                 componentGenerators.push(m.generator);
             }
         }
 
-        // Pick the largest generator within this connected component
         let largestGen = null;
         let largestSize = -1;
 
         for (let gen of componentGenerators) {
             let size = 0;
             if (gen.nodes.length > 1) {
-                // Line Generator path length
                 for (let i = 0; i < gen.nodes.length - 1; i++) {
                     size += dist2D(gen.nodes[i], gen.nodes[i+1]);
                 }
             } else {
-                // Point Generator diameter
                 size = 2 * gen.nodes[0].radius;
             }
 
@@ -826,40 +954,157 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         if (largestGen) {
             active_generators.push(largestGen);
             
-            // Run DFS on this component starting from the largest generator's MetaNode
-            let startMetaNode = component.find(m => m.strategy === 'chamber' && m.generator.id === largestGen.id);
+            let startMetaNode = component.find(m => (m.strategy === 'chamber' || m.strategy === 'entry') && m.generator.id === largestGen.id);
             if (startMetaNode) {
-                let walk = [];
-                let visitedDFS = new Set();
-
-                function dfs(curr) {
-                    visitedDFS.add(curr);
-                    let center = metaCenters.get(curr.id);
-                    walk.push({
-                        id: curr.id,
-                        strategy: curr.strategy,
-                        first: true,
-                        x: center.x,
-                        y: center.y
-                    });
-
-                    for (let neighbor of curr.neighbors) {
-                        if (!visitedDFS.has(neighbor)) {
-                            dfs(neighbor);
-                            // Add the backtrack move
-                            walk.push({
-                                id: curr.id,
-                                strategy: curr.strategy,
-                                first: false,
-                                x: center.x,
-                                y: center.y
-                            });
+                let componentMetaNodes = component;
+                let adjMeta = new Map();
+                for (let m of componentMetaNodes) {
+                    adjMeta.set(m, []);
+                }
+                for (let m of componentMetaNodes) {
+                    for (let neighbor of m.neighbors) {
+                        if (componentMetaNodes.includes(neighbor)) {
+                            adjMeta.get(m).push(neighbor);
                         }
                     }
                 }
 
-                dfs(startMetaNode);
+                let walk = [];
+                let uncutNodes = new Set(component.map(m => m.id));
+                let activeStack = new Set();
+
+                function dfsWalk(curr, enterEnd) {
+                    let isUncut = uncutNodes.has(curr.id);
+                    if (isUncut) {
+                        uncutNodes.delete(curr.id);
+                    }
+                    
+                    activeStack.add(curr.id);
+
+                    let step = {
+                        id: curr.id,
+                        strategy: curr.strategy,
+                        first: isUncut,
+                        enterEnd: enterEnd,
+                        exitEnd: null
+                    };
+                    walk.push(step);
+
+                    while (true) {
+                        let neighbors = adjMeta.get(curr) || [];
+                        let groupA = [];
+                        let groupB = [];
+
+                        for (let nb of neighbors) {
+                            if (activeStack.has(nb.id)) {
+                                continue;
+                            }
+                            if (uncutNodes.has(nb.id)) {
+                                groupA.push(nb);
+                            } else {
+                                let nbNeighbors = adjMeta.get(nb) || [];
+                                let hasUncutNeighbor = nbNeighbors.some(n => uncutNodes.has(n.id) && !activeStack.has(n.id));
+                                if (hasUncutNeighbor) {
+                                    groupB.push(nb);
+                                }
+                            }
+                        }
+
+                        let next = null;
+                        if (groupA.length > 0) {
+                            next = groupA[0];
+                        } else if (groupB.length > 0) {
+                            next = groupB[0];
+                        }
+
+                        if (!next) {
+                            break;
+                        }
+
+                        let conn = curr.connections.find(c => c.neighbor === next);
+                        if (conn) {
+                            let lastCurrStep = walk.slice().reverse().find(s => s.id === curr.id);
+                            if (lastCurrStep) {
+                                lastCurrStep.exitEnd = conn.myEnd;
+                            }
+
+                            dfsWalk(next, conn.itsEnd);
+
+                            walk.push({
+                                id: curr.id,
+                                strategy: curr.strategy,
+                                first: false,
+                                enterEnd: conn.myEnd,
+                                exitEnd: null
+                            });
+                        }
+                    }
+
+                    activeStack.delete(curr.id);
+                }
+
+                dfsWalk(startMetaNode, null);
+                
+                // Resolve topological start and end endpoints for all walk steps
+                for (let step of walk) {
+                    let m = metaNodes.find(node => node.id === step.id);
+                    if (m) {
+                        let spine = m.spine;
+                        if (spine.length > 0) {
+                            let enter = step.enterEnd;
+                            let exit = step.exitEnd;
+
+                            if (enter === null && exit === null) {
+                                enter = false;
+                                exit = true;
+                            } else if (enter === null) {
+                                enter = !exit;
+                            } else if (exit === null) {
+                                exit = !enter;
+                            }
+
+                            step.resolvedEnterEnd = enter;
+                            step.resolvedExitEnd = exit;
+
+                            let enterPt = !enter ? spine[0] : spine[spine.length - 1];
+                            let exitPt = !exit ? spine[0] : spine[spine.length - 1];
+
+                            step.x = enterPt.x;
+                            step.y = enterPt.y;
+                            step.start_x = enterPt.x;
+                            step.start_y = enterPt.y;
+                            step.end_x = exitPt.x;
+                            step.end_y = exitPt.y;
+                        }
+                    }
+                }
+
                 all_walks.push(walk);
+
+                // RICH DEBUG LOGS FOR META-NODES AND DFS WALKS
+                console.log(`=== [MAT Debug] Disconnected Pocket Component Walks ===`);
+                for (let m of component) {
+                    let spine = m.spine;
+                    let startPt = spine[0];
+                    let endPt = spine[spine.length - 1];
+                    console.log(`[MAT MetaNode Debug] Node ID: ${m.id}, Strategy: ${m.strategy}`);
+                    if (startPt && endPt) {
+                        console.log(`  Spine Start: (${startPt.x.toFixed(4)}, ${startPt.y.toFixed(4)}), End: (${endPt.x.toFixed(4)}, ${endPt.y.toFixed(4)}), Nodes count: ${spine.length}`);
+                    } else {
+                        console.log(`  No spine nodes found!`);
+                    }
+                    let edgesInfo = m.connections.map(c => `to Node ${c.neighbor.id} (${c.myEnd ? 'end' : 'begin'} -> ${c.itsEnd ? 'end' : 'begin'})`).join(', ');
+                    console.log(`  Neighbors: ${edgesInfo || 'none'}`);
+                }
+                
+                console.log(`[MAT DFS Walk Debug] Chosen Start Generator: ${largestGen.id} (MetaNode ID: ${startMetaNode.id})`);
+                for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
+                    let step = walk[stepIndex];
+                    let enterStr = step.resolvedEnterEnd !== undefined ? (step.resolvedEnterEnd ? 'end' : 'begin') : 'N/A';
+                    let exitStr = step.resolvedExitEnd !== undefined ? (step.resolvedExitEnd ? 'end' : 'begin') : 'N/A';
+                    console.log(`  Step ${stepIndex}: Node ID: ${step.id}, Strategy: ${step.strategy}, First/Cut Visit: ${step.first}, Enter End: ${enterStr}, Exit End: ${exitStr}`);
+                }
+                console.log(`====================================================`);
             }
         }
     }
@@ -868,7 +1113,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     options.corridor_lines = corridor_lines;
     options.mat_lines = mat_lines;
 
-    // Package meta-graph for clean options serialization
     options.meta_graph = metaNodes.map(m => {
         let center = metaCenters.get(m.id);
         return {
@@ -887,7 +1131,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
     options.meta_walks = all_walks;
     
-    // Only package active start generators (one per disjoint pocket) to be rendered
     options.generators = active_generators.map(g => {
         return {
             type: g.nodes.length > 1 ? 'line' : 'point',
@@ -895,76 +1138,305 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         };
     });
 
-    // 10. Generate the actual toolpaths for chambers
+    // 10. Generate the actual toolpaths for chambers and corridors
     let toolpaths = [];
     let ccw = (options.direction === 'climb');
+    let clearedMetaNodes = new Set();
+    let pts = [];
+
+    /**
+     * Helper to push points to the continuous toolpath, automatically inserting
+     * safe Z-hops for transits/backtracking, and plunges for cutting passes.
+     */
+    function pushPoints(newPts, isCut, forceOrder = false) {
+        if (newPts.length === 0) return [];
+        
+        let oriented = newPts;
+        if (!isCut && !forceOrder && pts.length > 0) {
+            oriented = newPts.slice();
+            let lastPt = pts[pts.length - 1];
+            let dStart = Math.hypot(oriented[0].x - lastPt.x, oriented[0].y - lastPt.y);
+            let dEnd = Math.hypot(oriented[oriented.length - 1].x - lastPt.x, oriented[oriented.length - 1].y - lastPt.y);
+            if (dEnd < dStart) {
+                oriented.reverse();
+            }
+        }
+
+        // CRITICAL NOTE ON JS ARRAYS: We avoid using the spread operator push shortcut (e.g. pts.push(...array))
+        // because JavaScript engines have a strict argument count limit (typically ~65,535). High-resolution
+        // morphing spirals and dense trochoids can easily exceed this limit, causing a "Maximum call stack size
+        // exceeded" RangeError. Iterative pushing with a loop is fully stack-safe.
+        if (pts.length === 0) {
+            if (isCut) {
+                for (let p of newPts) {
+                    pts.push(newPoint(p.x, p.y, p.z));
+                }
+            } else {
+                for (let p of newPts) {
+                    pts.push(newPoint(p.x, p.y, z + 0.1));
+                }
+            }
+            return oriented;
+        }
+
+        let lastPt = pts[pts.length - 1];
+        if (isCut) {
+            if (lastPt.z > z + 0.05) {
+                pts.push(newPoint(newPts[0].x, newPts[0].y, z + 0.1));
+                pts.push(newPoint(newPts[0].x, newPts[0].y, newPts[0].z));
+            }
+            for (let p of newPts) {
+                pts.push(newPoint(p.x, p.y, p.z));
+            }
+        } else {
+            if (lastPt.z < z + 0.05) {
+                pts.push(newPoint(lastPt.x, lastPt.y, z + 0.1));
+                lastPt = pts[pts.length - 1];
+            }
+            for (let p of oriented) {
+                pts.push(newPoint(p.x, p.y, z + 0.1));
+            }
+        }
+        return oriented;
+    }
 
     for (let walk of all_walks) {
-        for (let step of walk) {
-            if (step.first) {
-                if (step.strategy === 'chamber') {
-                    let m = metaNodes.find(node => node.id === step.id);
-                    if (m && m.generator) {
-                        // Calculate boundary for this specific chamber MetaNode
-                        let m_capsules = [];
-                        let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
+        if (walk.length === 0) continue;
+        
+        let startStep = walk[0];
+        let startMetaNode = metaNodes.find(node => node.id === startStep.id);
+        let metaSpines = new Map(); // Cache spines in their first traversed direction
+        let helicalEntryAdded = false; // Tracks if helical plunge has been generated for this component
 
-                        if (chamberNodes.length === 1) {
-                            let n = chamberNodes[0];
-                            m_capsules.push(newPolygon().centerCircle(newPoint(n.x, n.y, z), n.radius, 12));
-                        } else {
-                            let chamberEdges = new Set();
-                            for (let node of chamberNodes) {
-                                for (let neighbor of node.neighbors) {
-                                    if (neighbor.chamberId === m.generator.id) {
-                                        let key = node.x < neighbor.x ? 
-                                            `${node.x},${node.y}:${neighbor.x},${neighbor.y}` : 
-                                            `${neighbor.x},${neighbor.y}:${node.x},${node.y}`;
-                                        if (!chamberEdges.has(key)) {
-                                            chamberEdges.add(key);
-                                            m_capsules.push(...makeTaperedCapsule(node, neighbor));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        let m_union = m_capsules.length ? POLY.union(m_capsules, 0.00001, true) : [];
-                        
-                        // CRITICAL: Clip the chamber capsules to offset_polygons (the tool center boundary)
-                        // rather than polygons (the physical stock walls). This prevents tool gouging and
-                        // guarantees the outer loops are mitered correctly according to the tool offset.
-                        let B_m = m_union.length ? POLY.trimTo(m_union, offset_polygons) : [];
-
-                        if (B_m.length > 0) {
-                            // Snap both the outer boundary and the inner hole boundaries (if any exist) to offset_polygons
-                            let targetPoly = B_m[0];
-                            let snappedBoundary = snapPolygonToWalls(targetPoly, offset_polygons, 0.15);
-                            if (targetPoly.inner) {
-                                snappedBoundary.inner = targetPoly.inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
-                            }
-                            
-                            let spiral = generateChamberSpiral(snappedBoundary, m.generator, targetStepover, ccw, z, toolRadius, options);
-                            toolpaths.push(spiral);
-                        }
-                    }
-                } else if (step.strategy === 'corridor') {
-                    // Output individual corridor lines as separate open polygons
-                    let m = metaNodes.find(node => node.id === step.id);
-                    if (m) {
-                        for (let seg of corridor_lines) {
-                            let n0 = mat_graph.find(n => n.x === seg.point0.x && n.y === seg.point0.y);
-                            let n1 = mat_graph.find(n => n.x === seg.point1.x && n.y === seg.point1.y);
-                            if (n0 && n1 && n0.metaNode === m && n1.metaNode === m) {
-                                toolpaths.push(newPolygon().addPoints([
-                                    newPoint(seg.point0.x, seg.point0.y, z),
-                                    newPoint(seg.point1.x, seg.point1.y, z)
-                                ]).setOpen());
-                            }
+        // Helper: Generate helical entry points centered at a point
+        function makeHelicalEntry(centerPt, generatorNode) {
+            let matRadius = generatorNode.radius;
+            let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
+            let zTop = options.zTop ?? 0.0;
+            let zStart = Math.min(zTop, z + (options.down ?? 2.0));
+            let helixPts = [];
+            
+            if (helixRadius > 0.05) {
+                let rampAngle = (options.entry_helix_angle ?? 3) * Math.PI / 180;
+                let pitch = 2 * Math.PI * helixRadius * Math.tan(rampAngle);
+                
+                // Add exactly one full turn's worth of Z-height (pitch) to zStart and the descent height H.
+                // This ensures the first turn is performed in empty air, so that the tool is already
+                // in full helical cutting motion before it makes physical contact with the stock surface.
+                zStart += pitch;
+                let H = (zStart - pitch - z) + pitch; // equivalent to H_solid + pitch
+                
+                let numTurns = Math.max(1, H / pitch);
+                let totalRad = numTurns * 2 * Math.PI;
+                let numSteps = Math.ceil(72 * numTurns);
+                
+                for (let j = 0; j <= numSteps; j++) {
+                    let u = j / numSteps;
+                    let theta = ccw ? (-totalRad * (1 - u)) : (totalRad * (1 - u));
+                    let px = centerPt.x + helixRadius * Math.cos(theta);
+                    let py = centerPt.y + helixRadius * Math.sin(theta);
+                    let pz = zStart - H * u;
+                    helixPts.push(newPoint(px, py, pz));
+                }
+            } else {
+                // Fallback straight plunge starts at the material boundary
+                helixPts.push(newPoint(centerPt.x, centerPt.y, zStart));
+                helixPts.push(newPoint(centerPt.x, centerPt.y, z));
+            }
+            return helixPts;
+        }
+        
+        if (startMetaNode && startMetaNode.strategy === 'chamber') {
+            clearedMetaNodes.add(startMetaNode.id);
+            
+            let m_capsules = [];
+            let chamberNodes = mat_graph.filter(node => node.chamberId === startMetaNode.generator.id);
+            if (chamberNodes.length === 1) {
+                m_capsules.push(newPolygon().centerCircle(newPoint(chamberNodes[0].x, chamberNodes[0].y, z), chamberNodes[0].radius, 12));
+            } else {
+                for (let node of chamberNodes) {
+                    for (let neighbor of node.neighbors) {
+                        if (neighbor.chamberId === startMetaNode.generator.id) {
+                            m_capsules.push(...makeTaperedCapsule(node, neighbor));
                         }
                     }
                 }
             }
+            let B_m = POLY.trimTo(POLY.union(m_capsules, 0.00001, true), offset_polygons);
+            if (B_m.length > 0) {
+                let snapped = snapPolygonToWalls(B_m[0], offset_polygons, 0.15);
+                if (B_m[0].inner) {
+                    snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
+                }
+                let spiral = generateChamberSpiral(snapped, startMetaNode.generator, targetStepover, ccw, z, toolRadius, options);
+
+                let ptsArray = spiral.points;
+                if (!helicalEntryAdded && ptsArray.length > 0) {
+                    let firstPt = ptsArray[0];
+                    let entryPts = makeHelicalEntry(firstPt, startMetaNode.generator.nodes[0]);
+                    ptsArray = [ ...entryPts, ...ptsArray ];
+                    helicalEntryAdded = true;
+                }
+
+                let oriented = pushPoints(ptsArray, true);
+                if (oriented && oriented.length > 0) {
+                    startStep.start_x = oriented[0].x;
+                    startStep.start_y = oriented[0].y;
+                    startStep.end_x = oriented[oriented.length - 1].x;
+                    startStep.end_y = oriented[oriented.length - 1].y;
+                }
+                
+                let spine = startMetaNode.spine;
+                metaSpines.set(startMetaNode.id, spine);
+            }
+        } else if (startMetaNode && startMetaNode.strategy === 'entry') {
+            clearedMetaNodes.add(startMetaNode.id);
+            
+            let centerPt = startMetaNode.spine[0];
+            let entryPts = makeHelicalEntry(centerPt, startMetaNode.generator.nodes[0]);
+            helicalEntryAdded = true;
+
+            let oriented = pushPoints(entryPts, true);
+            if (oriented && oriented.length > 0) {
+                startStep.start_x = oriented[0].x;
+                startStep.start_y = oriented[0].y;
+                startStep.end_x = oriented[oriented.length - 1].x;
+                startStep.end_y = oriented[oriented.length - 1].y;
+            }
+
+            let spine = startMetaNode.spine;
+            metaSpines.set(startMetaNode.id, spine);
+        }
+
+        for (let i = 1; i < walk.length; i++) {
+            let step = walk[i];
+            let m = metaNodes.find(node => node.id === step.id);
+            if (!m) continue;
+
+            let oriented = null;
+
+            if (step.first) {
+                if (!clearedMetaNodes.has(m.id)) {
+                    clearedMetaNodes.add(m.id);
+                    
+                    if (m.strategy === 'chamber') {
+                        let m_capsules = [];
+                        let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
+                        if (chamberNodes.length === 1) {
+                            m_capsules.push(newPolygon().centerCircle(newPoint(chamberNodes[0].x, chamberNodes[0].y, z), chamberNodes[0].radius, 12));
+                        } else {
+                            for (let node of chamberNodes) {
+                                for (let neighbor of node.neighbors) {
+                                    if (neighbor.chamberId === m.generator.id) {
+                                        m_capsules.push(...makeTaperedCapsule(node, neighbor));
+                                    }
+                                }
+                            }
+                        }
+                        let B_m = POLY.trimTo(POLY.union(m_capsules, 0.00001, true), offset_polygons);
+                        if (B_m.length > 0) {
+                            let snapped = snapPolygonToWalls(B_m[0], offset_polygons, 0.15);
+                            if (B_m[0].inner) {
+                                snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
+                            }
+                            let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius, options);
+                            
+                            let ptsArray = spiral.points;
+                            if (ptsArray.length > 0) {
+                                let enterPt = !step.resolvedEnterEnd ? m.spine[0] : m.spine[m.spine.length - 1];
+                                let dStart = Math.hypot(ptsArray[0].x - enterPt.x, ptsArray[0].y - enterPt.y);
+                                let dEnd = Math.hypot(ptsArray[ptsArray.length - 1].x - enterPt.x, ptsArray[ptsArray.length - 1].y - enterPt.y);
+                                if (dEnd < dStart) {
+                                    ptsArray.reverse();
+                                }
+                            }
+
+                            if (!helicalEntryAdded && ptsArray.length > 0) {
+                                let entryPts = makeHelicalEntry(ptsArray[0], m.generator.nodes[0]);
+                                ptsArray = [ ...entryPts, ...ptsArray ];
+                                helicalEntryAdded = true;
+                            }
+
+                            oriented = pushPoints(ptsArray, true);
+                        }
+                        
+                        let spine = m.spine;
+                        metaSpines.set(m.id, spine);
+                    } else if (m.strategy === 'entry') {
+                        let centerPt = m.spine[0];
+                        let entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
+                        helicalEntryAdded = true;
+
+                        oriented = pushPoints(entryPts, true);
+                        
+                        let spine = m.spine;
+                        metaSpines.set(m.id, spine);
+                    } else if (m.strategy === 'corridor') {
+                        let segs = [];
+                        for (let seg of corridor_lines) {
+                            let n0 = mat_graph.find(n => n.x === seg.point0.x && n.y === seg.point0.y);
+                            let n1 = mat_graph.find(n => n.x === seg.point1.x && n.y === seg.point1.y);
+                            if (n0 && n1 && n0.metaNode === m && n1.metaNode === m) {
+                                segs.push({ p0: seg.point0, p1: seg.point1 });
+                            }
+                        }
+                        let paths = chainSegments(segs);
+                        let allTrochPts = [];
+                        for (let p of paths) {
+                            for (let idx = 0; idx < p.length - 1; idx++) {
+                                allTrochPts.push(...generateTrochoidSegment(p[idx], p[idx+1], targetStepover, toolRadius, ccw, z));
+                            }
+                        }
+
+                        if (allTrochPts.length > 0) {
+                            let enterPt = !step.resolvedEnterEnd ? m.spine[0] : m.spine[m.spine.length - 1];
+                            let dStart = Math.hypot(allTrochPts[0].x - enterPt.x, allTrochPts[0].y - enterPt.y);
+                            let dEnd = Math.hypot(allTrochPts[allTrochPts.length - 1].x - enterPt.x, allTrochPts[allTrochPts.length - 1].y - enterPt.y);
+                            if (dEnd < dStart) {
+                                allTrochPts.reverse();
+                            }
+                        }
+
+                        if (!helicalEntryAdded && allTrochPts.length > 0) {
+                            let fakeNode = { x: allTrochPts[0].x, y: allTrochPts[0].y, radius: m.nodes[0].radius };
+                            let entryPts = makeHelicalEntry(allTrochPts[0], fakeNode);
+                            allTrochPts = [ ...entryPts, ...allTrochPts ];
+                            helicalEntryAdded = true;
+                        }
+
+                        oriented = pushPoints(allTrochPts, true);
+                        
+                        let spine = m.spine;
+                        metaSpines.set(m.id, spine);
+                    }
+                } else {
+                    let spine = m.spine;
+                    let orientedSpine = spine.slice();
+                    if (step.resolvedEnterEnd) {
+                        orientedSpine.reverse();
+                    }
+                    oriented = pushPoints(orientedSpine, false, true);
+                }
+            } else {
+                let spine = m.spine;
+                let orientedSpine = spine.slice();
+                if (step.resolvedEnterEnd) {
+                    orientedSpine.reverse();
+                }
+                oriented = pushPoints(orientedSpine, false, true);
+            }
+
+            if (oriented && oriented.length > 0) {
+                step.start_x = oriented[0].x;
+                step.start_y = oriented[0].y;
+                step.end_x = oriented[oriented.length - 1].x;
+                step.end_y = oriented[oriented.length - 1].y;
+            }
+        }
+
+        if (pts.length > 0) {
+            toolpaths.push(newPolygon().addPoints(pts).setOpen());
+            pts = [];
         }
     }
 
@@ -972,6 +1444,5 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         return toolpaths;
     }
 
-    // Return the original polygons as fallback to prevent G-code errors
     return polygons;
 }
