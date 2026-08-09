@@ -296,6 +296,12 @@ class OpArea extends CamOp {
                         POLY.subtract([ area ], shadow, clip, undefined, undefined, 0);
                     }
                     
+                    let process = settings.process;
+                    let stock = state.stock;
+                    let stockZ = stock.z * (process.camStockIndexed ? 0.5 : 1);
+                    let stockZClear = stockZ + process.camZClearance;
+                    let zSafe = Math.max(process.camZTop, process.camStockIndexed ? Math.hypot(stock.y, stock.z) / 2 + process.camZClearance : stockZClear);
+
                     let opt = {
                         z: z - zMov,
                         direction,
@@ -307,7 +313,8 @@ class OpArea extends CamOp {
                         down: op.down,
                         // zTop is required by adaptiveClear to calculate the safe helical entry starting height
                         zTop: workarea.top_z,
-                        entry_helix_angle: op.entry_helix_angle
+                        entry_helix_angle: op.entry_helix_angle,
+                        zSafe: zSafe
                     };
                     let outs = adaptiveClear(clip, toolDiam, toolOver, opt);
 

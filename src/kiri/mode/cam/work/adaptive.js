@@ -572,6 +572,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let toolRadius = toolDiam / 2;
     let threshold = 1.25 * toolDiam;
     let gradientLimit = 0.5;
+    let zSafe = options.zSafe ?? ((options.zTop ?? 0.0) + 2.0);
 
     let teaRad = (options.tea ?? 60) * Math.PI / 180;
     let targetStepover = toolDiam * Math.sin(teaRad / 2) * Math.sin(teaRad / 2);
@@ -1544,6 +1545,9 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 helixPts.push(newPoint(centerPt.x, centerPt.y, zStart));
                 helixPts.push(newPoint(centerPt.x, centerPt.y, z));
             }
+            if (helixPts.length > 0) {
+                helixPts.unshift(newPoint(helixPts[0].x, helixPts[0].y, zSafe));
+            }
             return helixPts;
         }
 
@@ -1563,6 +1567,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 // We end the current cutting pass (if active) to trigger Kiri's native rapid travel retract,
                 // and avoid generating any feed-rate toolpath points during backtracking.
                 if (pts.length > 0) {
+                    let lastPt = pts[pts.length - 1];
+                    pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
                     toolpaths.push(newPolygon().addPoints(pts).setOpen());
                     pts = [];
                 }
@@ -1572,6 +1578,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     // Trigger a retract before entering any chamber to ensure a safe transition
                     // to the center of the chamber without crossing pocket walls.
                     if (pts.length > 0) {
+                        let lastPt = pts[pts.length - 1];
+                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
                         toolpaths.push(newPolygon().addPoints(pts).setOpen());
                         pts = [];
                     }
@@ -1612,6 +1620,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 } else if (m.strategy === 'entry') {
                     // Trigger a retract before entering any entry node to ensure a safe plunge.
                     if (pts.length > 0) {
+                        let lastPt = pts[pts.length - 1];
+                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
                         toolpaths.push(newPolygon().addPoints(pts).setOpen());
                         pts = [];
                     }
@@ -1765,6 +1775,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         }
 
         if (pts.length > 0) {
+            let lastPt = pts[pts.length - 1];
+            pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
             toolpaths.push(newPolygon().addPoints(pts).setOpen());
             pts = [];
         }
