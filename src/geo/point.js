@@ -225,6 +225,10 @@ class Point {
         if (this.a !== undefined) {
             p.a = this.a;
         }
+        // Copy forceSpeed property if defined, which is used to override G0/G1 moves in CAM
+        if (this.forceSpeed !== undefined) {
+            p.forceSpeed = this.forceSpeed;
+        }
         if (keys) {
             for (let key of keys) {
                 p[key] = this[key];

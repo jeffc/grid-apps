@@ -487,7 +487,8 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         let {
             center,
             factor = 1,
-            feed = feedRate,
+            // Override default feedrate to 0 (rapid rate) when forceSpeed is 0 (rapid travel)
+            feed = (opts?.forceSpeed === 0 ? 0 : feedRate),
             shortCut = toolDiamMove,
             moveOnly = false,
         } = opts ?? {};
@@ -509,7 +510,12 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         // consume forced next move flag and convert to move
         // this is usually set right before a `polyEmit`
         if (nextIsMove) {
-            emit = 0;
+            // Keep emit = 1 if forceSpeed is 1 (feed move), otherwise convert to G0 move
+            if (opts?.forceSpeed === 1) {
+                emit = 1;
+            } else {
+                emit = 0;
+            }
             nextIsMove = false;
         }
 
@@ -552,92 +558,103 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             hasBounds = (travelBounds || lastTravelBounds),
             upAndOver = false;
 
-        // contouring logic
-        if (isMove && contouring) {
-            if (coastline && deltaXY < 5 && coastlineMove(point)) {
-                // console.log('coastline move');
-            } else if (deltaXY > toolDiamMove) {
-                upAndOver = true;
-            } else if (absDeltaZ < 0.01) {
-                if (debug) console.log('contour move as cut');
-                emit = 1;
-            } else if (absDeltaZ < 0.001) {
-                if (debug) console.log('contour up for travel');
-                layerPush(printPoint.clone().move({ z: 0.1 }), 0, 0, tool);
-                layerPush(point.clone().move({ z: 0.1 }), 0, 0, tool);
-            }
-        } else
-        // when rapid pluge could cut thru stock:
-        //  * rapid to just above stock
-        //  * continue plunge as cut
-        if (isMove && deltaZ < 0 && printPoint.z > stockZ && point.z < stockZ) {
-            if (debug) console.log('detected plunge cut as rapid move', printPoint.z, point.z);
-            layerPush(point.clone().setZ(zSafe), 0, 0, tool);
-            // change to cutting move for remainder of plunge
-            newLayer();
-        } else
-        // convert short planar moves to cuts when not lasering
-        if (isMove && !hasBounds && deltaXY <= shortCut && deltaZ <= 0 && !lasering) {
-            // but only if the z plunge is not too far
-            if (absDeltaZ < 0.01 || (tolerance > 0 && absDeltaZ <= tolerance)) {
-                if (debug) console.log('shortcut', { deltaXY, deltaZ, shortCut });
-                emit = 1;
-            } else
-            // otherwise move over before descending
-            if (deltaZ <= -tolerance) {
-                if (debug) console.log('over before descend', deltaZ, -tolerance);
-                layerPush(point.clone().setZ(printPoint.z), 0, 0, tool);
-                newLayer();
-            }
-        } else
-        // when moving in lathe mode ...
-        if (isMove && isLathe) {
-            if (point.z > printPoint.z) {
-                layerPush(printPoint.clone().setZ(point.z), 0, 0, tool);
-                newLayer();
-            } else if (point.z < printPoint.z) {
-                layerPush(point.clone().setZ(printPoint.z), 0, 0, tool);
-                newLayer();
-            }
-        } else
-        // check move against a known boundary (pocketing)
-        if (isMove && hasBounds) {
-            // travel boundary "hangover" from last area op when traveling between
-            let check = [];
-            if (travelBounds) check.push(...travelBounds);
-            if (lastTravelBounds) check.push(...lastTravelBounds);
-            let from = toWidgetCoords(printPoint);
-            let to = toWidgetCoords(point);
-            let ep = toolDiamEpsilon;
-            for (let poly of check) {
-                let ints = poly.intersections(from, to) ?? [];
-                let far = ints.filter(p => p.distTo2D(to) > ep && p.distTo2D(from) > ep);
-                if (far.length) {
-                    if (debug) console.log({ ints, poly, deltaXY, deltaZ });
-                    upAndOver = "bounds";
-                    break;
-                }
-            }
-            if (!upAndOver) {
-                let nearFrom = nearTravelBoundary(from, check, ep);
-                let nearTo = nearTravelBoundary(to, check, ep);
-                if (nearFrom && nearTo && nearFrom.poly !== nearTo.poly) {
-                    upAndOver = "bounds-end";
-                }
-            }
-            lastTravelBounds = undefined;
-        } else
-        // for longer moves
-        if (isMove) {
-            const bigXY = (deltaXY > shortCut && !lasering);
-            const bigZ  = (absDeltaZ > toolDiam / 2 && deltaXY > tolerance);
-            const midZ  = (tolerance && absDeltaZ >= tolerance);
-            const inStock = printPoint.z < stockZ || point.z < stockZ;
-            if (bigXY || bigZ || midZ) {
-                if (debug) console.log({ fromz: printPoint.z, toz: point.z });
-                // for big moves intersecting stock...
-                if (camForceZMax || inStock) {
+        // Apply forceSpeed overrides:
+        // forceSpeed === 0 forces G0 rapid, bypassing travel retractions and shortcuts.
+        // forceSpeed === 1 forces G1 feed, bypassing travel retractions and shortcuts.
+        if (opts?.forceSpeed === 0) {
+            isMove = true;
+            upAndOver = false;
+        } else if (opts?.forceSpeed === 1) {
+            isMove = false;
+            upAndOver = false;
+        } else {
+            // contouring logic
+            if (isMove && contouring) {
+                if (coastline && deltaXY < 5 && coastlineMove(point)) {
+                    // console.log('coastline move');
+                } else if (deltaXY > toolDiamMove) {
                     upAndOver = true;
+                } else if (absDeltaZ < 0.01) {
+                    if (debug) console.log('contour move as cut');
+                    emit = 1;
+                } else if (absDeltaZ < 0.001) {
+                    if (debug) console.log('contour up for travel');
+                    layerPush(printPoint.clone().move({ z: 0.1 }), 0, 0, tool);
+                    layerPush(point.clone().move({ z: 0.1 }), 0, 0, tool);
+                }
+            } else
+            // when rapid pluge could cut thru stock:
+            //  * rapid to just above stock
+            //  * continue plunge as cut
+            if (isMove && deltaZ < 0 && printPoint.z > stockZ && point.z < stockZ) {
+                if (debug) console.log('detected plunge cut as rapid move', printPoint.z, point.z);
+                layerPush(point.clone().setZ(zSafe), 0, 0, tool);
+                // change to cutting move for remainder of plunge
+                newLayer();
+            } else
+            // convert short planar moves to cuts when not lasering
+            if (isMove && !hasBounds && deltaXY <= shortCut && deltaZ <= 0 && !lasering) {
+                // but only if the z plunge is not too far
+                if (absDeltaZ < 0.01 || (tolerance > 0 && absDeltaZ <= tolerance)) {
+                    if (debug) console.log('shortcut', { deltaXY, deltaZ, shortCut });
+                    emit = 1;
+                } else
+                // otherwise move over before descending
+                if (deltaZ <= -tolerance) {
+                    if (debug) console.log('over before descend', deltaZ, -tolerance);
+                    layerPush(point.clone().setZ(printPoint.z), 0, 0, tool);
+                    newLayer();
+                }
+            } else
+            // when moving in lathe mode ...
+            if (isMove && isLathe) {
+                if (point.z > printPoint.z) {
+                    layerPush(printPoint.clone().setZ(point.z), 0, 0, tool);
+                    newLayer();
+                } else if (point.z < printPoint.z) {
+                    layerPush(point.clone().setZ(printPoint.z), 0, 0, tool);
+                    newLayer();
+                }
+            } else
+            // check move against a known boundary (pocketing)
+            if (isMove && hasBounds) {
+                // travel boundary "hangover" from last area op when traveling between
+                let check = [];
+                if (travelBounds) check.push(...travelBounds);
+                if (lastTravelBounds) check.push(...lastTravelBounds);
+                let from = toWidgetCoords(printPoint);
+                let to = toWidgetCoords(point);
+                let ep = toolDiamEpsilon;
+                for (let poly of check) {
+                    let ints = poly.intersections(from, to) ?? [];
+                    let far = ints.filter(p => p.distTo2D(to) > ep && p.distTo2D(from) > ep);
+                    if (far.length) {
+                        if (debug) console.log({ ints, poly, deltaXY, deltaZ });
+                        upAndOver = "bounds";
+                        break;
+                    }
+                }
+                if (!upAndOver) {
+                    let nearFrom = nearTravelBoundary(from, check, ep);
+                    let nearTo = nearTravelBoundary(to, check, ep);
+                    if (nearFrom && nearTo && nearFrom.poly !== nearTo.poly) {
+                        upAndOver = "bounds-end";
+                    }
+                }
+                lastTravelBounds = undefined;
+            } else
+            // for longer moves
+            if (isMove) {
+                const bigXY = (deltaXY > shortCut && !lasering);
+                const bigZ  = (absDeltaZ > toolDiam / 2 && deltaXY > tolerance);
+                const midZ  = (tolerance && absDeltaZ >= tolerance);
+                const inStock = printPoint.z < stockZ || point.z < stockZ;
+                if (bigXY || bigZ || midZ) {
+                    if (debug) console.log({ fromz: printPoint.z, toz: point.z });
+                    // for big moves intersecting stock...
+                    if (camForceZMax || inStock) {
+                        upAndOver = true;
+                    }
                 }
             }
         }
@@ -664,8 +681,10 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
         // plunge safety catch
         if (deltaZ < 0 && !contouring) {
             if (debug) console.log('plunge safety', deltaZ, rate, plungeRate);
-            emit = 1;
-            rate = plungeRate;
+            if (opts?.forceSpeed !== 0) {
+                emit = 1;
+                rate = plungeRate;
+            }
         }
 
         layerOut.mode = currentOp;
@@ -821,8 +840,10 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
      * @returns {Point} - the last point emitted (in widget coordinates)
      */
     function polyEmit(poly, index, engage = false) {
-        let arcing = camArcEnabled && !contouring;
         let points = poly.points;
+        // Bypasses arc detection if forceSpeed is present on any point in this polygon path
+        let hasForceSpeed = points.some(p => p.forceSpeed !== undefined);
+        let arcing = camArcEnabled && !contouring && !hasForceSpeed;
 
         if (poly.isClosed()) {
             // only look for the cloests starting point for closed loops
@@ -930,7 +951,14 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             }
         } else {
             for (let point of points) {
-                camOut(lastOut = point.clone(), 1, opts);
+                let emit = 1;
+                let outOpts = { ...opts };
+                // Apply point-specific forceSpeed override if defined
+                if (point.forceSpeed !== undefined) {
+                    emit = point.forceSpeed;
+                    outOpts.forceSpeed = point.forceSpeed;
+                }
+                camOut(lastOut = point.clone(), emit, outOpts);
             }
         }
 
