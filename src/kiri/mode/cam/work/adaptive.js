@@ -38,7 +38,22 @@ function dist2D(u, v) {
 
 /**
  * Finds the intersection of a 2D ray with a polygon.
- * Returns the closest intersection point along the ray (t > 0).
+ * Returns the closest intersection point along the ray in the forward direction (t > 0).
+ * 
+ * Math Derivation (Cramer's Rule):
+ * Ray: R(t) = C + t * D, where C = center, D = (dx, dy)
+ * Segment: S(u) = P0 + u * V, where V = P1 - P0 = (vx, vy), and u in [0, 1]
+ * Solving C + t * D = P0 + u * V:
+ *   t * dx - u * vx = P0.x - C.x
+ *   t * dy - u * vy = P0.y - C.y
+ * Matrix form:
+ *   | dx  -vx | | t |   | P0.x - C.x |
+ *   | dy  -vy | | u | = | P0.y - C.y |
+ * Determinant:
+ *   det = dx * (-vy) - (-vx) * dy = -dx * vy + dy * vx
+ * Cramer's Rule solutions:
+ *   t = ((C.x - P0.x) * vy - (C.y - P0.y) * vx) / det  <-- (Corrected sign error that originally caused 180-deg rotation)
+ *   u = (dx * (P0.y - C.y) - dy * (P0.x - C.x)) / det
  */
 function getRayIntersection(center, dx, dy, poly) {
     let pts = poly.points;
@@ -53,11 +68,13 @@ function getRayIntersection(center, dx, dy, poly) {
         let vy = p1.y - p0.y;
 
         let det = -dx * vy + dy * vx;
-        if (Math.abs(det) < 1e-9) continue;
+        if (Math.abs(det) < 1e-9) continue; // Ray is parallel to the segment
 
-        let t = ((p0.x - center.x) * vy - (p0.y - center.y) * vx) / det;
+        let t = ((center.x - p0.x) * vy - (center.y - p0.y) * vx) / det;
         let u = (dx * (p0.y - center.y) - dy * (p0.x - center.x)) / det;
 
+        // Intersection must be in the forward direction of the ray (t > 0)
+        // and lie within the bounds of the segment (0 <= u <= 1)
         if (t > 0 && u >= 0 && u <= 1) {
             if (t < best_t) {
                 best_t = t;
@@ -66,6 +83,97 @@ function getRayIntersection(center, dx, dy, poly) {
         }
     }
     return best_pt || (pts.length ? pts[0] : center); // fallback
+}
+
+/**
+ * Returns true if three points A, B, C are in counter-clockwise order.
+ * Uses the sign of the cross product of vectors AB and AC:
+ * (C.y - A.y) * (B.x - A.x) - (B.y - A.y) * (C.x - A.x)
+ */
+function ccw(A, B, C) {
+    return (C.y - A.y) * (B.x - A.x) > (B.y - A.y) * (C.x - A.x);
+}
+
+/**
+ * Returns true if segment AB intersects segment CD.
+ * Uses orientation-based intersection: segment AB and CD intersect if and only if
+ * points A and B lie on opposite sides of line CD, and points C and D lie on
+ * opposite sides of line AB.
+ * 
+ * This is division-free and completely avoids floating-point division-by-zero errors.
+ */
+function segmentsIntersect(A, B, C, D) {
+    return ccw(A, C, D) !== ccw(B, C, D) && ccw(A, B, C) !== ccw(A, B, D);
+}
+
+/**
+ * Returns true if the straight line segment between p1 and p2 intersects any boundary
+ * or inner island wall of the pocket, meaning the direct line-of-sight is blocked.
+ * Used to verify star-convexity and prevent merging chambers around non-convex bends/corners.
+ */
+function lineOfSightBlocked(p1, p2, polygons) {
+    for (let poly of polygons) {
+        let pts = poly.points;
+        for (let i = 0; i < pts.length; i++) {
+            let q1 = pts[i];
+            let q2 = pts[(i + 1) % pts.length];
+            if (segmentsIntersect(p1, p2, q1, q2)) {
+                return true;
+            }
+        }
+        if (poly.inner) {
+            for (let inner of poly.inner) {
+                let ipts = inner.points;
+                for (let i = 0; i < ipts.length; i++) {
+                    let q1 = ipts[i];
+                    let q2 = ipts[(i + 1) % ipts.length];
+                    if (segmentsIntersect(p1, p2, q1, q2)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * Finds the shortest path of MATNodes between startNode and endNode on the MAT graph
+ * using Breadth-First Search (BFS).
+ */
+function findMATPath(startNode, endNode) {
+    let visited = new Set([ startNode ]);
+    let queue = [ [ startNode ] ];
+    while (queue.length > 0) {
+        let path = queue.shift();
+        let last = path[path.length - 1];
+        if (last === endNode) {
+            return path;
+        }
+        for (let neighbor of last.neighbors) {
+            if (!visited.has(neighbor)) {
+                visited.add(neighbor);
+                queue.push([ ...path, neighbor ]);
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Verifies that node radii along the path from the main center are monotonically decreasing.
+ * This guarantees that the channel never expands (which would form "shoulders" / shadow zones
+ * violating star-convexity) as we move farther away from the spiral center.
+ * 
+ * Allows a small tolerance (default 0.1mm) to account for minor noise in MAT digitization.
+ */
+function isPathMonotonic(path, tolerance = 0.1) {
+    for (let i = 1; i < path.length; i++) {
+        if (path[i].radius > path[i-1].radius + tolerance) {
+            return false;
+        }
+    }
+    return true;
 }
 
 /**
@@ -194,70 +302,48 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     let current = chamberBoundary;
 
     // Find the center point of the generator
-    let genCenter = { x: 0, y: 0 };
-    for (let n of generator.nodes) {
-        genCenter.x += n.x;
-        genCenter.y += n.y;
-    }
-    genCenter.x /= generator.nodes.length;
-    genCenter.y /= generator.nodes.length;
+    // We sort the nodes by radius descending to ensure we pick a real peak node as the center,
+    // which prevents the center from falling outside non-convex (e.g. L-shaped) merged chambers.
+    let sortedNodes = generator.nodes.slice().sort((a, b) => b.radius - a.radius);
+    let genCenter = { x: sortedNodes[0].x, y: sortedNodes[0].y };
 
     // Calculate maximum safe helix radius
-    let matRadius = generator.nodes[0].radius;
+    let matRadius = sortedNodes[0].radius;
     let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
 
-    let safety = 0;
-    while (safety++ < 1000) {
-        let next = POLY.offset([ current ], -targetStepover, { z: z });
-        if (next.length === 0) {
-            break;
+    // Compute the maximum straight-line distance from the peak center to the boundary of the shape
+    // using the inscribed circles of the MAT nodes.
+    let maxD = matRadius;
+    for (let n of generator.nodes) {
+        let d = Math.hypot(n.x - genCenter.x, n.y - genCenter.y);
+        if (d + n.radius > maxD) {
+            maxD = d + n.radius;
         }
-        let pPt = newPoint(genCenter.x, genCenter.y, z);
-        let match = next.find(p => pPt.inPolygon(p));
-        if (!match) {
-            let largest = next[0];
-            for (let p of next) {
-                if (p.area() > Math.abs(largest.area())) largest = p;
-            }
-            match = largest;
-        }
-        // Break early if the matched offset polygon has collapsed to a tiny area (epsilon < 0.01).
-        // This prevents infinite loops on degenerate/complex shapes that Clipper fails to fully collapse to zero.
-        if (Math.abs(match.area()) < 0.01) {
-            break;
-        }
-        current = match.clean(true, null, 0.02); // minor clean to keep offset curves smooth
-        loops.push(current);
-    }
-    if (safety >= 1000) {
-        console.log(`[MAT Warning] generateChamberSpiral safety limit reached (1000 iterations) for Z: ${z}. Terminating loop to prevent freeze.`);
     }
 
-    loops.reverse();
+    // Determine the number of morphing turns based on target stepover
+    let N = Math.ceil(maxD / targetStepover);
 
-    // Duplicate the final loop (outer boundary) to act as a 360-degree cleanup pass
-    // that starts and ends at angle 0 with perfect continuity, avoiding any gashes/jumps.
-    loops.push(loops[loops.length - 1].clone());
+    let inner_circle;
+    if (helixRadius > 0.05) {
+        inner_circle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), helixRadius, 72);
+    } else {
+        inner_circle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), 0.01, 8);
+    }
+
+    let l_outer = chamberBoundary;
+    let p_circle_len = inner_circle.perimeter();
+    let p_outer_len = l_outer.perimeter();
 
     let path_pts = [];
-    if (helixRadius > 0.05) {
-        let minLoopArea = Math.PI * helixRadius * helixRadius;
-        loops = loops.filter(p => p.area() > minLoopArea * 1.05);
-        let helixCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), helixRadius, 72);
-        loops.unshift(helixCircle);
-    } else {
-        let tinyCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), 0.01, 8);
-        loops.unshift(tinyCircle);
-    }
 
-    let numSteps = 72; // 5-degree steps
-    let N = loops.length - 2; // Total loops excluding the final cleanup pass loop
+    for (let i = 0; i <= N; i++) {
+        let isCleanup = (i === N); // Final 360-degree cleanup loop
 
-    for (let i = 0; i < loops.length - 1; i++) {
-        let l0 = loops[i];
-        let l1 = loops[i+1];
-
-        let isCleanup = (i === loops.length - 2); // Final 360-degree cleanup loop
+        // Estimate perimeter for the current turn using linear interpolation
+        let t_mid = isCleanup ? 1.0 : (i + 0.5) / Math.max(1, N);
+        let perimeter_i = (1 - t_mid) * p_circle_len + t_mid * p_outer_len;
+        let numSteps = Math.max(72, Math.ceil(perimeter_i / 0.25));
 
         for (let j = 0; j < numSteps; j++) {
             let u = j / numSteps;
@@ -265,23 +351,18 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
             let dx = Math.cos(theta);
             let dy = Math.sin(theta);
 
-            let p0 = getRayIntersection(genCenter, dx, dy, l0);
-            let p1 = getRayIntersection(genCenter, dx, dy, l1);
+            // Inner circle projection point at current angle
+            let p_circle = getRayIntersection(genCenter, dx, dy, inner_circle);
+            
+            // Outer boundary projection point at current angle
+            let p_outer = getRayIntersection(genCenter, dx, dy, l_outer);
 
-            // Local blended point between loop i and loop i+1
-            let px_loc = (1 - u) * p0.x + u * p1.x;
-            let py_loc = (1 - u) * p0.y + u * p1.y;
-
-            // Circle projection point at current angle
-            let p_circle = getRayIntersection(genCenter, dx, dy, loops[0]);
-
-            // Global weight to morph from circle (loop 0) to actual offset shapes (loop N)
-            // Goes from 0 (at loop 0 start) to 1 (at loop N start)
+            // Interpolation weight: morphs linearly from 0 (at loop 0 start) to 1 (at outer boundary)
             let t = isCleanup ? 1.0 : Math.min(1.0, (i + u) / Math.max(1, N));
 
-            // Apply global interpolation
-            let px = (1 - t) * p_circle.x + t * px_loc;
-            let py = (1 - t) * p_circle.y + t * py_loc;
+            // Apply linear morphing to ensure constant, uniform stepover along the ray direction
+            let px = (1 - t) * p_circle.x + t * p_outer.x;
+            let py = (1 - t) * p_circle.y + t * p_outer.y;
 
             path_pts.push(newPoint(px, py, z));
         }
@@ -666,6 +747,91 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         generators.push(...pocket_generators);
     }
 
+    // Initialize peak nodes for each chamber
+    for (let g of generators.filter(g => g.type === 'chamber')) {
+        let sorted = g.nodes.slice().sort((a, b) => b.radius - a.radius);
+        g.peakNodes = [ sorted[0] ];
+    }
+
+    // 4.5 Merge adjacent chambers if they preserve star-convexity (line of sight and MAT path monotonicity)
+    let mergedChamberIds = new Set();
+    let mergePass = true;
+    while (mergePass) {
+        mergePass = false;
+        let activeChambers = generators.filter(g => g.type === 'chamber' && !mergedChamberIds.has(g.id));
+        let bestMerge = null;
+        
+        for (let i = 0; i < activeChambers.length; i++) {
+            let g1 = activeChambers[i];
+            
+            // Run BFS from g1's nodes to find paths to other active chambers on the MAT graph
+            let visited = new Set(g1.nodes);
+            let queue = g1.nodes.map(n => ({ node: n, minR: n.radius }));
+            
+            while (queue.length > 0) {
+                let { node, minR } = queue.shift();
+                
+                // If we reached a node belonging to a different active chamber
+                if (node.chamberId !== null && node.chamberId !== g1.id) {
+                    let g2 = activeChambers.find(g => g.id === node.chamberId);
+                    if (g2 && !mergedChamberIds.has(g2.id)) {
+                        // Gather peaks and find candidate center of prospective merged chamber
+                        let allPeaks = [...g1.peakNodes, ...g2.peakNodes];
+                        let mainCenter = allPeaks.slice().sort((a, b) => b.radius - a.radius)[0];
+                        
+                        // Star-Convexity Verification:
+                        // 1. Line-of-Sight must be clear between center and all other peaks.
+                        // 2. MAT path radii must be monotonically decreasing away from the center.
+                        let isStarConvex = true;
+                        for (let peak of allPeaks) {
+                            if (peak !== mainCenter) {
+                                if (lineOfSightBlocked(mainCenter, peak, offset_polygons)) {
+                                    isStarConvex = false;
+                                    break;
+                                }
+                                let path = findMATPath(mainCenter, peak);
+                                if (!path || !isPathMonotonic(path, 0.1)) {
+                                    isStarConvex = false;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (isStarConvex) {
+                            // Track the merge candidate with the widest bottleneck neck
+                            if (!bestMerge || minR > bestMerge.minR) {
+                                bestMerge = { g1, g2, minR, allPeaks };
+                            }
+                        }
+                    }
+                    continue; // Stop expanding along this branch (different chamber reached)
+                }
+                
+                for (let neighbor of node.neighbors) {
+                    if (!visited.has(neighbor)) {
+                        visited.add(neighbor);
+                        queue.push({ node: neighbor, minR: Math.min(minR, neighbor.radius) });
+                    }
+                }
+            }
+        }
+        
+        // Execute the best merge from this iteration and mark transitive check
+        if (bestMerge) {
+            let { g1, g2, allPeaks } = bestMerge;
+            for (let n of g2.nodes) {
+                n.chamberId = g1.id;
+                g1.nodes.push(n);
+            }
+            g1.peakNodes = allPeaks;
+            mergedChamberIds.add(g2.id);
+            mergePass = true; // Repeat to handle transitive merges
+        }
+    }
+    
+    // Filter out the merged generators from the global generators list
+    generators = generators.filter(g => !mergedChamberIds.has(g.id));
+
     // 5. Run BFS Chamber Expansion (restricted to standard 'chamber' generators)
     for (let gen of generators.filter(g => g.type === 'chamber')) {
         let queue = [];
@@ -966,26 +1132,18 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     }
 
 
-    // Calculate Centers for all MetaNodes
+    // Calculate representative coordinates for all MetaNodes using actual physical nodes
     let metaCenters = new Map();
     for (let m of metaNodes) {
-        let cx = 0, cy = 0;
         if (m.strategy === 'chamber' || m.strategy === 'entry') {
-            for (let n of m.generator.nodes) {
-                cx += n.x;
-                cy += n.y;
-            }
-            cx /= m.generator.nodes.length;
-            cy /= m.generator.nodes.length;
+            // Use the peak node (largest radius) of the generator
+            let sortedNodes = m.generator.nodes.slice().sort((a, b) => b.radius - a.radius);
+            metaCenters.set(m.id, { x: sortedNodes[0].x, y: sortedNodes[0].y });
         } else {
-            for (let n of m.nodes) {
-                cx += n.x;
-                cy += n.y;
-            }
-            cx /= m.nodes.length;
-            cy /= m.nodes.length;
+            // Use the middle physical node along the ordered corridor nodes chain
+            let midNode = m.nodes[Math.floor(m.nodes.length / 2)];
+            metaCenters.set(m.id, { x: midNode.x, y: midNode.y });
         }
-        metaCenters.set(m.id, { x: cx, y: cy });
     }
 
     // 9. Pick the starting generator for each disconnected pocket component
