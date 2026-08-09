@@ -1467,11 +1467,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         if (pts.length === 0) {
             if (isCut) {
                 for (let p of newPts) {
-                    pts.push(newPoint(p.x, p.y, p.z));
+                    pts.push(p.clone());
                 }
             } else {
                 for (let p of newPts) {
-                    pts.push(newPoint(p.x, p.y, z + 0.1));
+                    pts.push(p.clone().setZ(z + 0.1));
                 }
             }
             return oriented;
@@ -1484,7 +1484,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 pts.push(newPoint(newPts[0].x, newPts[0].y, newPts[0].z));
             }
             for (let p of newPts) {
-                pts.push(newPoint(p.x, p.y, p.z));
+                pts.push(p.clone());
             }
         } else {
             if (lastPt.z < z + 0.05) {
@@ -1492,7 +1492,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 lastPt = pts[pts.length - 1];
             }
             for (let p of oriented) {
-                pts.push(newPoint(p.x, p.y, z + 0.1));
+                pts.push(p.clone().setZ(z + 0.1));
             }
         }
         return oriented;
@@ -1546,6 +1546,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 helixPts.push(newPoint(centerPt.x, centerPt.y, z));
             }
             if (helixPts.length > 0) {
+                // Annotate the first helix point at zStart as forceSpeed: 0 so the descent (pre-plunge) from zSafe is rapid G0
+                helixPts[0].annotate({ forceSpeed: 0 });
                 helixPts.unshift(newPoint(helixPts[0].x, helixPts[0].y, zSafe));
             }
             return helixPts;
@@ -1568,7 +1570,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 // and avoid generating any feed-rate toolpath points during backtracking.
                 if (pts.length > 0) {
                     let lastPt = pts[pts.length - 1];
-                    pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
+                    // Force G0 rapid travel for the retract move to zSafe
+                    pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
                     toolpaths.push(newPolygon().addPoints(pts).setOpen());
                     pts = [];
                 }
@@ -1579,7 +1582,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     // to the center of the chamber without crossing pocket walls.
                     if (pts.length > 0) {
                         let lastPt = pts[pts.length - 1];
-                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
+                        // Force G0 rapid travel for the retract move to zSafe
+                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
                         toolpaths.push(newPolygon().addPoints(pts).setOpen());
                         pts = [];
                     }
@@ -1621,7 +1625,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     // Trigger a retract before entering any entry node to ensure a safe plunge.
                     if (pts.length > 0) {
                         let lastPt = pts[pts.length - 1];
-                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
+                        // Force G0 rapid travel for the retract move to zSafe
+                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
                         toolpaths.push(newPolygon().addPoints(pts).setOpen());
                         pts = [];
                     }
@@ -1776,7 +1781,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
         if (pts.length > 0) {
             let lastPt = pts[pts.length - 1];
-            pts.push(newPoint(lastPt.x, lastPt.y, zSafe));
+            // Force G0 rapid travel for the retract move to zSafe
+            pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
             toolpaths.push(newPolygon().addPoints(pts).setOpen());
             pts = [];
         }
