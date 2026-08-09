@@ -1177,29 +1177,22 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             }
         }
 
-        let largestGen = null;
-        let largestSize = -1;
+        let leftmostGen = null;
+        let minX = Infinity;
 
         for (let gen of componentGenerators) {
-            let size = 0;
-            if (gen.nodes.length > 1) {
-                for (let i = 0; i < gen.nodes.length - 1; i++) {
-                    size += dist2D(gen.nodes[i], gen.nodes[i+1]);
-                }
-            } else {
-                size = 2 * gen.nodes[0].radius;
-            }
-
-            if (size > largestSize) {
-                largestSize = size;
-                largestGen = gen;
+            let sorted = gen.nodes.slice().sort((a, b) => b.radius - a.radius);
+            let peak = sorted[0];
+            if (peak.x < minX) {
+                minX = peak.x;
+                leftmostGen = gen;
             }
         }
 
-        if (largestGen) {
-            active_generators.push(largestGen);
+        if (leftmostGen) {
+            active_generators.push(leftmostGen);
 
-            let startMetaNode = component.find(m => (m.strategy === 'chamber' || m.strategy === 'entry') && m.generator.id === largestGen.id);
+            let startMetaNode = component.find(m => (m.strategy === 'chamber' || m.strategy === 'entry') && m.generator.id === leftmostGen.id);
             if (startMetaNode) {
                 let componentMetaNodes = component;
                 let adjMeta = new Map();
@@ -1318,7 +1311,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             break;
                         }
 
-                        let conn = curr.connections.find(c => c.neighbor === next && (curr.nodes.length <= 1 || c.myEnd === currentEnd));
+                        let conn = curr.connections.find(c => c.neighbor === next && (curr.strategy !== 'corridor' || curr.nodes.length <= 1 || c.myEnd === currentEnd));
                         if (conn) {
                             lastStep.exitEnd = conn.myEnd;
 
@@ -1401,7 +1394,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     console.log(`  Neighbors: ${edgesInfo || 'none'}`);
                 }
 
-                console.log(`[MAT DFS Walk Debug] Chosen Start Generator: ${largestGen.id} (MetaNode ID: ${startMetaNode.id})`);
+                console.log(`[MAT DFS Walk Debug] Chosen Start Generator: ${leftmostGen.id} (MetaNode ID: ${startMetaNode.id})`);
                 for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
                     let step = walk[stepIndex];
                     let enterStr = step.resolvedEnterEnd !== undefined ? (step.resolvedEnterEnd ? 'end' : 'begin') : 'N/A';
@@ -1576,6 +1569,13 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             } else {
                 // First-time visit
                 if (m.strategy === 'chamber') {
+                    // Trigger a retract before entering any chamber to ensure a safe transition
+                    // to the center of the chamber without crossing pocket walls.
+                    if (pts.length > 0) {
+                        toolpaths.push(newPolygon().addPoints(pts).setOpen());
+                        pts = [];
+                    }
+
                     let m_capsules = [];
                     let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
                     if (chamberNodes.length === 1) {
@@ -1598,28 +1598,26 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                         let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius, options);
 
                         let ptsArray = spiral.points;
-                        if (ptsArray.length > 0) {
-                            let enterPt = !step.resolvedEnterEnd ? m.nodes[0] : m.nodes[m.nodes.length - 1];
-                            let dStart = Math.hypot(ptsArray[0].x - enterPt.x, ptsArray[0].y - enterPt.y);
-                            let dEnd = Math.hypot(ptsArray[ptsArray.length - 1].x - enterPt.x, ptsArray[ptsArray.length - 1].y - enterPt.y);
-                            if (dEnd < dStart) {
-                                ptsArray.reverse();
-                            }
-                        }
 
-                        if (!helicalEntryAdded && ptsArray.length > 0) {
+                        // Chambers must always start at the center and cut outwards. They can never be reversed
+                        // or transition directly from a previous cut; they require a dedicated helical entry plunge.
+                        if (ptsArray.length > 0) {
                             let entryPts = makeHelicalEntry(ptsArray[0], m.generator.nodes[0]);
                             ptsArray = [ ...entryPts, ...ptsArray ];
-                            helicalEntryAdded = true;
                         }
 
                         oriented = pushPoints(ptsArray, true);
                     }
                     metaSpines.set(m.id, m.nodes);
                 } else if (m.strategy === 'entry') {
+                    // Trigger a retract before entering any entry node to ensure a safe plunge.
+                    if (pts.length > 0) {
+                        toolpaths.push(newPolygon().addPoints(pts).setOpen());
+                        pts = [];
+                    }
+
                     let centerPt = m.nodes[0];
                     let entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
-                    helicalEntryAdded = true;
 
                     oriented = pushPoints(entryPts, true);
                     metaSpines.set(m.id, m.nodes);
