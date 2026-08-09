@@ -307,9 +307,9 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     let sortedNodes = generator.nodes.slice().sort((a, b) => b.radius - a.radius);
     let genCenter = { x: sortedNodes[0].x, y: sortedNodes[0].y };
 
-    // Calculate maximum safe helix radius
+    // Calculate maximum safe helix radius (since matRadius is un-inflated distance to offset wall)
     let matRadius = sortedNodes[0].radius;
-    let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
+    let helixRadius = Math.max(0, Math.min(matRadius, 0.95 * toolRadius));
 
     // Compute the maximum straight-line distance from the peak center to the boundary of the shape
     // using the inscribed circles of the MAT nodes.
@@ -384,7 +384,7 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
  * - ccw: Boolean indicating rotation direction (true = Counter-Clockwise, false = Clockwise).
  * - z: The active cutting depth.
  */
-function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z, addedRadius) {
+function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
     let pts = [];
     
     // 1. Calculate segment length and unit direction vectors
@@ -424,10 +424,9 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z, added
         };
 
         // Calculate the lateral cut width W.
-        // This is the maximum distance from the centerline to the pocket boundary wall.
-        // We subtract addedRadius (which is toolRadius when has_profile is true, and 0 otherwise)
-        // to correctly determine the distance from the centerline to the offset pocket walls.
-        let W = Math.max(0.05, p1.radius - addedRadius);
+        // This is the maximum distance from the centerline to the pocket boundary wall (offset_polygons).
+        // Since MAT nodes are un-inflated (addedRadius = 0), this is directly equal to p1.radius.
+        let W = Math.max(0.05, p1.radius);
 
         // 4. Interpolate the semi-circular cutting arc
         // We generate 16 steps (17 coordinates) representing a half-circle sweep.
@@ -454,9 +453,9 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z, added
         if (i < N - 1) {
             let s2 = (i + 2) * S;
             let r2 = A.radius + (Math.min(L, s2) / L) * (B.radius - A.radius);
-            W_next = Math.max(0.05, r2 - toolRadius);
+            W_next = Math.max(0.05, r2);
         } else {
-            W_next = Math.max(0.05, B.radius - toolRadius);
+            W_next = Math.max(0.05, B.radius);
         }
 
         // Compute the landing coordinate for the start of the next cutting loop
@@ -578,8 +577,10 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let teaRad = (options.tea ?? 60) * Math.PI / 180;
     let targetStepover = toolDiam * Math.sin(teaRad / 2) * Math.sin(teaRad / 2);
 
-    let has_profile = polygons.some(p => p.inner && p.inner.length > 0);
-    let addedRadius = has_profile ? toolRadius : 0;
+    // The medial axis (MAT) segments are always computed on offset_polygons.
+    // We keep addedRadius as 0 so that the chamber classification operates on un-inflated radii,
+    // which prevents chambers from swallowing narrow slots/corridors.
+    let addedRadius = 0;
 
     let offset_polygons = POLY.offset(polygons, [ -toolRadius ], { z: options.z });
 
@@ -1552,7 +1553,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         // Helper: Generate helical entry points centered at a point
         function makeHelicalEntry(centerPt, generatorNode) {
             let matRadius = generatorNode.radius;
-            let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
+            let helixRadius = Math.max(0, Math.min(matRadius, 0.95 * toolRadius));
             let zTop = options.zTop ?? 0.0;
             let zStart = Math.min(zTop, z + (options.down ?? 2.0));
             let helixPts = [];
@@ -1790,7 +1791,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      */
                     let allTrochPts = [];
                     for (let idx = 0; idx < D.length - 1; idx++) {
-                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z, addedRadius));
+                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z));
                     }
 
                     console.log(`[MAT Debug] Corridor Grouping (MetaNode ${m.id}):`);
