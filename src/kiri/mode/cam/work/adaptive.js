@@ -192,7 +192,7 @@ function snapPolygonToWalls(poly, wallPolygons, tolerance = 0.15) {
 function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, z, toolRadius, options) {
     let loops = [ chamberBoundary.clone() ];
     let current = chamberBoundary;
-    
+
     // Find the center point of the generator
     let genCenter = { x: 0, y: 0 };
     for (let n of generator.nodes) {
@@ -205,7 +205,7 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     // Calculate maximum safe helix radius
     let matRadius = generator.nodes[0].radius;
     let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
-    
+
     while (true) {
         let next = POLY.offset([ current ], -targetStepover, { z: z });
         if (next.length === 0) {
@@ -223,7 +223,7 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
         current = match.clean(true, null, 0.02); // minor clean to keep offset curves smooth
         loops.push(current);
     }
-    
+
     loops.reverse();
 
     // Duplicate the final loop (outer boundary) to act as a 360-degree cleanup pass
@@ -240,44 +240,44 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
         let tinyCircle = newPolygon().centerCircle(newPoint(genCenter.x, genCenter.y, z), 0.01, 8);
         loops.unshift(tinyCircle);
     }
-    
+
     let numSteps = 72; // 5-degree steps
     let N = loops.length - 2; // Total loops excluding the final cleanup pass loop
-    
+
     for (let i = 0; i < loops.length - 1; i++) {
         let l0 = loops[i];
         let l1 = loops[i+1];
-        
+
         let isCleanup = (i === loops.length - 2); // Final 360-degree cleanup loop
-        
+
         for (let j = 0; j < numSteps; j++) {
             let u = j / numSteps;
             let theta = ccw ? (u * 2 * Math.PI) : ((1 - u) * 2 * Math.PI);
             let dx = Math.cos(theta);
             let dy = Math.sin(theta);
-            
+
             let p0 = getRayIntersection(genCenter, dx, dy, l0);
             let p1 = getRayIntersection(genCenter, dx, dy, l1);
-            
+
             // Local blended point between loop i and loop i+1
             let px_loc = (1 - u) * p0.x + u * p1.x;
             let py_loc = (1 - u) * p0.y + u * p1.y;
-            
+
             // Circle projection point at current angle
             let p_circle = getRayIntersection(genCenter, dx, dy, loops[0]);
-            
+
             // Global weight to morph from circle (loop 0) to actual offset shapes (loop N)
             // Goes from 0 (at loop 0 start) to 1 (at loop N start)
             let t = isCleanup ? 1.0 : Math.min(1.0, (i + u) / Math.max(1, N));
-            
+
             // Apply global interpolation
             let px = (1 - t) * p_circle.x + t * px_loc;
             let py = (1 - t) * p_circle.y + t * py_loc;
-            
+
             path_pts.push(newPoint(px, py, z));
         }
     }
-    
+
     return newPolygon().addPoints(path_pts).setOpen();
 }
 
@@ -320,7 +320,7 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
         for (let k = 0; k <= steps; k++) {
             let u = k / steps;
             let theta = ccw ? (-Math.PI/2 + u * Math.PI) : (Math.PI/2 - u * Math.PI);
-            
+
             let px = p0.x + W * n.x * Math.sin(theta) + S * dx * Math.cos(theta);
             let py = p0.y + W * n.y * Math.sin(theta) + S * dy * Math.cos(theta);
             arcPts.push(newPoint(px, py, z));
@@ -438,12 +438,12 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
     let teaRad = (options.tea ?? 60) * Math.PI / 180;
     let targetStepover = toolDiam * Math.sin(teaRad / 2) * Math.sin(teaRad / 2);
-    
+
     let has_profile = polygons.some(p => p.inner && p.inner.length > 0);
     let addedRadius = has_profile ? toolRadius : 0;
 
     let offset_polygons = POLY.offset(polygons, [ -toolRadius ], { z: options.z });
-    
+
     let mat_segments = [];
     let scale = 1000;
 
@@ -650,8 +650,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
     for (let node of mat_graph) {
         for (let neighbor of node.neighbors) {
-            let key = node.x < neighbor.x ? 
-                `${node.x},${node.y}:${neighbor.x},${neighbor.y}` : 
+            let key = node.x < neighbor.x ?
+                `${node.x},${node.y}:${neighbor.x},${neighbor.y}` :
                 `${neighbor.x},${neighbor.y}:${node.x},${node.y}`;
 
             if (renderedEdges.has(key)) continue;
@@ -708,15 +708,15 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         let dx = p1.x - p0.x;
         let dy = p1.y - p0.y;
         let len = Math.hypot(dx, dy);
-        
+
         let sub_capsules = [];
         let max_len = 1.0;
         let num_subs = Math.ceil(len / max_len);
-        
+
         for (let i = 0; i < num_subs; i++) {
             let t0 = i / num_subs;
             let t1 = (i + 1) / num_subs;
-            
+
             let sp0 = {
                 x: p0.x + t0 * dx,
                 y: p0.y + t0 * dy,
@@ -727,7 +727,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 y: p0.y + t1 * dy,
                 radius: p0.radius + t1 * (p1.radius - p0.radius)
             };
-            
+
             sub_capsules.push(...makeSingleCapsule(sp0, sp1));
         }
         return sub_capsules;
@@ -775,7 +775,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         }
 
         let meta = new MetaNode(++metaNodeIdCounter, 'corridor', null);
-        
+
         if (startNode.neighbors.size > 2) {
             // Junction node: put only this node in the meta-node and stop
             startNode.metaNode = meta;
@@ -806,19 +806,42 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         metaNodes.push(meta);
     }
 
+    /**
+     * Orders the nodes inside a Corridor MetaNode in-place to form a clean linear chain
+     * running from one end of the corridor to the other.
+     *
+     * A Corridor MetaNode initially contains an unordered bag of nodes grouped by a BFS traversal.
+     * To generate a continuous linear toolpath, we order these nodes sequentially.
+     * We do this by traversing the `.neighbors` of each node grouped within the MetaNode to collect
+     * all segments (including original MAT edges and healed gap connections). These segments are
+     * then chained together using a greedy matching algorithm to find the longest contiguous backbone path.
+     */
     function orderMetaNodes(m) {
         if (m.strategy === 'chamber' || m.strategy === 'entry') {
             // Chambers/entries are already grouped/ordered appropriately by their generator
             return;
         } else {
             let segs = [];
-            let seen = new Set();
+            let seen = new Set(); // Tracks undirected edges to avoid duplicate segments
+
+            // Traverse all nodes grouped in this corridor MetaNode
             for (let u of m.nodes) {
+                // Check all graph neighbors of node 'u'
                 for (let v of u.neighbors) {
+                    // Only build segments if the neighbor 'v' is also grouped inside this same MetaNode
                     if (v.metaNode === m) {
-                        // Create a unique key for the undirected edge using node coordinates
-                        let key = (u.x < v.x || (u.x === v.x && u.y < v.y)) ? 
+                        /**
+                         * DEDUPLICATION:
+                         * Since the graph is undirected, the edge between u and v is traversed twice:
+                         * once when processing u (u -> v), and once when processing v (v -> u).
+                         * To prevent adding duplicate segment objects (which would cause chaining loops),
+                         * we construct a coordinate-based unique key where the smaller coordinate pair is
+                         * always listed first. This uniquely identifies the undirected edge.
+                         */
+                        let key = (u.x < v.x || (u.x === v.x && u.y < v.y)) ?
                             `${u.x},${u.y}-${v.x},${v.y}` : `${v.x},${v.y}-${u.x},${u.y}`;
+
+                        // If this undirected edge has not been processed yet, record it
                         if (!seen.has(key)) {
                             seen.add(key);
                             segs.push({ p0: u, p1: v });
@@ -826,9 +849,13 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     }
                 }
             }
+
+            // Chain the segments together sequentially using a greedy matching algorithm
             let paths = chainSegments(segs);
             if (paths.length > 0) {
+                // If branches exist or numerical splits occurred, sort paths by length descending
                 paths.sort((a, b) => b.length - a.length);
+                // Assign the longest continuous chain as the ordered nodes list for this corridor
                 m.nodes = paths[0];
             }
         }
@@ -957,7 +984,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
         if (largestGen) {
             active_generators.push(largestGen);
-            
+
             let startMetaNode = component.find(m => (m.strategy === 'chamber' || m.strategy === 'entry') && m.generator.id === largestGen.id);
             if (startMetaNode) {
                 let componentMetaNodes = component;
@@ -979,14 +1006,14 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
                 /*
                   === POCKET META-GRAPH PATH RESOLUTION ===
-                  
+
                   You have the following structures available here:
                   - component: Array of MetaNode objects belonging to this connected pocket component.
                   - startMetaNode: The starting MetaNode (an entry or chamber) from which clearing begins.
                   - adjMeta: A Map mapping MetaNode to an Array of neighbor MetaNodes.
                   - walk: Array of step objects representing the ordered traversal. You need to populate this.
                   - all_walks: Array where you push the completed walk for this component.
-                  
+
                   MetaNode structure:
                   class MetaNode {
                       id: number,                          // Unique ID
@@ -996,14 +1023,14 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                       connections: Connection[],           // Array of connections to neighbor MetaNodes
                       spine: Point[]                       // Ordered spine skeleton points (workspace coordinates)
                   }
-                  
+
                   Connection structure:
                   {
                       neighbor: MetaNode,                  // The neighboring MetaNode
                       myEnd: boolean,                      // Which end of this node's spine connects (false = begin, true = end)
                       itsEnd: boolean                      // Which end of the neighbor's spine connects (false = begin, true = end)
                   }
-                  
+
                   Step structure to push to walk:
                   {
                       id: number,                          // ID of the MetaNode being visited
@@ -1011,11 +1038,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                       first: boolean,                      // true if this is the first (cutting) visit, false if backtracking
                       enterEnd: boolean | null,            // Which end the tool enters (false = begin, true = end)
                       exitEnd: boolean | null,             // Which end the tool exits (false = begin, true = end)
-                      
+
                       // Resolved properties used by the toolpath generator:
                       resolvedEnterEnd: boolean,
                       resolvedExitEnd: boolean,
-                      
+
                       // Physical transition coordinates:
                       x: number,                           // Theoretical graph entry coordinate on the spine (legacy compatibility)
                       y: number,                           // Theoretical graph entry coordinate on the spine (legacy compatibility)
@@ -1031,7 +1058,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     if (isUncut) {
                         uncutNodes.delete(curr.id);
                     }
-                    
+
                     activeStack.add(curr.id);
 
                     let step = {
@@ -1109,7 +1136,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 }
 
                 dfsWalk(startMetaNode, null);
-                
+
                 for (let step of walk) {
                     let m = metaNodes.find(node => node.id === step.id);
                     if (m) {
@@ -1151,7 +1178,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     let edgesInfo = m.connections.map(c => `to Node ${c.neighbor.id} (${c.myEnd ? 'end' : 'begin'} -> ${c.itsEnd ? 'end' : 'begin'})`).join(', ');
                     console.log(`  Neighbors: ${edgesInfo || 'none'}`);
                 }
-                
+
                 console.log(`[MAT DFS Walk Debug] Chosen Start Generator: ${largestGen.id} (MetaNode ID: ${startMetaNode.id})`);
                 for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
                     let step = walk[stepIndex];
@@ -1185,7 +1212,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     });
 
     options.meta_walks = all_walks;
-    
+
     options.generators = active_generators.map(g => {
         return {
             type: g.nodes.length > 1 ? 'line' : 'point',
@@ -1205,7 +1232,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
      */
     function pushPoints(newPts, isCut, forceOrder = false) {
         if (newPts.length === 0) return [];
-        
+
         let oriented = newPts;
         if (!isCut && !forceOrder && pts.length > 0) {
             oriented = newPts.slice();
@@ -1257,7 +1284,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
     for (let walk of all_walks) {
         if (walk.length === 0) continue;
-        
+
         let metaSpines = new Map(); // Cache spines in their first traversed direction
         let helicalEntryAdded = false; // Tracks if helical plunge has been generated for this component
 
@@ -1268,21 +1295,21 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             let zTop = options.zTop ?? 0.0;
             let zStart = Math.min(zTop, z + (options.down ?? 2.0));
             let helixPts = [];
-            
+
             if (helixRadius > 0.05) {
                 let rampAngle = (options.entry_helix_angle ?? 3) * Math.PI / 180;
                 let pitch = 2 * Math.PI * helixRadius * Math.tan(rampAngle);
-                
+
                 // Add exactly one full turn's worth of Z-height (pitch) to zStart and the descent height H.
                 // This ensures the first turn is performed in empty air, so that the tool is already
                 // in full helical cutting motion before it makes physical contact with the stock surface.
                 zStart += pitch;
                 let H = (zStart - pitch - z) + pitch; // equivalent to H_solid + pitch
-                
+
                 let numTurns = Math.max(1, H / pitch);
                 let totalRad = numTurns * 2 * Math.PI;
                 let numSteps = Math.ceil(72 * numTurns);
-                
+
                 for (let j = 0; j <= numSteps; j++) {
                     let u = j / numSteps;
                     let theta = ccw ? (-totalRad * (1 - u)) : (totalRad * (1 - u));
@@ -1311,7 +1338,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             let oriented = null;
 
             if (step.first === false) {
-                // Backtrack visits represent air transitions. 
+                // Backtrack visits represent air transitions.
                 // We end the current cutting pass (if active) to trigger Kiri's native rapid travel retract,
                 // and avoid generating any feed-rate toolpath points during backtracking.
                 if (pts.length > 0) {
@@ -1341,7 +1368,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
                         }
                         let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius, options);
-                        
+
                         let ptsArray = spiral.points;
                         if (ptsArray.length > 0) {
                             let enterPt = !step.resolvedEnterEnd ? m.nodes[0] : m.nodes[m.nodes.length - 1];
@@ -1373,10 +1400,10 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     let C = [];
 
                     /**
-                     * Helper to get oriented spine points with radius.
+                     * Helper to get oriented nodes with radius.
                      * This duplicates the ordered nodes sequence, reverses it if the DFS traversal
-                     * indicates we entered from the 'end' of the spine segment, and maps each MATNode
-                     * to a library Point object with the radius property copied directly (no distance lookup).
+                     * indicates we entered from the 'end' of the segment, and maps each MATNode
+                     * to a library Point object with the radius property copied directly.
                      */
                     function getOrientedSpine(stepNode, stepWalk) {
                         let orientedSpine = stepNode.nodes.slice();
@@ -1435,34 +1462,37 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     }
 
                     /**
-                     * RESAMPLING / INTERPOLATION LOOP:
-                     * The points list C is now fully compiled (with bridged gap ends). We now resample it to form
-                     * a new polyline D, ensuring that no consecutive points are further apart than S (the target stepover).
-                     * For any segment in C longer than S, we linearly interpolate intermediate coordinates and radii.
+                     * RESAMPLING / INTERPOLATION:
+                     * Currently, the path D is set directly to the compiled path C without resampling.
+                     *
+                     * (Commented-out resampling loop preserved below for future activation if needed)
                      */
-                    let S = targetStepover;
                     let D = [...C];
-                    //for (let j = 0; j < C.length; j++) {
-                    //    let p0 = C[j];
-                    //    D.push(p0);
-                    //    if (j < C.length - 1) {
-                    //        let p1 = C[j+1];
-                    //        let dx = p1.x - p0.x;
-                    //        let dy = p1.y - p0.y;
-                    //        let d = Math.hypot(dx, dy);
-                    //        if (d > S) {
-                    //            let steps = Math.floor(d / S);
-                    //            for (let k = 1; k <= steps; k++) {
-                    //                let dist = k * S;
-                    //                if (dist >= d - 0.001) break;
-                    //                let t = dist / d;
-                    //                let interpPt = newPoint(p0.x + dx * t, p0.y + dy * t, p0.z);
-                    //                interpPt.radius = p0.radius + (p1.radius - p0.radius) * t;
-                    //                D.push(interpPt);
-                    //            }
-                    //        }
-                    //    }
-                    //}
+                    /*
+                    let S = targetStepover;
+                    let D = [];
+                    for (let j = 0; j < C.length; j++) {
+                        let p0 = C[j];
+                        D.push(p0);
+                        if (j < C.length - 1) {
+                            let p1 = C[j+1];
+                            let dx = p1.x - p0.x;
+                            let dy = p1.y - p0.y;
+                            let d = Math.hypot(dx, dy);
+                            if (d > S) {
+                                let steps = Math.floor(d / S);
+                                for (let k = 1; k <= steps; k++) {
+                                    let dist = k * S;
+                                    if (dist >= d - 0.001) break;
+                                    let t = dist / d;
+                                    let interpPt = newPoint(p0.x + dx * t, p0.y + dy * t, p0.z);
+                                    interpPt.radius = p0.radius + (p1.radius - p0.radius) * t;
+                                    D.push(interpPt);
+                                }
+                            }
+                        }
+                    }
+                    */
 
                     /**
                      * TROCHOIDAL TOOLPATH GENERATION:
@@ -1518,9 +1548,9 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     for (let walk of all_walks) {
         for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
             let step = walk[stepIndex];
-            let startStr = (step.start_x !== undefined && step.start_y !== undefined) ? 
+            let startStr = (step.start_x !== undefined && step.start_y !== undefined) ?
                 `(${step.start_x.toFixed(4)}, ${step.start_y.toFixed(4)})` : 'undefined';
-            let endStr = (step.end_x !== undefined && step.end_y !== undefined) ? 
+            let endStr = (step.end_x !== undefined && step.end_y !== undefined) ?
                 `(${step.end_x.toFixed(4)}, ${step.end_y.toFixed(4)})` : 'undefined';
             console.log(`  Step ${stepIndex}: Node ID: ${step.id}, Strategy: ${step.strategy}, First/Cut Visit: ${step.first}, Start: ${startStr}, End: ${endStr}`);
         }
