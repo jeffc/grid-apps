@@ -608,9 +608,9 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
                 }
             }
             lastTravelBounds = undefined;
-        } else
+        }
         // for longer moves
-        if (isMove) {
+        if (isMove && !upAndOver) {
             const bigXY = (deltaXY > shortCut && !lasering);
             const bigZ  = (absDeltaZ > toolDiam / 2 && deltaXY > tolerance);
             const midZ  = (tolerance && absDeltaZ >= tolerance);
