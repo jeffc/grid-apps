@@ -1399,7 +1399,13 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
                 dfsWalk(startMetaNode, null);
 
-                for (let step of walk) {
+                // Prune trailing backtrack steps at the end of the walk
+                while (walk.length > 0 && walk[walk.length - 1].first === false) {
+                    walk.pop();
+                }
+
+                for (let i = 0; i < walk.length; i++) {
+                    let step = walk[i];
                     let m = metaNodes.find(node => node.id === step.id);
                     if (m) {
                         let spine = m.nodes;
@@ -1419,6 +1425,21 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             step.start_y = enterPt.y;
                             step.end_x = exitPt.x;
                             step.end_y = exitPt.y;
+                        }
+
+                        // Determine helicalEntryNeeded statically for each step
+                        if (i === 0) {
+                            step.helicalEntryNeeded = true;
+                        } else if (step.first === false) {
+                            step.helicalEntryNeeded = false;
+                        } else if (step.strategy === 'chamber' || step.strategy === 'entry') {
+                            step.helicalEntryNeeded = true;
+                        } else if (step.strategy === 'corridor') {
+                            let prevStep = walk[i - 1];
+                            let prevM = metaNodes.find(node => node.id === prevStep.id);
+                            step.helicalEntryNeeded = prevM ? !m.neighbors.has(prevM) : true;
+                        } else {
+                            step.helicalEntryNeeded = false;
                         }
                     }
                 }
@@ -1548,7 +1569,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         if (walk.length === 0) continue;
 
         let metaSpines = new Map(); // Cache spines in their first traversed direction
-        let helicalEntryNeeded = true; // Tracks if a helical plunge entry is needed for this component
 
         // Helper: Generate helical entry points centered at a point
         function makeHelicalEntry(centerPt, generatorNode) {
@@ -1702,10 +1722,16 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
                         // Chambers must always start at the center and cut outwards. They can never be reversed
                         // or transition directly from a previous cut; they require a dedicated helical entry plunge.
-                        if (ptsArray.length > 0) {
+                        if (step.helicalEntryNeeded && ptsArray.length > 0) {
                             let entryPts = makeHelicalEntry(ptsArray[0], m.generator.nodes[0]);
-                            ptsArray = [ ...entryPts, ...ptsArray ];
-                            helicalEntryNeeded = false;
+                            let transition = [];
+                            if (i > 0 && lastToolPathPt) {
+                                let firstHelixPt = entryPts[0];
+                                transition.push(newPoint(lastToolPathPt.x, lastToolPathPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                                transition.push(newPoint(firstHelixPt.x, firstHelixPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                                transition.push(newPoint(firstHelixPt.x, firstHelixPt.y, firstHelixPt.z).annotate({ forceSpeed: 0 }));
+                            }
+                            ptsArray = [ ...transition, ...entryPts, ...ptsArray ];
                         }
 
                         oriented = pushPoints(ptsArray, true);
@@ -1713,10 +1739,22 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     metaSpines.set(m.id, m.nodes);
                 } else if (m.strategy === 'entry') {
                     let centerPt = m.nodes[0];
-                    let entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
+                    let entryPts = [];
+                    if (step.helicalEntryNeeded) {
+                        entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
+                        let transition = [];
+                        if (i > 0 && lastToolPathPt) {
+                            let firstHelixPt = entryPts[0];
+                            transition.push(newPoint(lastToolPathPt.x, lastToolPathPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                            transition.push(newPoint(firstHelixPt.x, firstHelixPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                            transition.push(newPoint(firstHelixPt.x, firstHelixPt.y, firstHelixPt.z).annotate({ forceSpeed: 0 }));
+                        }
+                        entryPts = [ ...transition, ...entryPts ];
+                    } else {
+                        entryPts = [ newPoint(centerPt.x, centerPt.y, z) ];
+                    }
 
                     oriented = pushPoints(entryPts, true);
-                    helicalEntryNeeded = false;
                     metaSpines.set(m.id, m.nodes);
                 } else if (m.strategy === 'corridor') {
                     // Start a new point list C
@@ -1869,7 +1907,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             transitionPts.push(newPoint(allTrochPts[0].x, allTrochPts[0].y, z).annotate({ forceSpeed: 0 }));
 
                             // Prevent standard helical entry plunge since we have safely transitioned at depth
-                            helicalEntryNeeded = false;
+                            step.helicalEntryNeeded = false;
                         }
                     }
 
@@ -1883,11 +1921,17 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      * corridor's initial trochoid coordinate. We prepend it to allTrochPts to ensure the tool
                      * ramps safely down into solid stock.
                      */
-                    if (helicalEntryNeeded && allTrochPts.length > 0) {
+                    if (step.helicalEntryNeeded && allTrochPts.length > 0) {
                         let fakeNode = { x: allTrochPts[0].x, y: allTrochPts[0].y, radius: D[0].radius };
                         let entryPts = makeHelicalEntry(allTrochPts[0], fakeNode);
-                        allTrochPts = [ ...entryPts, ...allTrochPts ];
-                        helicalEntryNeeded = false;
+                        let transition = [];
+                        if (i > 0 && lastToolPathPt) {
+                            let firstHelixPt = entryPts[0];
+                            transition.push(newPoint(lastToolPathPt.x, lastToolPathPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                            transition.push(newPoint(firstHelixPt.x, firstHelixPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                            transition.push(newPoint(firstHelixPt.x, firstHelixPt.y, firstHelixPt.z).annotate({ forceSpeed: 0 }));
+                        }
+                        allTrochPts = [ ...transition, ...entryPts, ...allTrochPts ];
                     }
 
                     // Push the final oriented trochoidal segment points to the active cutting toolpath accumulator
