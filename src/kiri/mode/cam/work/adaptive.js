@@ -277,57 +277,88 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
             path_pts.push(newPoint(px, py, z));
         }
     }
-
     return newPolygon().addPoints(path_pts).setOpen();
 }
 
 /**
  * Generates D-shaped trochoidal cutting paths along a single corridor segment A -> B.
- * Resamples the segment into sub-segments of length no more than targetStepover,
- * ensuring the start (A) and end (B) points are exactly preserved.
+ * 
+ * Each trochoidal loop consists of:
+ * 1. A semi-circular cutting arc extending outward to the pocket boundary wall (feed rate).
+ * 2. A retract transition (safe-Z lift-off, rapid move to the start of the next loop, and plunge).
+ * 
+ * Inputs:
+ * - A, B: Endpoints of the segment (must have .x, .y, and .radius properties).
+ * - targetStepover: The maximum forward stepover distance per loop.
+ * - toolRadius: The radius of the cutting tool.
+ * - ccw: Boolean indicating rotation direction (true = Counter-Clockwise, false = Clockwise).
+ * - z: The active cutting depth.
  */
 function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
     let pts = [];
+    
+    // 1. Calculate segment length and unit direction vectors
     let L = Math.hypot(B.x - A.x, B.y - A.y);
-    if (L < 1e-4) return [];
+    if (L < 1e-4) return []; // Skip zero-length segments
 
-    let dx = (B.x - A.x) / L;
-    let dy = (B.y - A.y) / L;
-    let n = { x: -dy, y: dx };
+    let dx = (B.x - A.x) / L; // Unit vector along the segment (X component)
+    let dy = (B.y - A.y) / L; // Unit vector along the segment (Y component)
+    
+    // Normal vector perpendicular to the segment, pointing to the side (used for lateral loop offset)
+    let n = { x: -dy, y: dx }; 
 
+    // 2. Subdivide the segment length into N equal loops
+    // We divide L by targetStepover and round up to ensure loop stepover S is <= targetStepover,
+    // which guarantees that the start point A and end point B are exactly aligned.
     let N = Math.ceil(L / targetStepover);
-    let S = L / N;
+    let S = L / N; // Exact stepover distance per loop
 
+    let prevArcEnd = null;
+    // 3. Generate individual trochoidal loops
     for (let i = 0; i < N; i++) {
-        let s0 = i * S;
-        let s1 = (i + 1) * S;
+        let s0 = i * S;       // Start distance of current loop along segment
+        let s1 = (i + 1) * S;   // End distance of current loop along segment
 
+        // Interpolate the starting coordinates and local MAT radius for this loop
         let p0 = {
             x: A.x + s0 * dx,
             y: A.y + s0 * dy,
             radius: A.radius + (s0 / L) * (B.radius - A.radius)
         };
+        
+        // Interpolate the ending coordinates and local MAT radius for this loop
         let p1 = {
             x: A.x + s1 * dx,
             y: A.y + s1 * dy,
             radius: A.radius + (s1 / L) * (B.radius - A.radius)
         };
 
+        // Calculate the lateral cut width W.
+        // This is the maximum distance from the centerline to the pocket boundary wall.
+        // It equals the local maximum inscribed circle radius minus the tool radius (with a 0.05mm minimum).
         let W = Math.max(0.05, p1.radius - toolRadius);
 
+        // 4. Interpolate the semi-circular cutting arc
+        // We generate 16 steps (17 coordinates) representing a half-circle sweep.
+        // The sweep starts at the back, curves outward to the wall at width W, and terminates at the front.
         let arcPts = [];
         let steps = 16;
         for (let k = 0; k <= steps; k++) {
             let u = k / steps;
+            // Map u [0..1] to theta [-PI/2..PI/2] depending on cutting rotation direction
             let theta = ccw ? (-Math.PI/2 + u * Math.PI) : (Math.PI/2 - u * Math.PI);
 
+            // Compute coordinate by adding lateral offset (normal vector * sin) and forward offset (tangent vector * cos)
             let px = p0.x + W * n.x * Math.sin(theta) + S * dx * Math.cos(theta);
             let py = p0.y + W * n.y * Math.sin(theta) + S * dy * Math.cos(theta);
             arcPts.push(newPoint(px, py, z));
         }
 
+        // Add the cutting arc points to the accumulator
         pts.push(...arcPts);
 
+        // 5. Generate the safe-Z rapid retract transit back to the centerline
+        // Compute the lateral width of the NEXT loop to find where the tool needs to land.
         let W_next;
         if (i < N - 1) {
             let s2 = (i + 2) * S;
@@ -337,14 +368,30 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
             W_next = Math.max(0.05, B.radius - toolRadius);
         }
 
+        // Compute the landing coordinate for the start of the next cutting loop
         let nextStartPt = ccw ?
             { x: p1.x - W_next * n.x, y: p1.y - W_next * n.y } :
             { x: p1.x + W_next * n.x, y: p1.y + W_next * n.y };
 
+        // Insert transit coordinates to execute a retract-rapid-plunge:
+        // - Cut backwards to the end of the previous arc, if there was one
+        // - Lift tool straight up to safe clearance (z + 0.1)
+        // - Rapid travel perpendicular to the path to the start point of the arc we just cut
+        // - Plunge back do the cut depth
+        // - Cut to the start of the next arc
+        let firstPt = arcPts[0];
         let lastPt = arcPts[arcPts.length - 1];
+        if (prevArcEnd != null) {
+            pts.push(newPoint(prevArcEnd.x, prevArcEnd.y, z));
+            lastPt = prevArcEnd;
+        }
         pts.push(newPoint(lastPt.x, lastPt.y, z + 0.1));
-        pts.push(newPoint(nextStartPt.x, nextStartPt.y, z + 0.1));
+        pts.push(newPoint(firstPt.x, firstPt.y, z + 0.1));
+        pts.push(newPoint(firstPt.x, firstPt.y, z));
         pts.push(newPoint(nextStartPt.x, nextStartPt.y, z));
+
+        // update the previous arc end
+        prevArcEnd = arcPts[steps-1];
     }
 
     return pts;
