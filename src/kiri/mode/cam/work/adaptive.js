@@ -384,7 +384,7 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
  * - ccw: Boolean indicating rotation direction (true = Counter-Clockwise, false = Clockwise).
  * - z: The active cutting depth.
  */
-function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
+function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z, addedRadius) {
     let pts = [];
     
     // 1. Calculate segment length and unit direction vectors
@@ -425,8 +425,9 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
 
         // Calculate the lateral cut width W.
         // This is the maximum distance from the centerline to the pocket boundary wall.
-        // It equals the local maximum inscribed circle radius minus the tool radius (with a 0.05mm minimum).
-        let W = Math.max(0.05, p1.radius - toolRadius);
+        // We subtract addedRadius (which is toolRadius when has_profile is true, and 0 otherwise)
+        // to correctly determine the distance from the centerline to the offset pocket walls.
+        let W = Math.max(0.05, p1.radius - addedRadius);
 
         // 4. Interpolate the semi-circular cutting arc
         // We generate 16 steps (17 coordinates) representing a half-circle sweep.
@@ -1090,11 +1091,16 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     }
 
     // Establish Connections (Meta-Edges) in the Meta-Graph
+    let connectedEdges = new Set();
     for (let node of mat_graph) {
         for (let neighbor of node.neighbors) {
             if (node.metaNode && neighbor.metaNode && node.metaNode !== neighbor.metaNode) {
-                node.metaNode.neighbors.add(neighbor.metaNode);
-                neighbor.metaNode.neighbors.add(node.metaNode);
+                let key = node.x < neighbor.x ?
+                    `${node.x},${node.y}:${neighbor.x},${neighbor.y}` :
+                    `${neighbor.x},${neighbor.y}:${node.x},${node.y}`;
+
+                if (connectedEdges.has(key)) continue;
+                connectedEdges.add(key);
 
                 let mu = node.metaNode;
                 let mv = neighbor.metaNode;
@@ -1115,18 +1121,57 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     itsEnd = dK < d0;
                 }
 
-                let exists = mu.connections.push !== undefined && mu.connections.some(c => c.neighbor === mv && c.myEnd === myEnd && c.itsEnd === itsEnd);
-                if (!exists) {
+                // If both meta-nodes are chambers, insert an intermediate Corridor MetaNode to clear the neck between them
+                if (mu.strategy === 'chamber' && mv.strategy === 'chamber') {
+                    let m_corr = new MetaNode(++metaNodeIdCounter, 'corridor', null);
+                    m_corr.nodes = [node, neighbor];
+                    metaNodes.push(m_corr);
+
+                    // Connect Chamber A <-> Corridor
+                    mu.neighbors.add(m_corr);
+                    m_corr.neighbors.add(mu);
                     mu.connections.push({
-                        neighbor: mv,
+                        neighbor: m_corr,
                         myEnd: myEnd,
+                        itsEnd: false
+                    });
+                    m_corr.connections.push({
+                        neighbor: mu,
+                        myEnd: false,
+                        itsEnd: myEnd
+                    });
+
+                    // Connect Corridor <-> Chamber B
+                    m_corr.neighbors.add(mv);
+                    mv.neighbors.add(m_corr);
+                    m_corr.connections.push({
+                        neighbor: mv,
+                        myEnd: true,
                         itsEnd: itsEnd
                     });
                     mv.connections.push({
-                        neighbor: mu,
+                        neighbor: m_corr,
                         myEnd: itsEnd,
-                        itsEnd: myEnd
+                        itsEnd: true
                     });
+                } else {
+                    // Standard connection between different meta-nodes
+                    mu.neighbors.add(mv);
+                    mv.neighbors.add(mu);
+
+                    let exists = mu.connections.push !== undefined && mu.connections.some(c => c.neighbor === mv && c.myEnd === myEnd && c.itsEnd === itsEnd);
+                    if (!exists) {
+                        mu.connections.push({
+                            neighbor: mv,
+                            myEnd: myEnd,
+                            itsEnd: itsEnd
+                        });
+                        mv.connections.push({
+                            neighbor: mu,
+                            myEnd: itsEnd,
+                            itsEnd: myEnd
+                        });
+                    }
                 }
             }
         }
@@ -1554,6 +1599,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         }
 
         let i = 0;
+        let lastToolPathPt = null;
         while (i < walk.length) {
             let step = walk[i];
             let m = metaNodes.find(node => node.id === step.id);
@@ -1574,6 +1620,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
                     toolpaths.push(newPolygon().addPoints(pts).setOpen());
                     pts = [];
+                    lastToolPathPt = null;
                 }
             } else {
                 // First-time visit
@@ -1586,6 +1633,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                         pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
                         toolpaths.push(newPolygon().addPoints(pts).setOpen());
                         pts = [];
+                        lastToolPathPt = null;
                     }
 
                     let m_capsules = [];
@@ -1629,6 +1677,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                         pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
                         toolpaths.push(newPolygon().addPoints(pts).setOpen());
                         pts = [];
+                        lastToolPathPt = null;
                     }
 
                     let centerPt = m.nodes[0];
@@ -1665,14 +1714,13 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      * PREPENDING GAP-BRIDGING LOGIC:
                      * To keep the toolpath continuous at feed rate (no Z-hops or rapids between adjacent segments),
                      * we look at the previous step in the DFS walk. If a previous step exists, we retrieve its
-                     * corresponding MetaNode's ordered nodes list and find the exit point used at the end of that step
-                     * (using the resolved resolvedExitEnd property). We then map it directly to a library Point
-                     * object copying its radius in O(1) time, and unshift (prepend) it to the current point list C.
+                     * corresponding MetaNode's ordered nodes list and find the exit point used at the end of that step.
                      */
                     if (i > 0) {
                         let prevStep = walk[i - 1];
                         let prevM = metaNodes.find(node => node.id === prevStep.id);
-                        if (prevM && prevM.nodes.length > 0) {
+                        // Do not prepend the exit point of a chamber to the corridor spine, as it lies far inside the chamber
+                        if (prevM && prevM.nodes.length > 0 && prevM.strategy !== 'chamber') {
                             let exitIndex = prevStep.resolvedExitEnd ? prevM.nodes.length - 1 : 0;
                             let n = prevM.nodes[exitIndex];
                             let prevPt = newPoint(n.x, n.y, z);
@@ -1684,15 +1732,14 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     /**
                      * APPENDING GAP-BRIDGING LOGIC:
                      * If the next step in the walk is a first-time cutting visit (first === true), we look ahead.
-                     * We retrieve its MetaNode's ordered nodes list and determine where the tool will enter that node
-                     * (using the resolved resolvedEnterEnd property). We map it directly to a library Point
-                     * object copying its radius in O(1) time, and push (append) it to the current point list C.
+                     * We retrieve its MetaNode's ordered nodes list and determine where the tool will enter that node.
                      */
                     if (i + 1 < walk.length) {
                         let nextStep = walk[i + 1];
                         if (nextStep.first === true) {
                             let nextM = metaNodes.find(node => node.id === nextStep.id);
-                            if (nextM && nextM.nodes.length > 0) {
+                            // Do not append the entry point of a chamber to the corridor spine, as it lies far inside the chamber
+                            if (nextM && nextM.nodes.length > 0 && nextM.strategy !== 'chamber') {
                                 let enterIndex = nextStep.resolvedEnterEnd ? nextM.nodes.length - 1 : 0;
                                 let n = nextM.nodes[enterIndex];
                                 let nextPt = newPoint(n.x, n.y, z);
@@ -1743,11 +1790,59 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      */
                     let allTrochPts = [];
                     for (let idx = 0; idx < D.length - 1; idx++) {
-                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z));
+                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z, addedRadius));
                     }
 
                     console.log(`[MAT Debug] Corridor Grouping (MetaNode ${m.id}):`);
                     console.log(`  C length = ${C.length}, D length = ${D.length}, allTrochPts length = ${allTrochPts.length}`);
+
+                    // Check if transitioning from a chamber to this corridor.
+                    // If so, we perform a safe rapid transition at z + 0.1 rather than a retract/plunge.
+                    let transitionPts = [];
+                    if (i > 0 && lastToolPathPt && allTrochPts.length > 0) {
+                        let prevStep = walk[i - 1];
+                        let prevM = metaNodes.find(node => node.id === prevStep.id);
+                        if (prevM && prevM.strategy === 'chamber') {
+                            let fromPt = newPoint(lastToolPathPt.x, lastToolPathPt.y, z + 0.1);
+                            let toPt = newPoint(allTrochPts[0].x, allTrochPts[0].y, z + 0.1);
+
+                            // 1. Lift the tool head up 0.1mm
+                            transitionPts.push(newPoint(lastToolPathPt.x, lastToolPathPt.y, z + 0.1).annotate({ forceSpeed: 0 }));
+
+                            // 2. Check if a rapid move from current point to connection node crosses the part boundary
+                            let crossed = false;
+                            for (let poly of offset_polygons) {
+                                let ints = poly.intersections(fromPt, toPt) ?? [];
+                                if (ints.length > 0) { crossed = true; break; }
+                                if (poly.inner) {
+                                    for (let inner of poly.inner) {
+                                        let i_ints = inner.intersections(fromPt, toPt) ?? [];
+                                        if (i_ints.length > 0) { crossed = true; break; }
+                                    }
+                                }
+                                if (crossed) break;
+                            }
+
+                            if (crossed) {
+                                // If it crosses, first rapid back to the main center (peak node) of the chamber
+                                let centerNode = prevM.generator.nodes[0];
+                                transitionPts.push(newPoint(centerNode.x, centerNode.y, z + 0.1).annotate({ forceSpeed: 0 }));
+                            }
+
+                            // Rapid directly to the connection node at z + 0.1
+                            transitionPts.push(toPt.annotate({ forceSpeed: 0 }));
+
+                            // 3. Drop the tool head back to depth z at the connection node
+                            transitionPts.push(newPoint(allTrochPts[0].x, allTrochPts[0].y, z).annotate({ forceSpeed: 0 }));
+
+                            // Prevent standard helical entry plunge since we have safely transitioned at depth
+                            helicalEntryAdded = true;
+                        }
+                    }
+
+                    if (transitionPts.length > 0) {
+                        allTrochPts = [ ...transitionPts, ...allTrochPts ];
+                    }
 
                     /**
                      * SAFE HELICAL ENTRY FALLBACK:
@@ -1776,6 +1871,14 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 step.end_x = oriented[oriented.length - 1].x;
                 step.end_y = oriented[oriented.length - 1].y;
             }
+
+            // Update lastToolPathPt to the end of the active toolpath
+            if (pts.length > 0) {
+                lastToolPathPt = pts[pts.length - 1];
+            } else if (oriented && oriented.length > 0) {
+                lastToolPathPt = oriented[oriented.length - 1];
+            }
+
             i++;
         }
 
