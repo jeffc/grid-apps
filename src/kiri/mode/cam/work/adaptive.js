@@ -1548,12 +1548,12 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
         if (walk.length === 0) continue;
 
         let metaSpines = new Map(); // Cache spines in their first traversed direction
-        let helicalEntryAdded = false; // Tracks if helical plunge has been generated for this component
+        let helicalEntryNeeded = true; // Tracks if a helical plunge entry is needed for this component
 
         // Helper: Generate helical entry points centered at a point
         function makeHelicalEntry(centerPt, generatorNode) {
             let matRadius = generatorNode.radius;
-            let helixRadius = Math.max(0, Math.min(matRadius, 0.95 * toolRadius));
+            let helixRadius = Math.max(0, Math.min(0.5 * matRadius, 0.95 * toolRadius));
             let zTop = options.zTop ?? 0.0;
             let zStart = Math.min(zTop, z + (options.down ?? 2.0));
             let helixPts = [];
@@ -1594,7 +1594,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             if (helixPts.length > 0) {
                 // Annotate the first helix point at zStart as forceSpeed: 0 so the descent (pre-plunge) from zSafe is rapid G0
                 helixPts[0].annotate({ forceSpeed: 0 });
-                helixPts.unshift(newPoint(helixPts[0].x, helixPts[0].y, zSafe));
             }
             return helixPts;
         }
@@ -1612,31 +1611,72 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             let oriented = null;
 
             if (step.first === false) {
-                // Backtrack visits represent air transitions.
-                // We end the current cutting pass (if active) to trigger Kiri's native rapid travel retract,
-                // and avoid generating any feed-rate toolpath points during backtracking.
-                if (pts.length > 0) {
-                    let lastPt = pts[pts.length - 1];
-                    // Force G0 rapid travel for the retract move to zSafe
-                    pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
-                    toolpaths.push(newPolygon().addPoints(pts).setOpen());
-                    pts = [];
-                    lastToolPathPt = null;
+                if (lastToolPathPt) {
+                    // 1. Lift to z + 0.1 at current tool position
+                    pts.push(newPoint(lastToolPathPt.x, lastToolPathPt.y, z + 0.1).annotate({ forceSpeed: 0 }));
+
+                    let prevStep = walk[i - 1];
+                    let prevM = prevStep ? metaNodes.find(node => node.id === prevStep.id) : null;
+                    let nextStep = walk[i + 1];
+                    let nextM = nextStep ? metaNodes.find(node => node.id === nextStep.id) : null;
+
+                    if (m.strategy === 'corridor') {
+                        let spine = m.nodes.slice();
+                        if (step.resolvedEnterEnd) {
+                            spine.reverse();
+                        }
+                        for (let n of spine) {
+                            pts.push(newPoint(n.x, n.y, z + 0.1).annotate({ forceSpeed: 0 }));
+                        }
+                        lastToolPathPt = newPoint(spine[spine.length - 1].x, spine[spine.length - 1].y, z + 0.1);
+                    } else if (m.strategy === 'chamber' || m.strategy === 'entry') {
+                        // Find connecting node from prevM
+                        let node_from = null;
+                        for (let node of m.nodes) {
+                            for (let neighbor of node.neighbors) {
+                                if (prevM && prevM.nodes.includes(neighbor)) {
+                                    node_from = node;
+                                    break;
+                                }
+                            }
+                            if (node_from) break;
+                        }
+                        if (!node_from) {
+                            let enterBool = step.resolvedEnterEnd === true;
+                            node_from = !enterBool ? m.nodes[0] : m.nodes[m.nodes.length - 1];
+                        }
+
+                        // Move to connection node
+                        pts.push(newPoint(node_from.x, node_from.y, z + 0.1).annotate({ forceSpeed: 0 }));
+
+                        // Move to center peak node
+                        let centerNode = m.generator.nodes[0];
+                        pts.push(newPoint(centerNode.x, centerNode.y, z + 0.1).annotate({ forceSpeed: 0 }));
+
+                        // Find connecting node to nextM
+                        let node_to = null;
+                        for (let node of m.nodes) {
+                            for (let neighbor of node.neighbors) {
+                                if (nextM && nextM.nodes.includes(neighbor)) {
+                                    node_to = node;
+                                    break;
+                                }
+                            }
+                            if (node_to) break;
+                        }
+                        if (!node_to) {
+                            let exitBool = step.resolvedExitEnd === true;
+                            node_to = !exitBool ? m.nodes[0] : m.nodes[m.nodes.length - 1];
+                        }
+
+                        // Move to exit connection node
+                        pts.push(newPoint(node_to.x, node_to.y, z + 0.1).annotate({ forceSpeed: 0 }));
+                        lastToolPathPt = newPoint(node_to.x, node_to.y, z + 0.1);
+                    }
                 }
             } else {
                 // First-time visit
                 if (m.strategy === 'chamber') {
-                    // Trigger a retract before entering any chamber to ensure a safe transition
-                    // to the center of the chamber without crossing pocket walls.
-                    if (pts.length > 0) {
-                        let lastPt = pts[pts.length - 1];
-                        // Force G0 rapid travel for the retract move to zSafe
-                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
-                        toolpaths.push(newPolygon().addPoints(pts).setOpen());
-                        pts = [];
-                        lastToolPathPt = null;
-                    }
-
                     let m_capsules = [];
                     let chamberNodes = mat_graph.filter(node => node.chamberId === m.generator.id);
                     if (chamberNodes.length === 1) {
@@ -1665,26 +1705,18 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                         if (ptsArray.length > 0) {
                             let entryPts = makeHelicalEntry(ptsArray[0], m.generator.nodes[0]);
                             ptsArray = [ ...entryPts, ...ptsArray ];
+                            helicalEntryNeeded = false;
                         }
 
                         oriented = pushPoints(ptsArray, true);
                     }
                     metaSpines.set(m.id, m.nodes);
                 } else if (m.strategy === 'entry') {
-                    // Trigger a retract before entering any entry node to ensure a safe plunge.
-                    if (pts.length > 0) {
-                        let lastPt = pts[pts.length - 1];
-                        // Force G0 rapid travel for the retract move to zSafe
-                        pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
-                        toolpaths.push(newPolygon().addPoints(pts).setOpen());
-                        pts = [];
-                        lastToolPathPt = null;
-                    }
-
                     let centerPt = m.nodes[0];
                     let entryPts = makeHelicalEntry(centerPt, m.generator.nodes[0]);
 
                     oriented = pushPoints(entryPts, true);
+                    helicalEntryNeeded = false;
                     metaSpines.set(m.id, m.nodes);
                 } else if (m.strategy === 'corridor') {
                     // Start a new point list C
@@ -1837,7 +1869,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             transitionPts.push(newPoint(allTrochPts[0].x, allTrochPts[0].y, z).annotate({ forceSpeed: 0 }));
 
                             // Prevent standard helical entry plunge since we have safely transitioned at depth
-                            helicalEntryAdded = true;
+                            helicalEntryNeeded = false;
                         }
                     }
 
@@ -1851,11 +1883,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      * corridor's initial trochoid coordinate. We prepend it to allTrochPts to ensure the tool
                      * ramps safely down into solid stock.
                      */
-                    if (!helicalEntryAdded && allTrochPts.length > 0) {
-                        let fakeNode = { x: allTrochPts[0].x, y: allTrochPts[0].y, radius: m.nodes[0].radius };
+                    if (helicalEntryNeeded && allTrochPts.length > 0) {
+                        let fakeNode = { x: allTrochPts[0].x, y: allTrochPts[0].y, radius: D[0].radius };
                         let entryPts = makeHelicalEntry(allTrochPts[0], fakeNode);
                         allTrochPts = [ ...entryPts, ...allTrochPts ];
-                        helicalEntryAdded = true;
+                        helicalEntryNeeded = false;
                     }
 
                     // Push the final oriented trochoidal segment points to the active cutting toolpath accumulator

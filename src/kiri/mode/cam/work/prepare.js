@@ -840,6 +840,9 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
      * @returns {Point} - the last point emitted (in widget coordinates)
      */
     function polyEmit(poly, index, engage = false) {
+        if (poly.metaNodeId !== undefined) {
+            newLayer(`${currentOp.name ?? 'adaptive'} - M${poly.metaNodeId} (${poly.metaStrategy})`);
+        }
         let points = poly.points;
         // Bypasses arc detection if forceSpeed is present on any point in this polygon path
         let hasForceSpeed = points.some(p => p.forceSpeed !== undefined);
