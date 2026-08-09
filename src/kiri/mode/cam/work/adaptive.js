@@ -206,7 +206,8 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     let matRadius = generator.nodes[0].radius;
     let helixRadius = Math.max(0, Math.min(matRadius - toolRadius, 0.95 * toolRadius));
 
-    while (true) {
+    let safety = 0;
+    while (safety++ < 1000) {
         let next = POLY.offset([ current ], -targetStepover, { z: z });
         if (next.length === 0) {
             break;
@@ -220,8 +221,16 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
             }
             match = largest;
         }
+        // Break early if the matched offset polygon has collapsed to a tiny area (epsilon < 0.01).
+        // This prevents infinite loops on degenerate/complex shapes that Clipper fails to fully collapse to zero.
+        if (Math.abs(match.area()) < 0.01) {
+            break;
+        }
         current = match.clean(true, null, 0.02); // minor clean to keep offset curves smooth
         loops.push(current);
+    }
+    if (safety >= 1000) {
+        console.log(`[MAT Warning] generateChamberSpiral safety limit reached (1000 iterations) for Z: ${z}. Terminating loop to prevent freeze.`);
     }
 
     loops.reverse();
@@ -1120,8 +1129,8 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
                     let currentEnd = enterEnd === null ? true : !enterEnd;
 
+                    let neighbors = (adjMeta.get(curr) || []).slice();
                     while (true) {
-                        let neighbors = adjMeta.get(curr) || [];
                         let groupA = [];
                         let groupB = [];
 
@@ -1168,6 +1177,14 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             lastStep = backtrackStep;
 
                             currentEnd = conn.myEnd;
+                        } else {
+                            // If the connection layout constraint is not met, remove the neighbor
+                            // from our local copy of neighbors to prevent looping infinitely.
+                            console.warn(`[MAT Warning] dfsWalk: Connection layout constraint not met between MetaNode ${curr.id} and MetaNode ${next.id} (required end: ${currentEnd}). Skipping neighbor.`);
+                            let idx = neighbors.indexOf(next);
+                            if (idx >= 0) {
+                                neighbors.splice(idx, 1);
+                            }
                         }
                     }
 
@@ -1357,11 +1374,17 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 let totalRad = numTurns * 2 * Math.PI;
                 let numSteps = Math.ceil(72 * numTurns);
 
+                // Shift the helix orbit center by -helixRadius along the X-axis.
+                // Since the helix angle (theta) ends at 0, the final point is px = cx + helixRadius * cos(0) = centerPt.x.
+                // This ensures the helix terminates exactly at the start of the cutting path.
+                let cx = centerPt.x - helixRadius;
+                let cy = centerPt.y;
+
                 for (let j = 0; j <= numSteps; j++) {
                     let u = j / numSteps;
                     let theta = ccw ? (-totalRad * (1 - u)) : (totalRad * (1 - u));
-                    let px = centerPt.x + helixRadius * Math.cos(theta);
-                    let py = centerPt.y + helixRadius * Math.sin(theta);
+                    let px = cx + helixRadius * Math.cos(theta);
+                    let py = cy + helixRadius * Math.sin(theta);
                     let pz = zStart - H * u;
                     helixPts.push(newPoint(px, py, pz));
                 }
