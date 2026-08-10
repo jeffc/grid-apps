@@ -1394,6 +1394,34 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                         }
                     }
 
+                    /**
+                     * SAFE LEAF-NODE BACKTRACKING FALLBACK:
+                     * 
+                     * Leaf nodes (nodes with no children) normally exit dfsWalk immediately without generating
+                     * a backtrack step because their children traversal loop never executes.
+                     * Without this fallback, the walk would go directly from the end of the leaf node to the 
+                     * backtrack of its parent, which starts at the junction node. This would cause the tool to
+                     * jump directly through solid stock or uncleared boundaries (gouging the part).
+                     * 
+                     * To prevent this, we check if the last step pushed to the walk is already a backtrack step
+                     * for the current node. If not, we explicitly push a backtrack step for the current node.
+                     * 
+                     * The backtrack starts at the exit point of the first visit (firstVisit.exitEnd) and ends
+                     * at the connection point to the parent (enterEnd). This guarantees that the tool traverses
+                     * backwards along the spine of the leaf node back to the junction before moving elsewhere.
+                     */
+                    let lastWalkStep = walk[walk.length - 1];
+                    if (lastWalkStep && !(lastWalkStep.id === curr.id && lastWalkStep.first === false)) {
+                        let firstVisit = walk.find(s => s.id === curr.id && s.first === true);
+                        walk.push({
+                            id: curr.id,
+                            strategy: curr.strategy,
+                            first: false,
+                            enterEnd: firstVisit ? firstVisit.exitEnd : (enterEnd === null ? false : !enterEnd),
+                            exitEnd: enterEnd === null ? false : enterEnd
+                        });
+                    }
+
                     activeStack.delete(curr.id);
                 }
 
@@ -1631,6 +1659,137 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
             let oriented = null;
 
             if (step.first === false) {
+                /**
+                 * BACKTRACK PATH LENGTH OPTIMIZATION (UP-AND-OVER RETRACT VS. PATH-FOLLOWING):
+                 * 
+                 * When transitioning between disconnected cut passes, we can either:
+                 * A) Backtrack along the already-cleared centerline/spine at z + 0.1 (rapid speed).
+                 * B) Perform an up-and-over retract to zSafe, travel directly in XY to the next start point,
+                 *    and plunge straight down at the start of the next pass.
+                 * 
+                 * Option A is ideal for short backtracks as it avoids slow vertical Z-axis travels and Z-hops.
+                 * Option B is better for long backtracks across the pocket component as the direct XY rapid travel
+                 * path is significantly shorter than tracing the serpentine MAT skeleton.
+                 * 
+                 * We scan ahead to group the contiguous sequence of backtrack steps [i .. k-1], trace their exact
+                 * physical path to calculate the backtrack distance (D_backtrack), and compare it to the direct
+                 * up-and-over travel distance (D_up_and_over). If up-and-over is shorter, we terminate the current
+                 * polygon, retract to zSafe, and skip the backtrack steps entirely.
+                 */
+                let k = i;
+                while (k < walk.length && walk[k].first === false) {
+                    k++;
+                }
+
+                // The backtrack sequence is from index i to k-1.
+                // The next cutting step is at index k.
+                let nextStep = k < walk.length ? walk[k] : null;
+                let nextM = nextStep ? metaNodes.find(node => node.id === nextStep.id) : null;
+
+                let startPt = lastToolPathPt;
+                let endPt = null;
+                if (nextM) {
+                    let spine = nextM.nodes;
+                    if (spine.length > 0) {
+                        let enterBool = nextStep.resolvedEnterEnd === true;
+                        endPt = !enterBool ? spine[0] : spine[spine.length - 1];
+                    }
+                }
+
+                if (startPt && endPt) {
+                    // Trace the path of the backtrack sequence to calculate the distance
+                    let path = [ startPt ];
+                    let tempLastPt = startPt;
+
+                    for (let j = i; j < k; j++) {
+                        let btStep = walk[j];
+                        let btM = metaNodes.find(node => node.id === btStep.id);
+                        if (btM) {
+                            let prevStep_j = walk[j - 1];
+                            let prevM_j = prevStep_j ? metaNodes.find(node => node.id === prevStep_j.id) : null;
+                            let nextStep_j = walk[j + 1];
+                            let nextM_j = nextStep_j ? metaNodes.find(node => node.id === nextStep_j.id) : null;
+
+                            if (btM.strategy === 'corridor') {
+                                let spine = btM.nodes.slice();
+                                if (btStep.resolvedEnterEnd) {
+                                    spine.reverse();
+                                }
+                                for (let n of spine) {
+                                    path.push(newPoint(n.x, n.y, z + 0.1));
+                                }
+                                tempLastPt = spine[spine.length - 1];
+                            } else if (btM.strategy === 'chamber' || btM.strategy === 'entry') {
+                                // Find connecting node from prevM_j
+                                let node_from = null;
+                                for (let node of btM.nodes) {
+                                    for (let neighbor of node.neighbors) {
+                                        if (prevM_j && prevM_j.nodes.includes(neighbor)) {
+                                            node_from = node;
+                                            break;
+                                        }
+                                    }
+                                    if (node_from) break;
+                                }
+                                if (!node_from) {
+                                    let enterBool = btStep.resolvedEnterEnd === true;
+                                    node_from = !enterBool ? btM.nodes[0] : btM.nodes[btM.nodes.length - 1];
+                                }
+                                path.push(newPoint(node_from.x, node_from.y, z + 0.1));
+
+                                // Center node
+                                let centerNode = btM.generator.nodes[0];
+                                path.push(newPoint(centerNode.x, centerNode.y, z + 0.1));
+
+                                // Find connecting node to nextM_j
+                                let node_to = null;
+                                for (let node of btM.nodes) {
+                                    for (let neighbor of node.neighbors) {
+                                        if (nextM_j && nextM_j.nodes.includes(neighbor)) {
+                                            node_to = node;
+                                            break;
+                                        }
+                                    }
+                                    if (node_to) break;
+                                }
+                                if (!node_to) {
+                                    let exitBool = btStep.resolvedExitEnd === true;
+                                    node_to = !exitBool ? btM.nodes[0] : btM.nodes[btM.nodes.length - 1];
+                                }
+                                path.push(newPoint(node_to.x, node_to.y, z + 0.1));
+                                tempLastPt = node_to;
+                            }
+                        }
+                    }
+                    // Add final transition to endPt
+                    path.push(newPoint(endPt.x, endPt.y, z + 0.1));
+
+                    // Calculate backtrack distance
+                    let d_backtrack = 0;
+                    for (let j = 0; j < path.length - 1; j++) {
+                        d_backtrack += dist2D(path[j], path[j+1]);
+                    }
+
+                    // Calculate up-and-over distance
+                    let d_up_and_over = 2 * (zSafe - z) + dist2D(startPt, endPt);
+
+                    if (d_up_and_over < d_backtrack) {
+                        // UP-AND-OVER IS SHORTER!
+                        // Terminate the active toolpath at startPt by retracting to zSafe.
+                        // Clearing lastToolPathPt ensures the next cutting step (k) begins a new
+                        // polygon and automatically plunges straight down at its first coordinate.
+                        pts.push(newPoint(startPt.x, startPt.y, zSafe).annotate({ forceSpeed: 0 }));
+                        toolpaths.push(newPolygon().addPoints(pts).setOpen());
+                        pts = [];
+                        lastToolPathPt = null;
+
+                        // Skip the backtrack steps
+                        i = k;
+                        continue;
+                    }
+                }
+
+                // If not shorter, proceed with normal backtracking
                 if (lastToolPathPt) {
                     // 1. Lift to z + 0.1 at current tool position
                     pts.push(newPoint(lastToolPathPt.x, lastToolPathPt.y, z + 0.1).annotate({ forceSpeed: 0 }));
