@@ -1258,6 +1258,74 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 let uncutNodes = new Set(component.map(m => m.id));
                 let activeStack = new Set();
 
+                /**
+                 * Recursively calculates the exact physical uncut travel distance of the sub-graph starting at 'node'.
+                 * Used as a planning heuristic to sort neighbors so that we traverse shorter dead-end
+                 * branches first and leave the longest branch for last (which then retracts instead of backtracking).
+                 * 
+                 * - For corridors: Sums the distances along the spine points.
+                 * - For chambers: Traces the distance from the incomingNode (entrance) to the centerNode,
+                 *   and from the centerNode to the exitNode (connecting to the active child).
+                 * - Entry nodes are excluded since we never backtrack through them.
+                 */
+                function getUncutSubtreeLength(node, incomingNode, visited = new Set()) {
+                    visited.add(node.id);
+                    let length = 0;
+
+                    let centerNode = null;
+                    if (node.strategy === 'chamber') {
+                        centerNode = node.generator.nodes[0];
+                        if (incomingNode && centerNode) {
+                            length += dist2D(incomingNode, centerNode);
+                        }
+                    } else if (node.strategy === 'corridor') {
+                        let spine = node.nodes;
+                        for (let j = 0; j < spine.length - 1; j++) {
+                            length += dist2D(spine[j], spine[j+1]);
+                        }
+                    }
+
+                    let neighbors = adjMeta.get(node) || [];
+                    for (let neighbor of neighbors) {
+                        if (uncutNodes.has(neighbor.id) && !activeStack.has(neighbor.id) && !visited.has(neighbor.id)) {
+                            // Find the exit node on 'node' that connects to 'neighbor'
+                            let exitNode = null;
+                            for (let n of node.nodes) {
+                                for (let adj of n.neighbors) {
+                                    if (neighbor.nodes.includes(adj)) {
+                                        exitNode = n;
+                                        break;
+                                    }
+                                }
+                                if (exitNode) break;
+                            }
+                            if (!exitNode) {
+                                exitNode = node.nodes[0];
+                            }
+
+                            // Add center-to-exit distance for chambers
+                            if (node.strategy === 'chamber' && centerNode && exitNode) {
+                                length += dist2D(centerNode, exitNode);
+                            }
+
+                            // Find the incoming node on 'neighbor' that connects to 'exitNode'
+                            let nbIncoming = null;
+                            for (let n of neighbor.nodes) {
+                                if (n.neighbors.has(exitNode)) {
+                                    nbIncoming = n;
+                                    break;
+                                }
+                            }
+                            if (!nbIncoming) {
+                                nbIncoming = neighbor.nodes[0];
+                            }
+
+                            length += getUncutSubtreeLength(neighbor, nbIncoming, visited);
+                        }
+                    }
+                    return length;
+                }
+
                 /*
                   === POCKET META-GRAPH PATH RESOLUTION ===
 
@@ -1347,10 +1415,55 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                             }
                         }
 
+                        // Helper to calculate the exact physical uncut travel distance for starting neighbor 'nb'
+                        function getNeighborLength(nb) {
+                            // Find the exit node on 'curr' that connects to 'nb'
+                            let exitNode = null;
+                            for (let n of curr.nodes) {
+                                for (let adj of n.neighbors) {
+                                    if (nb.nodes.includes(adj)) {
+                                        exitNode = n;
+                                        break;
+                                    }
+                                }
+                                if (exitNode) break;
+                            }
+                            if (!exitNode) {
+                                exitNode = curr.nodes[0];
+                            }
+
+                            // Find the incoming node on 'nb' that connects to 'exitNode'
+                            let nbIncoming = null;
+                            for (let n of nb.nodes) {
+                                if (n.neighbors.has(exitNode)) {
+                                    nbIncoming = n;
+                                    break;
+                                }
+                            }
+                            if (!nbIncoming) {
+                                nbIncoming = nb.nodes[0];
+                            }
+
+                            // Transition cost to travel inside curr from center to the boundary exit node
+                            let transitionCost = 0;
+                            if (curr.strategy === 'chamber') {
+                                let centerNode = curr.generator.nodes[0];
+                                if (centerNode && exitNode) {
+                                    transitionCost += dist2D(centerNode, exitNode);
+                                }
+                            }
+
+                            return transitionCost + getUncutSubtreeLength(nb, nbIncoming);
+                        }
+
                         let next = null;
                         if (groupA.length > 0) {
+                            // Sort uncut neighbors in ascending order of branch length (shortest first)
+                            groupA.sort((a, b) => getNeighborLength(a) - getNeighborLength(b));
                             next = groupA[0];
                         } else if (groupB.length > 0) {
+                            // Sort neighbors with uncut descendants in ascending order of branch length (shortest first)
+                            groupB.sort((a, b) => getNeighborLength(a) - getNeighborLength(b));
                             next = groupB[0];
                         }
 
