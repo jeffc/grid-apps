@@ -1587,30 +1587,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
                 all_walks.push(walk);
 
-                // RICH DEBUG LOGS FOR META-NODES AND DFS WALKS
-                console.log(`=== [MAT Debug] Disconnected Pocket Component Walks ===`);
-                for (let m of component) {
-                    let spine = m.nodes;
-                    let startPt = spine[0];
-                    let endPt = spine[spine.length - 1];
-                    console.log(`[MAT MetaNode Debug] Node ID: ${m.id}, Strategy: ${m.strategy}`);
-                    if (startPt && endPt) {
-                        console.log(`  Spine Start: (${startPt.x.toFixed(4)}, ${startPt.y.toFixed(4)}), End: (${endPt.x.toFixed(4)}, ${endPt.y.toFixed(4)}), Nodes count: ${spine.length}`);
-                    } else {
-                        console.log(`  No spine nodes found!`);
-                    }
-                    let edgesInfo = m.connections.map(c => `to Node ${c.neighbor.id} (${c.myEnd ? 'end' : 'begin'} -> ${c.itsEnd ? 'end' : 'begin'})`).join(', ');
-                    console.log(`  Neighbors: ${edgesInfo || 'none'}`);
-                }
 
-                console.log(`[MAT DFS Walk Debug] Chosen Start Generator: ${leftmostGen.id} (MetaNode ID: ${startMetaNode.id})`);
-                for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
-                    let step = walk[stepIndex];
-                    let enterStr = step.resolvedEnterEnd !== undefined ? (step.resolvedEnterEnd ? 'end' : 'begin') : 'N/A';
-                    let exitStr = step.resolvedExitEnd !== undefined ? (step.resolvedExitEnd ? 'end' : 'begin') : 'N/A';
-                    console.log(`  Step ${stepIndex}: Node ID: ${step.id}, Strategy: ${step.strategy}, First/Cut Visit: ${step.first}, Enter End: ${enterStr}, Exit End: ${exitStr}`);
-                }
-                console.log(`====================================================`);
             }
         }
     }
@@ -2099,35 +2076,9 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      * (Commented-out resampling loop preserved below for future activation if needed)
                      */
                     let D = [...C];
-                    /*
-                    let S = targetStepover;
-                    let D = [];
-                    for (let j = 0; j < C.length; j++) {
-                        let p0 = C[j];
-                        D.push(p0);
-                        if (j < C.length - 1) {
-                            let p1 = C[j+1];
-                            let dx = p1.x - p0.x;
-                            let dy = p1.y - p0.y;
-                            let d = Math.hypot(dx, dy);
-                            if (d > S) {
-                                let steps = Math.floor(d / S);
-                                for (let k = 1; k <= steps; k++) {
-                                    let dist = k * S;
-                                    if (dist >= d - 0.001) break;
-                                    let t = dist / d;
-                                    let interpPt = newPoint(p0.x + dx * t, p0.y + dy * t, p0.z);
-                                    interpPt.radius = p0.radius + (p1.radius - p0.radius) * t;
-                                    D.push(interpPt);
-                                }
-                            }
-                        }
-                    }
-                    */
-
                     /**
                      * TROCHOIDAL TOOLPATH GENERATION:
-                     * We iterate through the resampled polyline D, segment by segment. For each segment, we call
+                     * We iterate through the polyline D, segment by segment. For each segment, we call
                      * generateTrochoidSegment, which computes a helical/trochoidal clearing pattern of loops.
                      * All generated trochoid points are collected into allTrochPts.
                      */
@@ -2135,9 +2086,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     for (let idx = 0; idx < D.length - 1; idx++) {
                         allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z));
                     }
-
-                    console.log(`[MAT Debug] Corridor Grouping (MetaNode ${m.id}):`);
-                    console.log(`  C length = ${C.length}, D length = ${D.length}, allTrochPts length = ${allTrochPts.length}`);
 
                     // Check if transitioning from a chamber to this corridor.
                     // If so, we perform a safe rapid transition at z + 0.1 rather than a retract/plunge.
@@ -2233,69 +2181,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
 
         if (pts.length > 0) {
             let lastPt = pts[pts.length - 1];
-            // Force G0 rapid travel for the retract move to zSafe
             pts.push(newPoint(lastPt.x, lastPt.y, zSafe).annotate({ forceSpeed: 0 }));
             toolpaths.push(newPolygon().addPoints(pts).setOpen());
             pts = [];
         }
     }
-
-    console.log(`=== [MAT Debug] Walk Step Toolpath Endpoints ===`);
-    for (let walk of all_walks) {
-        for (let stepIndex = 0; stepIndex < walk.length; stepIndex++) {
-            let step = walk[stepIndex];
-            let startStr = (step.start_x !== undefined && step.start_y !== undefined) ?
-                `(${step.start_x.toFixed(4)}, ${step.start_y.toFixed(4)})` : 'undefined';
-            let endStr = (step.end_x !== undefined && step.end_y !== undefined) ?
-                `(${step.end_x.toFixed(4)}, ${step.end_y.toFixed(4)})` : 'undefined';
-            console.log(`  Step ${stepIndex}: Node ID: ${step.id}, Strategy: ${step.strategy}, First/Cut Visit: ${step.first}, Start: ${startStr}, End: ${endStr}`);
-        }
-    }
-    console.log(`===============================================`);
-
-    let serializedWalks = all_walks.map(walk => walk.map(step => ({
-        id: step.id,
-        strategy: step.strategy,
-        first: step.first,
-        resolvedEnterEnd: step.resolvedEnterEnd,
-        resolvedExitEnd: step.resolvedExitEnd,
-        start_x: step.start_x,
-        start_y: step.start_y,
-        end_x: step.end_x,
-        end_y: step.end_y
-    })));
-    let serializedToolpaths = toolpaths.map(p => p.points.map(pt => ({ x: pt.x, y: pt.y, z: pt.z })));
-    let serializedMeta = metaNodes.map(m => ({
-        id: m.id,
-        strategy: m.strategy,
-        spine: m.nodes.map(pt => ({ x: pt.x, y: pt.y })),
-        connections: m.connections.map(c => ({ neighbor: c.neighbor.id, myEnd: c.myEnd, itsEnd: c.itsEnd })),
-        D: m.D ? m.D.map(pt => ({ x: pt.x, y: pt.y, radius: pt.radius })) : null,
-        C: m.C ? m.C.map(pt => ({ x: pt.x, y: pt.y, radius: pt.radius })) : null
-    }));
-    let serializedMatGraph = mat_graph.map(node => ({
-        x: node.x,
-        y: node.y,
-        radius: node.radius,
-        metaNodeId: node.metaNode ? node.metaNode.id : null,
-        neighbors: Array.from(node.neighbors).map(nb => ({ x: nb.x, y: nb.y }))
-    }));
-
-    console.log(`=== [MAT JSON DUMP START] ===`);
-    console.log(JSON.stringify({
-        walks: serializedWalks,
-        toolpaths: serializedToolpaths,
-        metaNodes: serializedMeta,
-        matGraph: serializedMatGraph
-    }));
-    console.log(`=== [MAT JSON DUMP END] ===`);
-
-    console.log(`=== [MAT Debug] Generated Toolpaths ===`);
-    console.log(`  Total Toolpaths Count: ${toolpaths.length}`);
-    for (let idx = 0; idx < toolpaths.length; idx++) {
-        console.log(`    Path ${idx}: points count = ${toolpaths[idx].points.length}`);
-    }
-    console.log(`================────────────────=======`);
 
     if (toolpaths.length > 0) {
         return toolpaths;

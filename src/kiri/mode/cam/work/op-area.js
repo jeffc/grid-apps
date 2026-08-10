@@ -355,152 +355,18 @@ class OpArea extends CamOp {
                             .addPolys(shadow)
                             .setLayer("tool shadow", { line: 0x44ff88 }, false)
                             .addPolys(tool_shadow);
-                        if (opt.mat_lines && opt.mat_lines.length) {
-                            let mat_lines = [];
-                            for (let { point0, point1 } of opt.mat_lines) {
-                                let p0 = newPoint(point0.x, point0.y, z);
-                                let p1 = newPoint(point1.x, point1.y, z);
-                                mat_lines.push(p0, p1);
-                            }
-                            if (mat_lines.length) {
-                                layers.setLayer("MAT", { line: 0x555555 }, false)
-                                      .addLines(mat_lines);
-                            }
-                        }
-                        if (opt.chamber_lines && opt.chamber_lines.length) {
-                            let mat_lines = [];
-                            for (let { point0, point1 } of opt.chamber_lines) {
-                                let p0 = newPoint(point0.x, point0.y, z);
-                                let p1 = newPoint(point1.x, point1.y, z);
-                                mat_lines.push(p0, p1);
-                            }
-                            if (mat_lines.length) {
-                                layers.setLayer("chamber", { line: 0x00ffff }, false)
-                                      .addLines(mat_lines);
-                            }
-                        }
-                        if (opt.corridor_lines && opt.corridor_lines.length) {
-                            let mat_lines = [];
-                            for (let { point0, point1 } of opt.corridor_lines) {
-                                let p0 = newPoint(point0.x, point0.y, z);
-                                let p1 = newPoint(point1.x, point1.y, z);
-                                mat_lines.push(p0, p1);
-                            }
-                            if (mat_lines.length) {
-                                layers.setLayer("corridor", { line: 0xff00ff }, false)
-                                      .addLines(mat_lines);
-                            }
-                        }
-                        if (opt.generators && opt.generators.length) {
-                            for (let g of opt.generators) {
-                                if (g.type === 'point') {
-                                    let node = g.nodes[0];
-                                    let center = newPoint(node.x, node.y, z);
-                                    let circle = newPolygon().centerCircle(center, node.radius, 36);
-                                    layers.setLayer("generators", { line: 0xffff00 }, false)
-                                          .addPoly(circle);
-                                } else {
-                                    let lines = [];
-                                    for (let i = 0; i < g.nodes.length - 1; i++) {
-                                        let p0 = newPoint(g.nodes[i].x, g.nodes[i].y, z);
-                                        let p1 = newPoint(g.nodes[i+1].x, g.nodes[i+1].y, z);
-                                        lines.push(p0, p1);
-                                    }
-                                    if (lines.length) {
-                                        layers.setLayer("generators", { line: 0xffff00 }, false)
-                                              .addLines(lines);
-                                    }
-                                }
-                            }
-                        }
+                        // Prefix the remaining chamber and corridor area layers with the operation's custom name if one exists.
+                        // We check both op.name and op.rename (the field used in UI binding).
+                        let opName = op.name || op.rename || rename;
                         if (opt.chamber_areas && opt.chamber_areas.length) {
-                            layers.setLayer("chamber area", { face: 0x00ffff, opacity: 0.15 }, false)
+                            let layerName = opName ? `${opName} spiral clearing` : "spiral clearing";
+                            layers.setLayer(layerName, { face: 0x00ffff, opacity: 0.15 }, false)
                                   .addAreas(opt.chamber_areas);
                         }
                         if (opt.corridor_areas && opt.corridor_areas.length) {
-                            layers.setLayer("corridor area", { face: 0xff00ff, opacity: 0.15 }, false)
+                            let layerName = opName ? `${opName} slot clearing` : "slot clearing";
+                            layers.setLayer(layerName, { face: 0xff00ff, opacity: 0.15 }, false)
                                   .addAreas(opt.corridor_areas);
-                        }
-                        if (opt.meta_walks && opt.meta_walks.length) {
-                            for (let walk of opt.meta_walks) {
-                                if (walk.length > 1) {
-                                    let walk_first_lines = [];
-                                    let walk_back_lines = [];
-                                    let arrow_first_lines = [];
-                                    let arrow_back_lines = [];
-                                    let arrow_len = 1.5;
-
-                                    for (let i = 0; i < walk.length - 1; i++) {
-                                        let w0 = walk[i];
-                                        let w1 = walk[i+1];
-                                        
-                                        let w0_end_x = w0.end_x ?? w0.x;
-                                        let w0_end_y = w0.end_y ?? w0.y;
-                                        let w1_start_x = w1.start_x ?? w1.x;
-                                        let w1_start_y = w1.start_y ?? w1.y;
-
-                                        let p0 = newPoint(w0_end_x, w0_end_y, z + 0.1);
-                                        let p1 = newPoint(w1_start_x, w1_start_y, z + 0.1);
-
-                                        // The segment is a backtrack if the target node w1 is NOT being visited for the first time
-                                        let isBacktrack = !w1.first;
-
-                                        if (isBacktrack) {
-                                            walk_back_lines.push(p0, p1);
-                                        } else {
-                                            walk_first_lines.push(p0, p1);
-                                        }
-
-                                        let dx = w1_start_x - w0_end_x;
-                                        let dy = w1_start_y - w0_end_y;
-                                        let len = Math.hypot(dx, dy);
-                                        if (len > 3.0) {
-                                            let ux = dx / len;
-                                            let uy = dy / len;
-                                            let nx = -uy;
-                                            let ny = ux;
-
-                                            let mx = (w0_end_x + w1_start_x) / 2;
-                                            let my = (w0_end_y + w1_start_y) / 2;
-                                            let pm = newPoint(mx, my, z + 0.15);
-
-                                            let pw1 = newPoint(
-                                                mx - arrow_len * ux + arrow_len * 0.4 * nx,
-                                                my - arrow_len * uy + arrow_len * 0.4 * ny,
-                                                z + 0.15
-                                            );
-                                            let pw2 = newPoint(
-                                                mx - arrow_len * ux - arrow_len * 0.4 * nx,
-                                                my - arrow_len * uy - arrow_len * 0.4 * ny,
-                                                z + 0.15
-                                            );
-
-                                            if (isBacktrack) {
-                                                arrow_back_lines.push(pm, pw1, pm, pw2);
-                                            } else {
-                                                arrow_first_lines.push(pm, pw1, pm, pw2);
-                                            }
-                                        }
-                                    }
-
-                                    if (walk_first_lines.length) {
-                                        layers.setLayer("meta walk", { line: 0xffa500 }, false) // orange
-                                              .addLines(walk_first_lines);
-                                    }
-                                    if (arrow_first_lines.length) {
-                                        layers.setLayer("meta walk", { line: 0xffa500 }, false)
-                                              .addLines(arrow_first_lines);
-                                    }
-                                    if (walk_back_lines.length) {
-                                        layers.setLayer("meta walk backtrack", { line: 0x777777 }, false) // dim gray
-                                              .addLines(walk_back_lines);
-                                    }
-                                    if (arrow_back_lines.length) {
-                                        layers.setLayer("meta walk backtrack", { line: 0x777777 }, false)
-                                              .addLines(arrow_back_lines);
-                                    }
-                                }
-                            }
                         }
                     }
                     layers
