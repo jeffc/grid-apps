@@ -475,9 +475,9 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
             pts.push(newPoint(prevArcEnd.x, prevArcEnd.y, z));
             lastPt = prevArcEnd;
         }
-        pts.push(newPoint(lastPt.x, lastPt.y, z + 0.1));
-        pts.push(newPoint(firstPt.x, firstPt.y, z + 0.1));
-        pts.push(newPoint(firstPt.x, firstPt.y, z));
+        pts.push(newPoint(lastPt.x, lastPt.y, z + 0.1).annotate({forceSpeed: 0}));
+        pts.push(newPoint(firstPt.x, firstPt.y, z + 0.1).annotate({forceSpeed: 0}));
+        pts.push(newPoint(firstPt.x, firstPt.y, z).annotate({forceSpeed: 0}));
         pts.push(newPoint(nextStartPt.x, nextStartPt.y, z));
 
         // update the previous arc end
