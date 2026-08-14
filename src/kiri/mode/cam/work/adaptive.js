@@ -297,7 +297,7 @@ function snapPolygonToWalls(poly, wallPolygons, tolerance = 0.15) {
  * Uses global interpolation between a circle and the target offset shapes to distribute the morph
  * smoothly across the entire spiral.
  */
-function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, z, toolRadius, options) {
+function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, z, toolRadius) {
     let loops = [ chamberBoundary.clone() ];
     let current = chamberBoundary;
 
@@ -384,7 +384,7 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
  * - ccw: Boolean indicating rotation direction (true = Counter-Clockwise, false = Clockwise).
  * - z: The active cutting depth.
  */
-function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
+function generateTrochoidSegment(A, B, targetStepover, ccw, z) {
     let pts = [];
     
     // 1. Calculate segment length and unit direction vectors
@@ -488,6 +488,70 @@ function generateTrochoidSegment(A, B, targetStepover, toolRadius, ccw, z) {
 }
 
 /**
+ * Generates a single area polygon (capsule) around a MAT segment.
+ */
+function makeSingleCapsule(p0, p1, z) {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let len = Math.hypot(dx, dy);
+    let r0 = p0.radius;
+    let r1 = p1.radius;
+
+    if (len < 1e-6) {
+        return [ newPolygon().centerCircle(newPoint(p0.x, p0.y, z), r0, 12) ];
+    }
+
+    let nx = -dy / len;
+    let ny = dx / len;
+
+    let pts = [
+        newPoint(p0.x + nx * r0, p0.y + ny * r0, z),
+        newPoint(p1.x + nx * r1, p1.y + ny * r1, z),
+        newPoint(p1.x - nx * r1, p1.y - ny * r1, z),
+        newPoint(p0.x - nx * r0, p0.y - ny * r0, z)
+    ];
+
+    let poly = newPolygon().addPoints(pts);
+    let c0 = newPolygon().centerCircle(newPoint(p0.x, p0.y, z), r0, 12);
+    let c1 = newPolygon().centerCircle(newPoint(p1.x, p1.y, z), r1, 12);
+
+    return POLY.union([ poly, c0, c1 ], 0.00001, true);
+}
+
+/**
+ * Subdivides a long MAT segment into smaller sub-segments of max length (e.g. 1.0mm)
+ * to prevent trapezoidal gaps when offsetting at 45 degrees to the axes.
+ */
+function makeTaperedCapsule(p0, p1, z) {
+    let dx = p1.x - p0.x;
+    let dy = p1.y - p0.y;
+    let len = Math.hypot(dx, dy);
+
+    let sub_capsules = [];
+    let max_len = 1.0;
+    let num_subs = Math.ceil(len / max_len);
+
+    for (let i = 0; i < num_subs; i++) {
+        let t0 = i / num_subs;
+        let t1 = (i + 1) / num_subs;
+
+        let sp0 = {
+            x: p0.x + t0 * dx,
+            y: p0.y + t0 * dy,
+            radius: p0.radius + t0 * (p1.radius - p0.radius)
+        };
+        let sp1 = {
+            x: p0.x + t1 * dx,
+            y: p0.y + t1 * dy,
+            radius: p0.radius + t1 * (p1.radius - p0.radius)
+        };
+
+        sub_capsules.push(...makeSingleCapsule(sp0, sp1, z));
+    }
+    return sub_capsules;
+}
+
+/**
  * Chains segments into continuous skeleton paths (greedy search)
  */
 function chainSegments(segs) {
@@ -567,8 +631,45 @@ export function buildMATGraph(segments, toolRadius, scale = 1000) {
  * ─────────────────────────────────────────────────────────────────────────────
  * ADAPTIVE PATH PLANNING: MAT GRAPH CLASSIFICATION ALGORITHM
  * ─────────────────────────────────────────────────────────────────────────────
+ * 
+ * This algorithm segments the Medial Axis Transform (MAT) graph of a pocket
+ * into "Chambers" (wide regions cleared via morphing spirals) and "Corridors"
+ * (narrow slots cleared via trochoidal loops).
+ * 
+ * TRIGONOMETRIC BASIS OF THE 0.5 GRADIENT THRESHOLD:
+ * The gradient G = |dR/ds| along a MAT branch represents the rate of change
+ * of the inscribed circle radius R relative to the distance s along the bisector.
+ * For any corner of angle alpha:
+ * 
+ *             /
+ *            /  ) alpha/2
+ *  ---------C─────────────── (Bisector / MAT)
+ *            \  ) alpha/2
+ *             \
+ * 
+ * The radius R (distance to the walls) is:
+ *   R(s) = s * sin(alpha / 2)
+ * The spatial gradient G is:
+ *   G = |dR / ds| = sin(alpha / 2)
+ * 
+ * Setting G = 0.5 gives:
+ *   sin(alpha / 2) = 0.5  =>  alpha / 2 = 30°  =>  alpha = 60°
+ * 
+ * Therefore:
+ *   - G >= 0.5 corresponds to corners with angle alpha >= 60° (e.g., 90° square
+ *     corners have G ≈ 0.707). These are open corners that a tool can safely
+ *     expand into using a morphing spiral.
+ *   - G < 0.5 corresponds to corners with angle alpha < 60° (acute angles,
+ *     tapers, or slots where G = 0). These narrow slots pinch the cutter,
+ *     requiring trochoidal slotting to prevent excessive tool engagement.
+ * 
+ * ─────────────────────────────────────────────────────────────────────────────
+ * @param {Polygon[]} polygons - Polygons to clear (raw pocket areas)
+ * @param {number} toolDiam - Tool diameter
+ * @param {Object} options - Additional options (e.g. z, direction)
+ * @returns {Polygon[]} Generated toolpath polygons/lines (offset tool center workspace)
  */
-export function adaptiveClear(polygons, toolDiam, stepover, options) {
+export function adaptiveClear(polygons, toolDiam, options) {
     let toolRadius = toolDiam / 2;
     let threshold = 1.25 * toolDiam;
     let gradientLimit = 0.5;
@@ -901,68 +1002,11 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     let chamber_capsules = [];
     let corridor_capsules = [];
 
-    function makeSingleCapsule(p0, p1) {
-        let dx = p1.x - p0.x;
-        let dy = p1.y - p0.y;
-        let len = Math.hypot(dx, dy);
-        let r0 = p0.radius;
-        let r1 = p1.radius;
-
-        if (len < 1e-6) {
-            return [ newPolygon().centerCircle(newPoint(p0.x, p0.y, z), r0, 12) ];
-        }
-
-        let nx = -dy / len;
-        let ny = dx / len;
-
-        let pts = [
-            newPoint(p0.x + nx * r0, p0.y + ny * r0, z),
-            newPoint(p1.x + nx * r1, p1.y + ny * r1, z),
-            newPoint(p1.x - nx * r1, p1.y - ny * r1, z),
-            newPoint(p0.x - nx * r0, p0.y - ny * r0, z)
-        ];
-
-        let poly = newPolygon().addPoints(pts);
-        let c0 = newPolygon().centerCircle(newPoint(p0.x, p0.y, z), r0, 12);
-        let c1 = newPolygon().centerCircle(newPoint(p1.x, p1.y, z), r1, 12);
-
-        return POLY.union([ poly, c0, c1 ], 0.00001, true);
-    }
-
-    function makeTaperedCapsule(p0, p1) {
-        let dx = p1.x - p0.x;
-        let dy = p1.y - p0.y;
-        let len = Math.hypot(dx, dy);
-
-        let sub_capsules = [];
-        let max_len = 1.0;
-        let num_subs = Math.ceil(len / max_len);
-
-        for (let i = 0; i < num_subs; i++) {
-            let t0 = i / num_subs;
-            let t1 = (i + 1) / num_subs;
-
-            let sp0 = {
-                x: p0.x + t0 * dx,
-                y: p0.y + t0 * dy,
-                radius: p0.radius + t0 * (p1.radius - p0.radius)
-            };
-            let sp1 = {
-                x: p0.x + t1 * dx,
-                y: p0.y + t1 * dy,
-                radius: p0.radius + t1 * (p1.radius - p0.radius)
-            };
-
-            sub_capsules.push(...makeSingleCapsule(sp0, sp1));
-        }
-        return sub_capsules;
-    }
-
     for (let seg of chamber_lines) {
-        chamber_capsules.push(...makeTaperedCapsule(seg.point0, seg.point1));
+        chamber_capsules.push(...makeTaperedCapsule(seg.point0, seg.point1, z));
     }
     for (let seg of corridor_lines) {
-        corridor_capsules.push(...makeTaperedCapsule(seg.point0, seg.point1));
+        corridor_capsules.push(...makeTaperedCapsule(seg.point0, seg.point1, z));
     }
 
     let raw_chamber_area = chamber_capsules.length ? POLY.union(chamber_capsules, 0.00001, true) : [];
@@ -1624,7 +1668,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
     // 10. Generate the actual toolpaths for chambers and corridors
     let toolpaths = [];
     let ccw = (options.direction === 'climb');
-    let clearedMetaNodes = new Set();
     let pts = [];
 
     /**
@@ -1726,12 +1769,17 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                 }
             } else {
                 // Fallback straight plunge starts at the material boundary
+                // TODO: If the centerline of the slot/corridor is short, we should generate
+                // a zig-zag ramp entry instead of a pure straight plunge to reduce tool load.
                 helixPts.push(newPoint(centerPt.x, centerPt.y, zStart));
                 helixPts.push(newPoint(centerPt.x, centerPt.y, z));
             }
             if (helixPts.length > 0) {
-                // Annotate the first helix point at zStart as forceSpeed: 0 so the descent (pre-plunge) from zSafe is rapid G0
-                helixPts[0].annotate({ forceSpeed: 0 });
+                let firstPt = helixPts[0];
+                let safeStartPt = newPoint(firstPt.x, firstPt.y, zSafe).annotate({ forceSpeed: 0 });
+                helixPts.unshift(safeStartPt);
+                // Annotate the second helix point (descent to zStart) as forceSpeed: 0 so the vertical pre-plunge is rapid G0
+                helixPts[1].annotate({ forceSpeed: 0 });
             }
             return helixPts;
         }
@@ -1965,7 +2013,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                         if (B_m[0].inner) {
                             snapped.inner = B_m[0].inner.map(inr => snapPolygonToWalls(inr, offset_polygons, 0.15));
                         }
-                        let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius, options);
+                        let spiral = generateChamberSpiral(snapped, m.generator, targetStepover, ccw, z, toolRadius);
 
                         let ptsArray = spiral.points;
 
@@ -2072,8 +2120,6 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                     /**
                      * RESAMPLING / INTERPOLATION:
                      * Currently, the path D is set directly to the compiled path C without resampling.
-                     *
-                     * (Commented-out resampling loop preserved below for future activation if needed)
                      */
                     let D = [...C];
                     /**
@@ -2084,7 +2130,7 @@ export function adaptiveClear(polygons, toolDiam, stepover, options) {
                      */
                     let allTrochPts = [];
                     for (let idx = 0; idx < D.length - 1; idx++) {
-                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, toolRadius, ccw, z));
+                        allTrochPts.push(...generateTrochoidSegment(D[idx], D[idx+1], targetStepover, ccw, z));
                     }
 
                     // Check if transitioning from a chamber to this corridor.

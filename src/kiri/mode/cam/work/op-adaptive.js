@@ -39,7 +39,6 @@ class OpAdaptive extends CamOp {
             rate: op.rate,
             plunge: op.plunge,
             mode: 'adaptive',
-            over: op.step,
             tea: op.tea,
             down: op.down,
             entry_helix_angle: op.entry_helix_angle,

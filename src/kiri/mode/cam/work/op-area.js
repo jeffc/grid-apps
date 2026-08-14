@@ -316,7 +316,7 @@ class OpArea extends CamOp {
                         entry_helix_angle: op.entry_helix_angle,
                         zSafe: zSafe
                     };
-                    let outs = adaptiveClear(clip, toolDiam, toolOver, opt);
+                    let outs = adaptiveClear(clip, toolDiam, opt);
 
                     if (outs.length === 0) {
                         if (bounds && lzo > bounds.min.z) {

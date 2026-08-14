@@ -586,7 +586,6 @@ export const conf = {
                 camAdaptiveExpand: 0,
                 camAdaptiveOutline: false,
                 camAdaptiveWide: false,
-                camAdaptiveOver: 0.2,
                 camAdaptivePlunge: 200,
                 camAdaptiveSmooth: 1,
                 camAdaptiveSpeed: 250,
