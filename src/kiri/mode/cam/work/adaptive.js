@@ -312,13 +312,19 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     let matRadius = sortedNodes[0].radius;
     let helixRadius = Math.max(0, Math.min(matRadius, 0.95 * toolRadius));
 
-    // Compute the maximum straight-line distance from the peak center to the boundary of the shape
-    // using the inscribed circles of the MAT nodes.
+    // Compute maxD as the maximum straight-line Euclidean distance from the peak center
+    // to any point on the actual chamberBoundary polygon.
+    // Since the loops are morphed linearly along straight-line rays radiating from genCenter,
+    // the stepover in any direction is governed entirely by the straight-line distance.
+    // Calculating maxD directly from the boundary vertices mathematically guarantees that the
+    // physical stepover along any ray will never exceed targetStepover.
     let maxD = matRadius;
-    for (let n of generator.nodes) {
-        let d = Math.hypot(n.x - genCenter.x, n.y - genCenter.y);
-        if (d + n.radius > maxD) {
-            maxD = d + n.radius;
+    let worstPt = { x: genCenter.x, y: genCenter.y + matRadius };
+    for (let pt of chamberBoundary.points) {
+        let d = Math.hypot(pt.x - genCenter.x, pt.y - genCenter.y);
+        if (d > maxD) {
+            maxD = d;
+            worstPt = pt;
         }
     }
 
@@ -333,6 +339,7 @@ function generateChamberSpiral(chamberBoundary, generator, targetStepover, ccw, 
     }
 
     let l_outer = chamberBoundary;
+
     let p_circle_len = inner_circle.perimeter();
     let p_outer_len = l_outer.perimeter();
 
