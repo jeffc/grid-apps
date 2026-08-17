@@ -1,5 +1,6 @@
 /** Copyright Stewart Allen <sa@grid.space> -- All Rights Reserved */
 
+import '../../../../ext/jspoly.js';
 import { newPoint } from '../../../../geo/point.js';
 import { newPolygon } from '../../../../geo/polygon.js';
 import { polygons as POLY } from '../../../../geo/polygons.js';
@@ -480,8 +481,8 @@ function generateTrochoidSegment(A, B, targetStepover, ccw, z) {
         pts.push(newPoint(firstPt.x, firstPt.y, z).annotate({forceSpeed: 0}));
         pts.push(newPoint(nextStartPt.x, nextStartPt.y, z));
 
-        // update the previous arc end
-        prevArcEnd = arcPts[steps-1];
+        // update the previous arc end (actual end of the arc is at index 'steps')
+        prevArcEnd = arcPts[steps];
     }
 
     return pts;
@@ -1999,10 +2000,19 @@ export function adaptiveClear(polygons, toolDiam, options) {
                     if (chamberNodes.length === 1) {
                         m_capsules.push(newPolygon().centerCircle(newPoint(chamberNodes[0].x, chamberNodes[0].y, z), chamberNodes[0].radius, 12));
                     } else {
+                        // Track seen edges to avoid processing undirected edges twice.
+                        let seenEdges = new Set();
                         for (let node of chamberNodes) {
                             for (let neighbor of node.neighbors) {
                                 if (neighbor.chamberId === m.generator.id) {
-                                    m_capsules.push(...makeTaperedCapsule(node, neighbor));
+                                    let key = node.x < neighbor.x ?
+                                        `${node.x},${node.y}:${neighbor.x},${neighbor.y}` :
+                                        `${neighbor.x},${neighbor.y}:${node.x},${node.y}`;
+                                    if (!seenEdges.has(key)) {
+                                        seenEdges.add(key);
+                                        // Pass slice height 'z' as the third argument to avoid defaulting to z=0
+                                        m_capsules.push(...makeTaperedCapsule(node, neighbor, z));
+                                    }
                                 }
                             }
                         }
