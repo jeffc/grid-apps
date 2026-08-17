@@ -863,8 +863,14 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             // so we need to translate printPoint into widget coordinates
             let startPoint = printPoint.clone().move({ x: -wmx, y: -wmy, z: -wmz });
 
+            // a feature barely larger than the cutter leaves a round residual
+            // loop only a fraction of the tool diameter across. easing around
+            // it is no gentler than plunging straight down, so skip it
+            let easeUseless = poly.circularity() > 0.9 &&
+                poly.perimeter() / Math.PI < toolDiam * 0.1;
+
             // calculate ease down for poly path output
-            if (startPoint.z > point0.z) {
+            if (startPoint.z > point0.z && !easeUseless) {
                 let easeMax = feedRate * camFullEngage;
                 let easeLerp = plungeRate + ((feedRate - plungeRate) * easeThrottle);
                 let easeFeed = Math.min(easeLerp, easeMax);
