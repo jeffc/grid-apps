@@ -612,19 +612,20 @@ function chainSegments(segs) {
 export function buildMATGraph(segments, toolRadius, scale = 1000) {
     const nodeMap = new Map();
 
-    function getOrCreateNode(pt) {
+    function getOrCreateNode(pt, sourcePoly) {
         const key = `${pt.x|0},${pt.y|0}`;
         let node = nodeMap.get(key);
         if (!node) {
             node = new MATNode(pt.x / scale, pt.y / scale, (pt.radius / scale) + toolRadius);
+            node.sourcePoly = sourcePoly; // Associate each node with its parent offset boundary loop
             nodeMap.set(key, node);
         }
         return node;
     }
 
     for (const segment of segments) {
-        const u = getOrCreateNode(segment.point0);
-        const v = getOrCreateNode(segment.point1);
+        const u = getOrCreateNode(segment.point0, segment.sourcePoly);
+        const v = getOrCreateNode(segment.point1, segment.sourcePoly);
 
         if (u !== v) {
             u.neighbors.add(v);
@@ -803,6 +804,10 @@ export function adaptiveClear(polygons, toolDiam, options) {
             let inr = (scaled.inner ?? []).map(p => p.points.map(p => ({ x: p.x|0, y: p.y|0 })));
             if (out.length > 2) {
                 let ma = JSPoly.construct_medial_axis(out, inr);
+                // Record the parent offset polygon loop on each medial axis segment
+                for (let seg of ma) {
+                    seg.sourcePoly = poly;
+                }
                 mat_segments.push(...ma);
             }
         } catch (e) {
@@ -2398,6 +2403,67 @@ export function adaptiveClear(polygons, toolDiam, options) {
             }
 
             i++;
+        }
+
+        // Retrieve the parent offset polygon loop for this walk
+        let sourcePoly = null;
+        for (let step of walk) {
+            let m = metaNodes.find(node => node.id === step.id);
+            if (m && m.nodes.length > 0) {
+                let firstNode = m.nodes[0];
+                if (firstNode && firstNode.sourcePoly) {
+                    sourcePoly = firstNode.sourcePoly;
+                    break;
+                }
+            }
+        }
+
+        // If the finish boundaries option is enabled, manually append the outer boundary
+        // and all island boundaries of this pocket directly to our output points
+        if (pts.length > 0 && options.finish_boundaries !== false && sourcePoly) {
+            // Determine desired winding directions (climb vs conventional)
+            let outerCW = (options.direction !== 'climb');
+            let innerCW = !outerCW;
+
+            let outerBoundary = sourcePoly.clone(true);
+            if (outerBoundary.isClockwise() !== outerCW) {
+                outerBoundary.reverse();
+            }
+
+            let boundaries = [ outerBoundary ];
+            if (sourcePoly.inner) {
+                for (let inner of sourcePoly.inner) {
+                    let ib = inner.clone(true);
+                    if (ib.isClockwise() !== innerCW) {
+                        ib.reverse();
+                    }
+                    boundaries.push(ib);
+                }
+            }
+
+            for (let poly of boundaries) {
+                let lastPt = pts[pts.length - 1];
+                let found = poly.findClosestPointTo(lastPt);
+                let index = found.index;
+
+                let points = poly.points;
+                if (index) {
+                    points = [...points.slice(index), ...points.slice(0, index)];
+                }
+
+                // Transition safely to the start of the boundary pass using Z-hop
+                let startPt = points[0];
+                pts.push(newPoint(lastPt.x, lastPt.y, z + 0.1).annotate({ forceSpeed: 0 }));
+                pts.push(newPoint(startPt.x, startPt.y, z + 0.1).annotate({ forceSpeed: 0 }));
+                pts.push(newPoint(startPt.x, startPt.y, z).annotate({ forceSpeed: 0 }));
+
+                // Append the boundary points sequentially
+                for (let pt of points) {
+                    pts.push(pt.clone().setZ(z));
+                }
+                // Close the loop by returning to the start point
+                pts.push(startPt.clone().setZ(z));
+            }
         }
 
         if (pts.length > 0) {

@@ -599,6 +599,7 @@ export const conf = {
                 camAdaptiveZTop: 0,
                 camAdaptiveTEA: 60,
                 camAdaptiveEntryHelixAngle: 3,
+                camAdaptiveFinishBoundaries: true,
                 camRegisterOffset: 10,
                 camRegisterSpeed: 1000,
                 camRegisterThru: 5,

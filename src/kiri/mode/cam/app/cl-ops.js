@@ -596,6 +596,7 @@ export function createPopOps() {
         tolerance: 'camTolerance',
         tea: 'camAdaptiveTEA',
         entry_helix_angle: 'camAdaptiveEntryHelixAngle',
+        finish_boundaries: 'camAdaptiveFinishBoundaries',
     }).inputs = {
         tool: UC.newSelect(LANG.cc_tool, {}, "tools"),
         direction: UC.newSelect(LANG.ou_dire_s, { title: LANG.ou_dire_l }, "direction"),
@@ -614,6 +615,7 @@ export function createPopOps() {
         wide: UC.newBoolean(LANG.co_wide_s, undefined, { title: "expand outline to 2x tool diameter", show: (op) => { return !op.inputs.insideOnly.checked; } }),
         insideOnly: UC.newBoolean(LANG.co_olin_s, undefined, { title: LANG.co_olin_l, show: (op) => { return !op.inputs.wide.checked; } }),
         omitthru: UC.newBoolean(LANG.co_omit_s, undefined, { title: LANG.co_omit_l }),
+        finish_boundaries: UC.newBoolean("finish boundaries", undefined, { title: "perform a final finishing pass around the boundaries of the cleared areas" }),
         exp: UC.newExpand("feeds & speeds", { }),
         spindle: UC.newInput(LANG.cc_spnd_s, { title: LANG.cc_spnd_l, convert: toInt, show: hasSpindle }),
         rate: UC.newInput(LANG.cc_feed_s, { title: LANG.cc_feed_l, convert: toInt, units }),

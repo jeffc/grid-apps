@@ -314,6 +314,7 @@ class OpArea extends CamOp {
                         // zTop is required by adaptiveClear to calculate the safe helical entry starting height
                         zTop: workarea.top_z,
                         entry_helix_angle: op.entry_helix_angle,
+                        finish_boundaries: op.finish_boundaries ?? true,
                         zSafe: zSafe
                     };
                     let outs = adaptiveClear(clip, toolDiam, opt);

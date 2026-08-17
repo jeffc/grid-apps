@@ -42,6 +42,7 @@ class OpAdaptive extends CamOp {
             tea: op.tea,
             down: op.down,
             entry_helix_angle: op.entry_helix_angle,
+            finish_boundaries: op.finish_boundaries ?? true,
             expand: 0,
             smooth: 0,
             outline: true,
