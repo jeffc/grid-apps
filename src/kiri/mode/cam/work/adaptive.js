@@ -937,34 +937,41 @@ export function adaptiveClear(polygons, toolDiam, options) {
     // Filter out the merged generators from the global generators list
     generators = generators.filter(g => !mergedChamberIds.has(g.id));
 
-    // 5. Run BFS Chamber Expansion (restricted to standard 'chamber' generators)
-    for (let gen of generators.filter(g => g.type === 'chamber')) {
-        let queue = [];
+    // 5. Run BFS Chamber Expansion concurrently (multi-source BFS)
+    let queue = [];
+    let activeChambers = generators.filter(g => g.type === 'chamber');
+    
+    // Initialize the queue with the starting frontier of ALL active chambers
+    for (let gen of activeChambers) {
         for (let node of gen.nodes) {
             for (let neighbor of node.neighbors) {
                 if (neighbor.chamberId === null) {
-                    queue.push({ node: neighbor, fromNode: node });
+                    queue.push({ node: neighbor, fromNode: node, genId: gen.id });
                 }
             }
         }
+    }
 
-        while (queue.length > 0) {
-            let { node, fromNode } = queue.shift();
-            if (node.chamberId !== null) continue;
+    // Process the queue concurrently
+    while (queue.length > 0) {
+        let { node, fromNode, genId } = queue.shift();
+        if (node.chamberId !== null) continue;
 
-            let ds = dist2D(fromNode, node);
-            let dR = Math.abs(fromNode.radius - node.radius);
-            let G = ds > 1e-6 ? dR / ds : 0;
+        let ds = dist2D(fromNode, node);
+        let dR = Math.abs(fromNode.radius - node.radius);
+        let G = ds > 1e-6 ? dR / ds : 0;
 
-            if (G < gradientLimit && node.radius < threshold) {
-                continue;
-            }
+        if (G < gradientLimit && node.radius < threshold) {
+            continue;
+        }
 
-            node.chamberId = gen.id;
-            for (let neighbor of node.neighbors) {
-                if (neighbor.chamberId === null) {
-                    queue.push({ node: neighbor, fromNode: node });
-                }
+        // Claim ownership of the node for the reaching generator
+        node.chamberId = genId;
+        
+        // Push unvisited neighbors to the queue
+        for (let neighbor of node.neighbors) {
+            if (neighbor.chamberId === null) {
+                queue.push({ node: neighbor, fromNode: node, genId: genId });
             }
         }
     }
@@ -992,6 +999,12 @@ export function adaptiveClear(polygons, toolDiam, options) {
 
             if (node.chamberId !== null && node.chamberId === neighbor.chamberId) {
                 chamber_lines.push(segment);
+            } else if (node.chamberId !== null && neighbor.chamberId !== null) {
+                // Adjacent different chambers: only insert a corridor if they don't lie within each other's radii
+                let d = dist2D(node, neighbor);
+                if (d > node.radius && d > neighbor.radius) {
+                    corridor_lines.push(segment);
+                }
             } else {
                 corridor_lines.push(segment);
             }
@@ -1168,45 +1181,15 @@ export function adaptiveClear(polygons, toolDiam, options) {
                 }
 
                 // If both meta-nodes are chambers, insert an intermediate Corridor MetaNode to clear the neck between them
+                // only if they do not physically overlap (i.e. their neighbor nodes do not lie within each other's radii).
                 if (mu.strategy === 'chamber' && mv.strategy === 'chamber') {
-                    let m_corr = new MetaNode(++metaNodeIdCounter, 'corridor', null);
-                    m_corr.nodes = [node, neighbor];
-                    metaNodes.push(m_corr);
+                    let d = dist2D(node, neighbor);
+                    let overlaps = d <= node.radius || d <= neighbor.radius;
 
-                    // Connect Chamber A <-> Corridor
-                    mu.neighbors.add(m_corr);
-                    m_corr.neighbors.add(mu);
-                    mu.connections.push({
-                        neighbor: m_corr,
-                        myEnd: myEnd,
-                        itsEnd: false
-                    });
-                    m_corr.connections.push({
-                        neighbor: mu,
-                        myEnd: false,
-                        itsEnd: myEnd
-                    });
-
-                    // Connect Corridor <-> Chamber B
-                    m_corr.neighbors.add(mv);
-                    mv.neighbors.add(m_corr);
-                    m_corr.connections.push({
-                        neighbor: mv,
-                        myEnd: true,
-                        itsEnd: itsEnd
-                    });
-                    mv.connections.push({
-                        neighbor: m_corr,
-                        myEnd: itsEnd,
-                        itsEnd: true
-                    });
-                } else {
-                    // Standard connection between different meta-nodes
-                    mu.neighbors.add(mv);
-                    mv.neighbors.add(mu);
-
-                    let exists = mu.connections.push !== undefined && mu.connections.some(c => c.neighbor === mv && c.myEnd === myEnd && c.itsEnd === itsEnd);
-                    if (!exists) {
+                    if (overlaps) {
+                        // Connect directly
+                        mu.neighbors.add(mv);
+                        mv.neighbors.add(mu);
                         mu.connections.push({
                             neighbor: mv,
                             myEnd: myEnd,
@@ -1217,7 +1200,54 @@ export function adaptiveClear(polygons, toolDiam, options) {
                             myEnd: itsEnd,
                             itsEnd: myEnd
                         });
+                    } else {
+                        let m_corr = new MetaNode(++metaNodeIdCounter, 'corridor', null);
+                        m_corr.nodes = [node, neighbor];
+                        metaNodes.push(m_corr);
+
+                        // Connect Chamber A <-> Corridor
+                        mu.neighbors.add(m_corr);
+                        m_corr.neighbors.add(mu);
+                        mu.connections.push({
+                            neighbor: m_corr,
+                            myEnd: myEnd,
+                            itsEnd: false
+                        });
+                        m_corr.connections.push({
+                            neighbor: mu,
+                            myEnd: false,
+                            itsEnd: myEnd
+                        });
+
+                        // Connect Corridor <-> Chamber B
+                        m_corr.neighbors.add(mv);
+                        mv.neighbors.add(m_corr);
+                        m_corr.connections.push({
+                            neighbor: mv,
+                            myEnd: true,
+                            itsEnd: itsEnd
+                        });
+                        mv.connections.push({
+                            neighbor: m_corr,
+                            myEnd: itsEnd,
+                            itsEnd: true
+                        });
                     }
+                } else {
+                    // Standard connection between different meta-nodes
+                    mu.neighbors.add(mv);
+                    mv.neighbors.add(mu);
+
+                    mu.connections.push({
+                        neighbor: mv,
+                        myEnd: myEnd,
+                        itsEnd: itsEnd
+                    });
+                    mv.connections.push({
+                        neighbor: mu,
+                        myEnd: itsEnd,
+                        itsEnd: myEnd
+                    });
                 }
             }
         }
