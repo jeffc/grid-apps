@@ -677,6 +677,106 @@ export function buildMATGraph(segments, toolRadius, scale = 1000) {
  * @param {Object} options - Additional options (e.g. z, direction)
  * @returns {Polygon[]} Generated toolpath polygons/lines (offset tool center workspace)
  */
+/**
+ * Detects fundamental cycles in the MAT graph using Paton's algorithm.
+ * Paton's algorithm grows a spanning forest. When we find a neighbor already
+ * in the spanning forest (visited) and not the parent of the current node, it
+ * indicates a cycle is formed. We trace parent pointers back to their LCA
+ * to construct the cycle. We keep track of processed edges to avoid duplicate
+ * cycle extraction.
+ */
+function findFundamentalCycles(graph) {
+    const cycles = [];
+    const tree = new Set();
+    const parent = new Map();
+    const stack = [];
+    const processedEdges = new Set();
+
+    for (const startNode of graph) {
+        if (tree.has(startNode)) continue;
+
+        stack.push(startNode);
+        tree.add(startNode);
+
+        while (stack.length > 0) {
+            const curr = stack.pop();
+
+            for (const neighbor of curr.neighbors) {
+                const edgeKey = curr.x < neighbor.x ?
+                    `${curr.x},${curr.y}:${neighbor.x},${neighbor.y}` :
+                    `${neighbor.x},${neighbor.y}:${curr.x},${curr.y}`;
+
+                if (tree.has(neighbor)) {
+                    if (neighbor !== parent.get(curr) && !processedEdges.has(edgeKey)) {
+                        processedEdges.add(edgeKey);
+                        
+                        // Trace back parent pointers from curr and neighbor
+                        const cycle = [];
+                        const pathA = [];
+                        const pathB = [];
+                        
+                        let a = curr;
+                        while (a) {
+                            pathA.push(a);
+                            a = parent.get(a);
+                        }
+                        
+                        let b = neighbor;
+                        while (b) {
+                            pathB.push(b);
+                            b = parent.get(b);
+                        }
+                        
+                        // Find Lowest Common Ancestor (LCA)
+                        let i = pathA.length - 1;
+                        let j = pathB.length - 1;
+                        while (i >= 0 && j >= 0 && pathA[i] === pathB[j]) {
+                            i--;
+                            j--;
+                        }
+                        
+                        // Path: curr -> LCA (inclusive) -> neighbor
+                        for (let k = 0; k <= i + 1; k++) {
+                            cycle.push(pathA[k]);
+                        }
+                        for (let k = j; k >= 0; k--) {
+                            cycle.push(pathB[k]);
+                        }
+                        cycles.push(cycle);
+                    }
+                } else {
+                    tree.add(neighbor);
+                    parent.set(neighbor, curr);
+                    stack.push(neighbor);
+                }
+            }
+        }
+    }
+    return cycles;
+}
+
+/**
+ * Finds the edge in a cycle with the smallest bottleneck radius.
+ * The bottleneck value of an edge (u, v) is defined as Math.min(u.radius, v.radius).
+ * Minimizing this ensures we break cycles at their narrowest point.
+ */
+function findBottleneckEdge(cycle) {
+    let minR = Infinity;
+    let breakEdge = null;
+
+    for (let i = 0; i < cycle.length; i++) {
+        const u = cycle[i];
+        const v = cycle[(i + 1) % cycle.length];
+        const edgeR = Math.min(u.radius, v.radius);
+        
+        if (edgeR < minR) {
+            minR = edgeR;
+            breakEdge = { u, v };
+        }
+    }
+    return breakEdge;
+}
+
 export function adaptiveClear(polygons, toolDiam, options) {
     let toolRadius = toolDiam / 2;
     let threshold = 1.25 * toolDiam;
@@ -745,6 +845,19 @@ export function adaptiveClear(polygons, toolDiam, options) {
         if (best_v) {
             u.neighbors.add(best_v);
             best_v.neighbors.add(u);
+        }
+    }
+
+    // Detect cycles using Paton's algorithm and mark bottleneck edges
+    let cycles = findFundamentalCycles(mat_graph);
+    for (let cycle of cycles) {
+        let breakEdge = findBottleneckEdge(cycle);
+        if (breakEdge) {
+            let { u, v } = breakEdge;
+            if (!u.blockedNeighbors) u.blockedNeighbors = new Set();
+            if (!v.blockedNeighbors) v.blockedNeighbors = new Set();
+            u.blockedNeighbors.add(v);
+            v.blockedNeighbors.add(u);
         }
     }
 
@@ -920,6 +1033,9 @@ export function adaptiveClear(polygons, toolDiam, options) {
                 }
                 
                 for (let neighbor of node.neighbors) {
+                    if (node.blockedNeighbors && node.blockedNeighbors.has(neighbor)) {
+                        continue; // Skip traversing across cycle bottleneck breaks
+                    }
                     if (!visited.has(neighbor)) {
                         visited.add(neighbor);
                         queue.push({ node: neighbor, minR: Math.min(minR, neighbor.radius) });
@@ -953,6 +1069,9 @@ export function adaptiveClear(polygons, toolDiam, options) {
         for (let node of gen.nodes) {
             for (let neighbor of node.neighbors) {
                 if (neighbor.chamberId === null) {
+                    if (node.blockedNeighbors && node.blockedNeighbors.has(neighbor)) {
+                        continue; // Skip frontier propagation across cycle breaks
+                    }
                     queue.push({ node: neighbor, fromNode: node, genId: gen.id });
                 }
             }
@@ -978,6 +1097,9 @@ export function adaptiveClear(polygons, toolDiam, options) {
         // Push unvisited neighbors to the queue
         for (let neighbor of node.neighbors) {
             if (neighbor.chamberId === null) {
+                if (node.blockedNeighbors && node.blockedNeighbors.has(neighbor)) {
+                    continue; // Skip expansion across cycle breaks
+                }
                 queue.push({ node: neighbor, fromNode: node, genId: genId });
             }
         }
@@ -987,6 +1109,7 @@ export function adaptiveClear(polygons, toolDiam, options) {
     let chamber_lines = [];
     let corridor_lines = [];
     let mat_lines = [];
+    let blocked_lines = [];
     let renderedEdges = new Set();
 
     for (let node of mat_graph) {
@@ -1002,7 +1125,11 @@ export function adaptiveClear(polygons, toolDiam, options) {
             let p1 = { x: neighbor.x, y: neighbor.y, radius: neighbor.radius };
             let segment = { point0: p0, point1: p1 };
 
-            mat_lines.push(segment);
+            if (node.blockedNeighbors && node.blockedNeighbors.has(neighbor)) {
+                blocked_lines.push(segment);
+            } else {
+                mat_lines.push(segment);
+            }
 
             if (node.chamberId !== null && node.chamberId === neighbor.chamberId) {
                 chamber_lines.push(segment);
@@ -1677,6 +1804,7 @@ export function adaptiveClear(polygons, toolDiam, options) {
     options.chamber_lines = chamber_lines;
     options.corridor_lines = corridor_lines;
     options.mat_lines = mat_lines;
+    options.blocked_lines = blocked_lines;
 
     options.meta_graph = metaNodes.map(m => {
         let center = metaCenters.get(m.id);

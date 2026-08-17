@@ -368,6 +368,22 @@ class OpArea extends CamOp {
                             layers.setLayer(layerName, { face: 0xff00ff, opacity: 0.15 }, false)
                                   .addAreas(opt.corridor_areas);
                         }
+                        // Render MAT graph edges in light gray to aid development and debugging
+                        if (opt.mat_lines && opt.mat_lines.length) {
+                            let matLayer = opName ? `${opName} MAT graph` : "MAT graph";
+                            layers.setLayer(matLayer, { line: 0xcccccc }, false);
+                            for (let seg of opt.mat_lines) {
+                                layers.addLine({x: seg.point0.x, y: seg.point0.y, z: z}, {x: seg.point1.x, y: seg.point1.y, z: z});
+                            }
+                        }
+                        // Render blocked cycle breaks in a distinct bold red to visualize Paton's algorithm decisions
+                        if (opt.blocked_lines && opt.blocked_lines.length) {
+                            let breakLayer = opName ? `${opName} MAT cycle breaks` : "MAT cycle breaks";
+                            layers.setLayer(breakLayer, { line: 0xff3333, fat: 3 }, false);
+                            for (let seg of opt.blocked_lines) {
+                                layers.addLine({x: seg.point0.x, y: seg.point0.y, z: z}, {x: seg.point1.x, y: seg.point1.y, z: z});
+                            }
+                        }
                     }
                     layers
                         .setLayer(rename ?? "adaptive", { line: color }, false)
