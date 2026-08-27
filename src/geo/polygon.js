@@ -551,7 +551,11 @@ export class Polygon {
             ln = this.length,
             i = 0;
 
-        while (i < ln) np.push(this.points[i++]);
+        if (deep) {
+            while (i < ln) np.push(this.points[i++].clone());
+        } else {
+            while (i < ln) np.push(this.points[i++]);
+        }
 
         fields && fields.forEach(field => np[field] = this[field]);
         this.fillang && (np.fillang = this.fillang);
@@ -559,7 +563,7 @@ export class Polygon {
         np.open = this.open;
 
         if (deep && this.inner) {
-            np.inner = this.inner.clone(false, fields);
+            np.inner = this.inner.clone(true, fields);
         }
 
         return np;
