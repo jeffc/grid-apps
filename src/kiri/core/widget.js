@@ -751,6 +751,9 @@ class Widget {
                 }
             }
         }
+        // clone shadow array/polygons/points to prevent subsequent setZ mutations
+        // from modifying cached polygons and shared state.shadow.base references.
+        shadow = shadow.clone(true);
         return shadows[z] = POLY.setZ(shadow, z);
     }
 
