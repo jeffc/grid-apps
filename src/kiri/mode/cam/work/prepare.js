@@ -584,9 +584,14 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
                 emit = 1;
             } else
             // otherwise move over before descending
-            if (deltaZ <= -tolerance) {
-                if (debug) console.log('over before descend', deltaZ, -tolerance);
-                layerPush(point.clone().setZ(printPoint.z), 0, 0, tool);
+            if (deltaZ < Math.min(-tolerance, -0.001)) {
+                let lift = printPoint.clone();
+                lift.z += 0.1;
+                let target = point.clone();
+                target.z = printPoint.z + 0.1;
+                
+                layerPush(lift, 0, 0, tool);
+                layerPush(target, 0, 0, tool);
                 newLayer();
             }
         } else
@@ -626,6 +631,21 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
                 }
             }
             lastTravelBounds = undefined;
+
+            // If we are NOT retracting (didn't cross boundaries):
+            if (!upAndOver) {
+                if (deltaZ < Math.min(-tolerance, -0.001)) {
+                    // Descending transition within the pocket -> Z-hop
+                    let lift = printPoint.clone();
+                    lift.z += 0.1;
+                    let target = point.clone();
+                    target.z = printPoint.z + 0.1;
+                    
+                    layerPush(lift, 0, 0, tool);
+                    layerPush(target, 0, 0, tool);
+                    newLayer();
+                }
+            }
         } else
         // for longer moves
         if (isMove) {
