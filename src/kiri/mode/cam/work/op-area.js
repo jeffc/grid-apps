@@ -143,7 +143,8 @@ class OpArea extends CamOp {
         }
 
         // filter out invalid polys
-        polys = polys.filter(p => p && p.length > 2);
+        // filter out invalid polys; open polys (traces) can have 2 points (length > 1)
+        polys = polys.filter(p => p && (p.open ? p.length > 1 : p.length > 2));
 
         // process each area separately
         let proc = 0;
