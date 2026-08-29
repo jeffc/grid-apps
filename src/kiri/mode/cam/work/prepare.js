@@ -644,6 +644,15 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
                     layerPush(lift, 0, 0, tool);
                     layerPush(target, 0, 0, tool);
                     newLayer();
+                } else if (deltaXY <= shortCut && deltaZ <= 0 && !lasering) {
+                    // If this is a short move and the deltaZ failed the check
+                    // in the first branch of this conditional (ie, it's not a
+                    // significant z-descent), but it's still either zero
+                    // (in-plane move) or insignificantly negative, that means
+                    // that we're likely making a cut through stock (a stepover
+                    // cut is the best example of this). Since that's still
+                    // going through material, we force a G1 move for this cut.
+                    emit = 1;
                 }
             }
         } else
