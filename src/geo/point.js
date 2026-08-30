@@ -863,9 +863,9 @@ class Point {
      * @returns {Point} This point (for chaining)
      */
     move(delta) {
-        this.x += delta.x;
-        this.y += delta.y;
-        this.z += delta.z;
+        this.x += delta.x || 0;
+        this.y += delta.y || 0;
+        this.z += delta.z || 0;
         return this;
     }
 
