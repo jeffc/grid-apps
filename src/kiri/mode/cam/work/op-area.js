@@ -9,7 +9,7 @@ import { newSlice } from '../../../core/slice.js';
 import { newPoint } from '../../../../geo/point.js';
 import { newPolygon } from '../../../../geo/polygon.js';
 import { polygons as POLY } from '../../../../geo/polygons.js';
-import { util as base_util } from '../../../../geo/base.js';
+import { base, util as base_util } from "../../../../geo/base.js";
 import { tip2tipJoin } from '../../../../geo/paths.js';
 import { CAM } from './init-work.js';
 
@@ -96,6 +96,88 @@ class OpArea extends CamOp {
         // surface and edge selections produce open polygons by default
         polys = POLY.nest(POLY.reconnect(polys, false));
 
+        // Align open polylines with the winding direction relative to the slice
+        // shadow.  We calculate a test point slightly offset along the
+        // perpendicular right-hand normal of the first non-trivial segment of the
+        // polyline (or, more accurately, the projection of that segment onto the xy
+        // plane).
+        //
+        // If this test point lies inside the slice shadow (solid body), it means
+        // the right side of the path points inside, so we reverse the polyline to
+        // ensure that the right side (positive offset / "outside") always points
+        // outward into the air.
+        //
+        // This check runs once per unconnected group of merged segments in a trace.
+        // It uses the cached 2D slice shadows, which fully handles sloped and
+        // Z-varying curves.
+        //
+        // This is an O(E) operation per open polyline group where E is the number
+        // of edges in the slice shadow at that height.
+        //
+        // This test is only performed for open polygons, since closed shapes are
+        // handled by Clipper's offset functionality which automatically fixes
+        // winding order issues.
+        if (shadowAt) {
+          for (let poly of polys) {
+            // Only open paths of length > 1 need winding orientation alignment
+            if (poly.open && poly.points.length > 1) {
+              let p1 = null,
+                p2 = null;
+
+              // Find the first segment with an XY projection length greater than
+              // precision_merge to avoid division-by-zero or precision issues on
+              // vertical/micro segments.
+              for (let i = 0; i < poly.points.length - 1; i++) {
+                let pt1 = poly.points[i];
+                let pt2 = poly.points[i + 1];
+                let dx = pt2.x - pt1.x;
+                let dy = pt2.y - pt1.y;
+                let distSq = dx * dx + dy * dy;
+                if (distSq > base.config.precision_merge_sq) {
+                  p1 = pt1;
+                  p2 = pt2;
+                  break;
+                }
+              }
+
+              // If a valid non-vertical segment was found, perform the containment check
+              if (p1 && p2) {
+                let dx = p2.x - p1.x;
+                let dy = p2.y - p1.y;
+                let len = Math.sqrt(dx * dx + dy * dy);
+
+                // Perpendicular right normal in the XY plane (z-component is zeroed out)
+                let nx = dy / len;
+                let ny = -dx / len;
+
+                // Midpoint of the segment
+                let mid = newPoint(
+                  (p1.x + p2.x) / 2,
+                  (p1.y + p2.y) / 2,
+                  (p1.z + p2.z) / 2
+                );
+
+                // Test point offset along the right normal vector using local epsilon
+                let testPoint = newPoint(
+                  mid.x + nx * ts_eps,
+                  mid.y + ny * ts_eps,
+                  mid.z
+                );
+
+                // Retrieve the part's slice shadow at this specific midpoint's Z height
+                let shadow = await shadowAt(mid.z);
+                if (shadow) {
+                  // If the right side points inside the part shadow (material),
+                  // reverse the path so the right side points outward into the air.
+                  if (testPoint.isInPolygon(shadow)) {
+                    poly.reverse();
+                  }
+                }
+              }
+            }
+          }
+        }
+
         // gather surface selections
         if (!op.shadow) {
             let vert = widget.getGeoVertices({ unroll: true, translate: true }).map(v => v.round(4));
@@ -143,7 +225,8 @@ class OpArea extends CamOp {
         }
 
         // filter out invalid polys
-        polys = polys.filter(p => p && p.length > 2);
+        // filter out invalid polys; open polys (traces) can have 2 points (length > 1)
+        polys = polys.filter(p => p && (p.open ? p.length > 1 : p.length > 2));
 
         // process each area separately
         let proc = 0;
