@@ -282,6 +282,24 @@ class OpArea extends CamOp {
                     let slice = newLayer(z);
                     let layers = slice.output();
                     let shadow = await shadowAt(z + 0.01);
+                    // For adaptive clearing mode, tabs cannot be processed via post-process line clipping (cutTabs).
+                    // Running cutTabs on dense, open trochoidal stepover paths breaks them into fragmented line segments
+                    // and triggers an O(N^2) stall in POLY.reconnect.
+                    // Instead, active tab 2D polygons at depth Z are unioned directly into the part shadow obstacle geometry.
+                    // This allows adaptiveClear to natively treat tab regions as solid obstacles and generate smooth, continuous
+                    // trochoids and boundary passes around both the part and the tabs.
+                    if (tabs.length && mode === 'adaptive') {
+                        let activeTabs = tabs
+                            .filter(t => {
+                                let top = t.top ?? (t.pos.z + t.dim.z / 2);
+                                let bottom = t.bottom ?? (t.pos.z - t.dim.z / 2);
+                                return z <= top && z >= bottom;
+                            })
+                            .map(t => t.poly);
+                        if (activeTabs.length > 0) {
+                            shadow = POLY.union([ ...shadow, ...activeTabs ]);
+                        }
+                    }
                     let tool_shadow = [
                         ...POLY.offset(shadow, [  ts_off ], { count: 1, z, ...offopt }),
                         ...POLY.offset(shadow, [ -ts_off ], { count: 1, z, ...offopt }),
@@ -332,7 +350,8 @@ class OpArea extends CamOp {
                     } else if (op.omitinner) {
                         outs = omitInner(outs);
                     }
-                    if (tabs.length) outs = cutTabs(tabs, outs);
+                    // cut tabs when present (bypassed for adaptive clearing mode as clearing trochoids/spirals are roughing passes and cutTabs causes heavy O(N^2) stalls on open paths)
+                    if (tabs.length && mode !== 'adaptive') outs = cutTabs(tabs, outs);
                     if (op.leave_z) {
                         for (let out of outs)
                             for (let p of out.points)

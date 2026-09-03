@@ -797,7 +797,8 @@ export function adaptiveClear(polygons, toolDiam, options) {
     let mat_segments = [];
     let scale = 1000;
 
-    for (let poly of offset_polygons) {
+    for (let polyIdx = 0; polyIdx < offset_polygons.length; polyIdx++) {
+        let poly = offset_polygons[polyIdx];
         try {
             let scaled = poly.clone(true).scale({ x: scale, y: scale, z: scale });
             let out = scaled.points.map(p => ({ x: p.x|0, y: p.y|0 }));
@@ -815,6 +816,10 @@ export function adaptiveClear(polygons, toolDiam, options) {
         }
     }
 
+    // If no Medial Axis (MAT) segments could be constructed (e.g., when the tool is too large
+    // to fit within the available stock margin or pocket boundary), return an empty array of toolpaths.
+    // Returning the input raw polygons here would cause OpArea to mistake the input boundary geometry
+    // for valid toolpaths, failing to trigger the early-exit condition (outs.length === 0) and hanging.
     if (mat_segments.length === 0) {
         options.chamber_lines = [];
         options.corridor_lines = [];
@@ -824,7 +829,7 @@ export function adaptiveClear(polygons, toolDiam, options) {
         options.corridor_areas = [];
         options.meta_graph = [];
         options.meta_walks = [];
-        return polygons;
+        return [];
     }
 
     let mat_graph = buildMATGraph(mat_segments, addedRadius, scale);
@@ -986,6 +991,7 @@ export function adaptiveClear(polygons, toolDiam, options) {
     // 4.5 Merge adjacent chambers if they preserve star-convexity (line of sight and MAT path monotonicity)
     let mergedChamberIds = new Set();
     let mergePass = true;
+    let mergeCount = 0;
     while (mergePass) {
         mergePass = false;
         let activeChambers = generators.filter(g => g.type === 'chamber' && !mergedChamberIds.has(g.id));
@@ -1689,6 +1695,7 @@ export function adaptiveClear(polygons, toolDiam, options) {
                         if (conn) {
                             lastStep.exitEnd = conn.myEnd;
 
+                            let uncutBefore = uncutNodes.size;
                             dfsWalk(next, conn.itsEnd);
 
                             let backtrackStep = {
@@ -1702,6 +1709,16 @@ export function adaptiveClear(polygons, toolDiam, options) {
                             lastStep = backtrackStep;
 
                             currentEnd = conn.myEnd;
+
+                            // If recursive traversal of next failed to cut any new nodes (e.g., due to downstream
+                            // layout constraint failures), remove next from local neighbors to prevent groupB from
+                            // repeatedly selecting next in an infinite loop.
+                            if (uncutNodes.size === uncutBefore) {
+                                let idx = neighbors.indexOf(next);
+                                if (idx >= 0) {
+                                    neighbors.splice(idx, 1);
+                                }
+                            }
                         } else {
                             // If the connection layout constraint is not met, remove the neighbor
                             // from our local copy of neighbors to prevent looping infinitely.
@@ -2478,5 +2495,7 @@ export function adaptiveClear(polygons, toolDiam, options) {
         return toolpaths;
     }
 
-    return polygons;
+    // Return empty array if no toolpaths were generated so that calling routines (such as OpArea)
+    // can detect that no valid paths fit and exit early instead of processing raw input polygons as toolpaths.
+    return [];
 }
