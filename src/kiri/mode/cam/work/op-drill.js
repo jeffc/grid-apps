@@ -52,7 +52,7 @@ class OpDrill extends CamOp {
                 zTop = widgetTop;
             }
 
-            // Extend plunge depth proportionally if starting above the hole's surface Z so plunge reaches target hole bottom
+            // Extend plunge depth if starting above the hole's surface Z so plunge reaches target hole bottom
             let depth = (zTop > drill.z) ? (drill.depth + (zTop - drill.z)) : drill.depth;
 
             if (op.mark) {
@@ -60,7 +60,7 @@ class OpDrill extends CamOp {
                 depth = op.down;
             }
 
-            // Calculate normal target Z bottom (zTop minus depth, including thru allowance if applicable)
+            // Calculate target Z bottom (zTop minus depth, including thru allowance if applicable)
             let targetZBottom = zTop - depth;
             if (op.thru > 0 && !op.mark) {
                 targetZBottom -= op.thru;
