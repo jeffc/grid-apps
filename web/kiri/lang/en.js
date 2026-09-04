@@ -843,7 +843,7 @@ self.lang['en-us'] = {
     ou_ztof_s:      "z offset",
     ou_ztof_l:      ["offset z anchor","in workspace units"],
     ou_ztop_s:      "z top",
-    ou_ztop_l:      ["offset from stock bottom","to set start of cutting depth","in workspace units","* drill/contour ignore this *"],
+    ou_ztop_l:      ["offset from stock bottom","to set start of cutting depth","in workspace units","* contour ignores this *"],
     ou_zbot_s:      "z bottom",
     ou_zbot_l:      ["offset from stock bottom","to limit cutting depth","in workspace units"],
     ou_zclr_s:      "z clearance",
