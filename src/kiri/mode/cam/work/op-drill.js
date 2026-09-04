@@ -60,19 +60,20 @@ class OpDrill extends CamOp {
                 depth = op.down;
             }
 
-            // Determine bottom Z height:
-            // Explicit operation Z Bottom override (op.ov_botz) if specified, otherwise zTop - depth
-            if (op.ov_botz !== undefined && op.ov_botz !== 0) {
-                drill.zBottom = op.ov_botz;
-            } else {
-                drill.zBottom = zTop - depth;
-                // for thru holes, follow z thru when set
-                if (op.thru > 0 && !op.mark) {
-                    drill.zBottom -= op.thru;
-                }
+            // Calculate normal target Z bottom (zTop minus depth, including thru allowance if applicable)
+            let targetZBottom = zTop - depth;
+            if (op.thru > 0 && !op.mark) {
+                targetZBottom -= op.thru;
             }
 
-            // honor global process zBottom limit when set
+            // Operation Z Bottom override (op.ov_botz) acts as a floor limit (drill goes no lower than ov_botz)
+            if (op.ov_botz !== undefined && op.ov_botz !== 0) {
+                drill.zBottom = Math.max(op.ov_botz, targetZBottom);
+            } else {
+                drill.zBottom = targetZBottom;
+            }
+
+            // Honor global process zBottom limit when set
             if (zBottom) drill.zBottom = Math.max(zBottom, drill.zBottom);
 
             const poly = newPolygon()
