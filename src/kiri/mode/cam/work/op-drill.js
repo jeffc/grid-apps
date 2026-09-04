@@ -34,7 +34,7 @@ class OpDrill extends CamOp {
             let slice = newSlice(0);
 
             // Determine starting Z top height:
-            // 1. Explicit operation Z Top override (op.ov_topz) if specified by user
+            // 1. Explicit operation Z Top override (op.ov_topz) if specified by user (overrides 'fromTop' completely)
             // 2. Stock top (settings.stock.z) if 'fromTop' is checked and stock top is higher than hole Z
             // 3. Default: Widget top (widget.track.top) if higher than hole Z, or hole Z
             let stockZ = settings.stock?.z;
@@ -42,14 +42,17 @@ class OpDrill extends CamOp {
             let zTop = drill.z;
 
             if (op.ov_topz) {
+                // Absolute Z Top height override specified by user
                 zTop = op.ov_topz;
             } else if (op.fromTop && stockZ && stockZ > drill.z) {
+                // Start from stock top
                 zTop = stockZ;
             } else if (widgetTop !== undefined && widgetTop > drill.z) {
+                // Default: start from widget model top
                 zTop = widgetTop;
             }
 
-            // Extend depth proportionally if starting above the hole's surface Z
+            // Extend plunge depth proportionally if starting above the hole's surface Z so plunge reaches target hole bottom
             let depth = (zTop > drill.z) ? (drill.depth + (zTop - drill.z)) : drill.depth;
 
             if (op.mark) {

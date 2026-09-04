@@ -599,7 +599,7 @@ export function createPopOps() {
         down: UC.newInput(LANG.cc_sdwn_s, { title: LANG.cc_sdwn_l, convert: toFloat, units }),
         dwell: UC.newInput(LANG.cd_dwll_s, { title: LANG.cd_dwll_l, convert: toFloat }),
         lift: UC.newInput(LANG.cd_lift_s, { title: LANG.cd_lift_l, convert: toFloat, units, show: () => !env.poppedRec.mark }),
-        mark: UC.newBoolean(LANG.cd_mark_s, undefined, { title: LANG.cd_mark_l, show: () => !env.poppedRec.fromTop }),
+        mark: UC.newBoolean(LANG.cd_mark_s, undefined, { title: LANG.cd_mark_l, show: () => !env.poppedRec.fromTop && !env.poppedRec.ov_topz }),
         fromTop: UC.newBoolean(LANG.cd_ftop_s, undefined, { title: LANG.cd_ftop_l, show: () => !env.poppedRec.mark }),
         sep: UC.newBlank({ class: "pop-sep" }),
         thru: UC.newInput(LANG.cd_dtru_s, { title: LANG.cd_dtru_l, convert: toFloat, units, show: () => !env.poppedRec.mark }),
