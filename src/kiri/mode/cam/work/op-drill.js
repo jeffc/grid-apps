@@ -34,37 +34,44 @@ class OpDrill extends CamOp {
             let slice = newSlice(0);
 
             // Determine starting Z top height:
-            // - If 'fromTop' (from stock top) is enabled: start at stock top (settings.stock.z)
-            // - If 'fromTop' is disabled: start at part top (widget.track.top)
+            // 1. Explicit operation Z Top override (op.ov_topz) if specified by user (overrides 'fromTop' completely)
+            // 2. Stock top (settings.stock.z) if 'fromTop' is checked and stock top is higher than hole Z
+            // 3. Default: Part top (widget.track.top) if fromTop is unchecked and higher than hole Z, or hole Z
             let stockZ = settings.stock?.z;
             let partTop = widget?.track?.top;
             let zTop = drill.z;
 
-            if (op.fromTop && stockZ && stockZ > drill.z) {
+            if (op.ov_topz) {
+                // Absolute Z Top height override specified by user
+                zTop = op.ov_topz;
+            } else if (op.fromTop && stockZ && stockZ > drill.z) {
                 // Start from stock top when fromTop is selected
                 zTop = stockZ;
-            } else if (!op.fromTop && partTop !== undefined && partTop > drill.z) {
+            } else if (partTop !== undefined && partTop > drill.z) {
                 // Start from part top when fromTop is deselected
                 zTop = partTop;
             }
 
-            // Extend plunge depth if starting above the hole's surface Z so plunge reaches target hole bottom
-            let depth = (zTop > drill.z) ? (drill.depth + (zTop - drill.z)) : drill.depth;
+            // Calculate natural target hole bottom Z height from detected geometry (drill.z - drill.depth)
+            let targetZBottom = drill.z - drill.depth;
 
             if (op.mark) {
-                // replace depth with single down peck
-                depth = op.down;
+                // For marking, peck goes down by op.down from starting zTop
+                targetZBottom = zTop - op.down;
+            } else if (op.thru > 0) {
+                // For thru holes, plunge additional thru distance below natural hole bottom
+                targetZBottom -= op.thru;
             }
 
-            drill.zBottom = zTop - depth;
+            // Operation Z Bottom override (op.ov_botz) acts as a floor limit (drill goes no lower than ov_botz)
+            if (op.ov_botz !== undefined && op.ov_botz !== 0) {
+                drill.zBottom = Math.max(op.ov_botz, targetZBottom);
+            } else {
+                drill.zBottom = targetZBottom;
+            }
 
-            // honor zBottom when set
+            // Honor global process zBottom limit when set
             if (zBottom) drill.zBottom = Math.max(zBottom, drill.zBottom);
-
-            // for thru holes, follow z thru when set
-            if (op.thru > 0 && !op.mark) {
-                drill.zBottom -= op.thru;
-            }
 
             const poly = newPolygon()
             poly.points.push(newPoint(drill.x, drill.y, zTop))
