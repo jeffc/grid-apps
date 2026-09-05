@@ -107,12 +107,29 @@ class OpArea extends CamOp {
         // ensure that the right side (positive offset / "outside") always points
         // outward into the air.
         //
+        // There are a few corner cases (pun intended) that require this check
+        // to be slightly more complex. An open polyline that separates
+        // a flat face from a taller feature lies completely within the shadow
+        // at its z height, and so both the left and right normals will test as
+        // "inside" the part. As a simple example, consider a model of stairs. The
+        // line that separates the tread on the bottom step from the riser of
+        // the next step up demonstrates this issue: the shadow at that height
+        // contains the face of the bottom step and the cross-section of the top
+        // step. To avoid this issue, we instead test against the shadow from a
+        // small epsilon (0.01) above the z height of the segment.
+        //
+        // However, this workaround introduces another edge case: if the
+        // selected polyline is on a local top edge (in the stair example,
+        // imagine any edge around the perimeter of the top step), the shadow
+        // above that layer will either be empty (if this is the tallest feature
+        // in the model) or locally empty but with irrelevant other
+        // cross-sections from taller features. In either of these cases, both
+        // points will test as "outside" the part. If this happens, we fall back
+        // to the testing with the shadow at the given z height.
+        //
         // This check runs once per unconnected group of merged segments in a trace.
         // It uses the cached 2D slice shadows, which fully handles sloped and
         // Z-varying curves.
-        //
-        // This is an O(E) operation per open polyline group where E is the number
-        // of edges in the slice shadow at that height.
         //
         // This test is only performed for open polygons, since closed shapes are
         // handled by Clipper's offset functionality which automatically fixes
@@ -157,19 +174,39 @@ class OpArea extends CamOp {
                   (p1.z + p2.z) / 2
                 );
 
-                // Test point offset along the right normal vector using local epsilon
-                let testPoint = newPoint(
+                // Test points offset along the right and left normal vectors using local epsilon
+                let testRight = newPoint(
                   mid.x + nx * ts_eps,
                   mid.y + ny * ts_eps,
                   mid.z
                 );
+                let testLeft = newPoint(
+                  mid.x - nx * ts_eps,
+                  mid.y - ny * ts_eps,
+                  mid.z
+                );
 
-                // Retrieve the part's slice shadow at this specific midpoint's Z height
-                let shadow = await shadowAt(mid.z);
+                // Retrieve the cumulative slice shadow above mid.z (+0.01) to probe
+                // 2D cross-sections of feature walls and pockets rising above a floor or step.
+                let shadowAbove = await shadowAt(mid.z + 0.01);
+                let inRight = shadowAbove ? testRight.isInPolygon(shadowAbove) : false;
+                let inLeft = shadowAbove ? testLeft.isInPolygon(shadowAbove) : false;
+
+                let shadow = null;
+                // If exactly one side is inside shadowAbove, a local feature wall/step rises above mid.z.
+                // If both sides are outside (e.g. local top rim, even if taller features exist elsewhere)
+                // or both sides are inside (only possible if the model has
+                // overhangs), fall back to shadowAt(mid.z).
+                if (inRight !== inLeft) {
+                  shadow = shadowAbove;
+                } else {
+                  shadow = await shadowAt(mid.z);
+                }
+
                 if (shadow) {
                   // If the right side points inside the part shadow (material),
                   // reverse the path so the right side points outward into the air.
-                  if (testPoint.isInPolygon(shadow)) {
+                  if (testRight.isInPolygon(shadow)) {
                     poly.reverse();
                   }
                 }
