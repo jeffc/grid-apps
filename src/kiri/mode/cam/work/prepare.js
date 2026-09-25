@@ -614,14 +614,41 @@ export async function prepare_one(widget, settings, print, firstPoint, update) {
             let from = toWidgetCoords(printPoint);
             let to = toWidgetCoords(point);
             let ep = toolDiamEpsilon;
-            for (let poly of check) {
-                let ints = poly.intersections(from, to) ?? [];
-                let far = ints.filter(p => p.distTo2D(to) > ep && p.distTo2D(from) > ep);
-                if (far.length) {
-                    if (debug) console.log({ ints, poly, deltaXY, deltaZ });
-                    upAndOver = "bounds";
-                    break;
+
+            // Construct capsule rays for center, left, and right edges of tool swept path
+            let rays = [{ from, to }];
+            let dx = to.x - from.x;
+            let dy = to.y - from.y;
+            let len = Math.sqrt(dx * dx + dy * dy);
+
+            if (len > 0 && toolDiam > 0) {
+                let r = (toolDiam / 2) * 0.98; // tool radius with safety margin
+                let nx = -dy / len;
+                let ny = dx / len;
+
+                // Left edge ray
+                rays.push({
+                    from: newPoint(from.x + nx * r, from.y + ny * r, from.z),
+                    to: newPoint(to.x + nx * r, to.y + ny * r, to.z)
+                });
+                // Right edge ray
+                rays.push({
+                    from: newPoint(from.x - nx * r, from.y - ny * r, from.z),
+                    to: newPoint(to.x - nx * r, to.y - ny * r, to.z)
+                });
+            }
+
+            for (let ray of rays) {
+                for (let poly of check) {
+                    let ints = poly.intersections(ray.from, ray.to) ?? [];
+                    let far = ints.filter(p => p.distTo2D(ray.to) > ep && p.distTo2D(ray.from) > ep);
+                    if (far.length) {
+                        if (debug) console.log({ ints, poly, deltaXY, deltaZ, ray });
+                        upAndOver = "bounds";
+                        break;
+                    }
                 }
+                if (upAndOver) break;
             }
             if (!upAndOver) {
                 let nearFrom = nearTravelBoundary(from, check, ep);
