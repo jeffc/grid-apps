@@ -579,6 +579,8 @@ export const conf = {
                 camPocketDown: 1,
                 camPocketExpand: 0,
                 camPocketFollow: 5,
+                camPocketLimitPart: false,
+                camPocketLimitPocket: false,
                 camPocketOutline: false,
                 camPocketOver: 0.25,
                 camPocketPlunge: 200,
